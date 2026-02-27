@@ -1,0 +1,45 @@
+name: Reporte Stock Critico Tiendas
+
+on:
+  schedule:
+    # ── Lun-Vie 08:00 Chile (UTC-3 verano = 11:00 UTC) ──
+    - cron: '0 11 * * 1-5'
+
+  # Permite disparar manualmente desde GitHub → Actions → Run workflow
+  workflow_dispatch:
+
+jobs:
+  send-stock-critico:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      # Snowflake
+      SNOWFLAKE_USER:      ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_PASSWORD:  ${{ secrets.SNOWFLAKE_PASSWORD }}
+      SNOWFLAKE_ACCOUNT:   ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      SNOWFLAKE_ROLE:      ${{ secrets.SNOWFLAKE_ROLE }}
+      SNOWFLAKE_DATABASE:  ${{ secrets.SNOWFLAKE_DATABASE }}
+      SNOWFLAKE_SCHEMA:    ${{ secrets.SNOWFLAKE_SCHEMA }}
+      # Email
+      OUTLOOK_EMAIL:       ${{ secrets.OUTLOOK_EMAIL }}
+      OUTLOOK_PASSWORD:    ${{ secrets.OUTLOOK_PASSWORD }}
+      SMTP_SERVER:         ${{ secrets.SMTP_SERVER }}
+      SMTP_PORT:           ${{ secrets.SMTP_PORT }}
+
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Enviar reporte stock critico tiendas
+        run: python scripts/send_stock_critico_tiendas.py

@@ -1,0 +1,34 @@
+.env
+.env.local
+users.json
+.snowflake_credentials*
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.xlsx
+*.csv
+!.env.example
+.DS_Store
+pandasai.log
+exports/
+
+# Claude dev context
+.claude/
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+
+# Allow persisted input files for projection
+!data/inputs/forecast.xlsx
+!data/inputs/compra.csv
+!data/inputs/precios.xlsx
+!data/inputs/metadata.json
+
+# Projection results cache (large files)
+data/inputs/*.parquet
+# Excepción: proy_result.parquet se necesita en GitHub Actions para alertas email
+!data/inputs/proy_result.parquet
