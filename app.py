@@ -367,10 +367,28 @@ def main_app():
         help=_tc_help,
     )
 
-    # PM filter (global)
+    # PM filter (global) — opciones cargadas desde cod_pm de vw_producto
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _load_pm_options(_conn):
+        try:
+            import pandas as pd
+            from db.queries import _PROD
+            df = pd.read_sql(
+                f"SELECT DISTINCT p.cod_pm FROM {_PROD} p "
+                f"WHERE p.cod_pm IS NOT NULL AND TRIM(CAST(p.cod_pm AS VARCHAR)) != '' "
+                f"ORDER BY p.cod_pm",
+                _conn,
+            )
+            return df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
+        except Exception:
+            return PM_NAMES  # fallback a lista estatica si falla
+
+    conn_for_pm = get_active_connection()
+    _pm_options = _load_pm_options(conn_for_pm) if conn_for_pm else PM_NAMES
+
     st.sidebar.selectbox(
         "👤 Product Manager",
-        ["Todos"] + PM_NAMES,
+        ["Todos"] + _pm_options,
         index=0,
         key="sidebar_pm_filter",
         help="Filtra todos los módulos por Product Manager. 'Todos' muestra todo.",

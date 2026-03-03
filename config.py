@@ -115,11 +115,12 @@ def filter_by_pm(df, pm_name):
 def apply_pm_filter(df):
     """Apply the sidebar PM filter to *df*.
 
-    Reads ``st.session_state["sidebar_pm_filter"]``.  When "Todos" is
-    selected (or no selection exists), returns *df* unchanged.
+    Peru: usa la columna COD_PM que viene de vw_producto via _PROD.
+    Si la columna COD_PM existe en df, filtra directo por valor.
+    Si no existe (tablas sin join a producto), devuelve df sin cambios.
 
-    If *df* lacks both AREA and LINEA columns, returns *df* unchanged
-    (nothing to filter on — e.g. sucursal/config tables).
+    Reads ``st.session_state["sidebar_pm_filter"]``.
+    "Todos" → sin filtro.
     """
     import streamlit as st
 
@@ -127,7 +128,11 @@ def apply_pm_filter(df):
     if pm_name == "Todos":
         return df
 
-    # Guard: nothing to filter on
+    # Peru: filtrar por columna COD_PM si existe
+    if "COD_PM" in df.columns:
+        return df[df["COD_PM"].astype(str) == str(pm_name)].copy()
+
+    # Fallback Chile: filtrar por AREA/LINEA mapping
     if "AREA" not in df.columns and "LINEA" not in df.columns:
         return df
 

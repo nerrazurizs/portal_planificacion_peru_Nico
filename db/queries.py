@@ -63,7 +63,8 @@ _PROD = """(
         moderno,
         outlet,
         tradicional,
-        oferta
+        oferta,
+        cod_pm
     FROM db_dimensiones.dim.vw_producto
 )"""
 
