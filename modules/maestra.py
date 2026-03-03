@@ -63,14 +63,15 @@ def render_maestra(conn):
 
     # Load distinct values for multiselects (cached, runs once per session)
     with lottie_spinner("snowflake"):
-        opts_area       = _load_distinct(conn, "AREA")
-        opts_linea      = _load_distinct(conn, "LINEA")
-        opts_sublinea   = _load_distinct(conn, "SUBLINEA")
-        opts_marca      = _load_distinct(conn, "MARCA")
-        opts_modelo     = _load_distinct(conn, "MODELO")
-        opts_mix        = _load_distinct(conn, "MIX_OFICIAL")
-        opts_proveedor  = _load_distinct(conn, "PROVEEDOR")
-        opts_cod_prov   = _load_distinct(conn, "COD_PROVEEDOR")
+        opts_area        = _load_distinct(conn, "AREA")
+        opts_linea       = _load_distinct(conn, "LINEA")
+        opts_sublinea    = _load_distinct(conn, "SUBLINEA")
+        opts_marca       = _load_distinct(conn, "MARCA")
+        opts_modelo      = _load_distinct(conn, "MODELO")
+        opts_mix         = _load_distinct(conn, "MIX_OFICIAL")
+        opts_proveedor   = _load_distinct(conn, "PROVEEDOR")
+        opts_cod_prov    = _load_distinct(conn, "COD_PROVEEDOR")
+        opts_procedencia = _load_distinct(conn, "PROCEDENCIA")
 
     filtros = {}
     with st.expander("Filtros de Busqueda", expanded=True):
@@ -88,7 +89,7 @@ def render_maestra(conn):
         filtros["sublinea"]   = c2.multiselect("Sublinea", opts_sublinea)
         filtros["marca"]      = c2.multiselect("Marca", opts_marca)
         filtros["modelo"]     = c2.multiselect("Modelo", opts_modelo)
-        filtros["procedencia"] = c2.multiselect("Procedencia", ["NACIONAL", "IMPORTADO"])
+        filtros["procedencia"] = c2.multiselect("Procedencia", opts_procedencia)
 
         # Col 3 — Mix Oficial, Proveedor, Cod Proveedor
         filtros["mix_oficial"]   = c3.multiselect("Mix Oficial", opts_mix)
