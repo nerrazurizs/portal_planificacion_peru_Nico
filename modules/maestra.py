@@ -101,25 +101,25 @@ def render_maestra(conn):
 
         # SKUs — exact match list
         if filtros["sku"]:
-            frag, p = build_in_clause("a.SKU_PRODUCTO", filtros["sku"])
+            frag, p = build_in_clause("p.SKU_PRODUCTO", filtros["sku"])
             append_condition(conditions, params_list, frag, p)
 
         # Nombre producto — ILIKE (contiene)
         if filtros["nom_producto"]:
-            frag, p = build_ilike("a.SKU_NOM_PRODUCTO", filtros["nom_producto"])
+            frag, p = build_ilike("p.NOM_PRODUCTO", filtros["nom_producto"])
             append_condition(conditions, params_list, frag, p)
 
         # Multiselect filters — IN clause (exact values from list)
         for field, col in [
-            ("area",          "a.AREA"),
-            ("linea",         "a.LINEA"),
-            ("sublinea",      "a.SUBLINEA"),
-            ("marca",         "a.MARCA"),
-            ("modelo",        "a.MODELO"),
-            ("procedencia",   "a.PROCEDENCIA"),
-            ("mix_oficial",   "a.MIX_OFICIAL"),
-            ("proveedor",     "a.PROVEEDOR"),
-            ("cod_proveedor", "a.COD_PROVEEDOR"),
+            ("area",          "p.AREA"),
+            ("linea",         "p.LINEA"),
+            ("sublinea",      "p.SUBLINEA"),
+            ("marca",         "p.MARCA"),
+            ("modelo",        "p.MODELO"),
+            ("procedencia",   "p.PROCEDENCIA"),
+            ("mix_oficial",   "p.MIX_OFICIAL"),
+            ("proveedor",     "p.PROVEEDOR"),
+            ("cod_proveedor", "p.COD_PROVEEDOR"),
         ]:
             if filtros[field]:
                 frag, p = build_in_clause(col, filtros[field])
