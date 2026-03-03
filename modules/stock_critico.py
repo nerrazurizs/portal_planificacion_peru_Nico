@@ -20,6 +20,17 @@ from config import COLORS, dorel_layout, apply_pm_filter
 
 
 AUTO_METRICS_FILE = "querystockcritico_metrics_auto.csv"
+
+# ---------------------------------------------------------------------------
+# Helper: condicion de antiguedad critica
+# Regla: >= 12 meses  O  sin fecha ingreso (null) con MOI alto (>= 6m o sin ventas).
+# Razon: si no tenemos fecha de ingreso pero el MOI es alto, el producto lleva
+# tiempo sin rotar — no deberia quedar excluido del analisis critico.
+# ---------------------------------------------------------------------------
+def _cond_ant_critico(ant_series, moi_series):
+    sin_fecha = ant_series.isna()
+    alto_moi  = (moi_series >= 6) | moi_series.isna()
+    return (ant_series >= 12) | (sin_fecha & alto_moi)
 AUTO_DETAIL_FILE = "querystockcritico_detail_auto.csv"
 AUTO_SALES_FILE = "ventadiaria_auto.csv"
 CHUNK_SIZE = 500_000
@@ -119,6 +130,11 @@ def _prepare_health_data(df):
         return pd.DataFrame(), pd.DataFrame()
 
     df = df.copy()
+    # Capturar "sin fecha ingreso" ANTES del fillna (null → 0 borra la distincion)
+    if "ANTIGUEDAD_MESES" in df.columns:
+        df["_SIN_FECHA"] = pd.to_numeric(df["ANTIGUEDAD_MESES"], errors="coerce").isna()
+    else:
+        df["_SIN_FECHA"] = False
     for c in ["STOCK_COSTO", "STOCK_UNIDADES", "MOI", "ANTIGUEDAD_MESES", "COSTO_PROM_90_CIA"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
@@ -137,6 +153,7 @@ def _prepare_health_data(df):
         agg_dict["MOI"] = "max"
     for c in available_dims:
         agg_dict[c] = "first"
+    agg_dict["_SIN_FECHA"] = "any"
 
     sku = df.groupby("SKU_PRODUCTO", as_index=False).agg(agg_dict)
 
@@ -158,8 +175,11 @@ def _prepare_health_data(df):
     sku["TIER_MOI"] = _classify_health_tier(sku["MOI"])
     sku["TIER_ANTIGUEDAD"] = _classify_health_tier(sku["ANTIGUEDAD_MESES"])
 
-    # Only exclude if ANTIGUEDAD is unknown (no ingress date)
-    mask_valid = (sku["TIER_ANTIGUEDAD"] != "Sin Info") & (sku["ANTIGUEDAD_MESES"] > 0)
+    # Sin fecha + MOI alto → reclasificar como >=24m (peor caso: no sabemos cuanto lleva)
+    mask_sin_fecha_alto_moi = sku["_SIN_FECHA"] & ((sku["MOI"] >= 6) | sku["SIN_MOI"])
+    sku.loc[mask_sin_fecha_alto_moi, "TIER_ANTIGUEDAD"] = ">=24m"
+
+    mask_valid = (sku["ANTIGUEDAD_MESES"] > 0) | mask_sin_fecha_alto_moi
     df_valid = sku[mask_valid].copy()
     df_sin_info = sku[~mask_valid].copy()
 
@@ -379,7 +399,7 @@ def render_stock_dashboard(conn):
         # Identify critical SKUs
         df_last_m = df_m[df_m["FECHA"] == latest_date_metrics].copy()
         cond_moi_crit = (df_last_m["MOI"] >= 12) | (df_last_m["MOI"].isna())
-        cond_ant_crit = (df_last_m["ANTIGUEDAD_MESES"] >= 12) & (df_last_m["ANTIGUEDAD_MESES"].notna())
+        cond_ant_crit = _cond_ant_critico(df_last_m["ANTIGUEDAD_MESES"], df_last_m["MOI"])
         cond_crit = cond_moi_crit & cond_ant_crit
         crit_skus = set(df_last_m[cond_crit]["SKU_PRODUCTO"].unique())
 
@@ -514,7 +534,7 @@ def render_stock_dashboard(conn):
 
         # Recompute critical SKUs after filtering
         cond_moi_crit = (df_last_m["MOI"] >= 12) | (df_last_m["MOI"].isna())
-        cond_ant_crit = (df_last_m["ANTIGUEDAD_MESES"] >= 12) & (df_last_m["ANTIGUEDAD_MESES"].notna())
+        cond_ant_crit = _cond_ant_critico(df_last_m["ANTIGUEDAD_MESES"], df_last_m["MOI"])
         cond_crit = cond_moi_crit & cond_ant_crit
         crit_skus = set(df_last_m[cond_crit]["SKU_PRODUCTO"].unique())
 
@@ -821,7 +841,7 @@ def render_stock_dashboard(conn):
         df_daily_totals.columns = ["FECHA", "STOCK_TOTAL"]
 
         cond_moi_all = (df_m["MOI"] >= 12) | (df_m["MOI"].isna())
-        cond_ant_all = (df_m["ANTIGUEDAD_MESES"] >= 12) & (df_m["ANTIGUEDAD_MESES"].notna())
+        cond_ant_all = _cond_ant_critico(df_m["ANTIGUEDAD_MESES"], df_m["MOI"])
         df_m["IS_CRITICO"] = cond_moi_all & cond_ant_all
 
         evolucion_critico = (
@@ -1107,7 +1127,10 @@ def render_stock_dashboard(conn):
         # ---- CHART 6: Top 15 Real Risk ----
         st.markdown("### 6. Top 15 Productos con Riesgo Real (MOI>=12 o Sin Venta | Antiguedad>=12)")
         top_risk = (
-            df_last_m[((df_last_m["MOI"] >= 12) | (df_last_m["MOI"].isna())) & (df_last_m["ANTIGUEDAD_MESES"] >= 12)]
+            df_last_m[
+                ((df_last_m["MOI"] >= 12) | (df_last_m["MOI"].isna())) &
+                _cond_ant_critico(df_last_m["ANTIGUEDAD_MESES"], df_last_m["MOI"])
+            ]
             .sort_values("STOCK_COSTO", ascending=False)
             .head(15)
             .copy()
@@ -1433,8 +1456,7 @@ def render_stock_dashboard(conn):
         if "LINEA" in df_last_m.columns:
             _crit_mask_fin = (
                 ((df_last_m["MOI"] >= 12) | (df_last_m["MOI"].isna()))
-                & (df_last_m["ANTIGUEDAD_MESES"] >= 12)
-                & (df_last_m["ANTIGUEDAD_MESES"].notna())
+                & _cond_ant_critico(df_last_m["ANTIGUEDAD_MESES"], df_last_m["MOI"])
             )
             _crit_lines = (
                 df_last_m[_crit_mask_fin]
@@ -2399,7 +2421,7 @@ def render_stock_dashboard(conn):
             with lottie_spinner("export"):
                 try:
                     cond_moi = (df_last_m["MOI"] >= 12) | (df_last_m["MOI"].isna())
-                    cond_ant = df_last_m["ANTIGUEDAD_MESES"] >= 12
+                    cond_ant = _cond_ant_critico(df_last_m["ANTIGUEDAD_MESES"], df_last_m["MOI"])
                     df_crit_650 = df_last_m[cond_moi & cond_ant].copy()
                     df_crit_650["STOCK_UNIDADES"] = 0
 
