@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
-from db.queries import QUERY_STOCK_BASE
+from db.queries import QUERY_STOCK_BASE, _PROD
 from config import apply_pm_filter
 from utils.sql_builder import build_in_clause, build_ilike, append_condition
 from utils.filters import limpiar_lista, fmt_clp
@@ -13,8 +13,8 @@ from utils.ui_animations import lottie_spinner
 def _load_distinct(_conn, col: str) -> list[str]:
     """Load distinct non-null values for a dimension column. Cached 1 hour."""
     df = pd.read_sql(
-        f"SELECT DISTINCT {col} FROM db_dimensiones.dim.vw_producto "
-        f"WHERE {col} IS NOT NULL AND TRIM({col}) != '' ORDER BY {col}",
+        f"SELECT DISTINCT p.{col} FROM {_PROD} p "
+        f"WHERE p.{col} IS NOT NULL AND TRIM(CAST(p.{col} AS VARCHAR)) != '' ORDER BY p.{col}",
         _conn,
     )
     return df.iloc[:, 0].dropna().astype(str).str.strip().tolist()

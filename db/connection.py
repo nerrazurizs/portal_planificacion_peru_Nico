@@ -22,6 +22,14 @@ def _create_connection():
         database=os.environ.get("SNOWFLAKE_DATABASE", ""),
         schema=os.environ.get("SNOWFLAKE_SCHEMA", ""),
         authenticator=authenticator,
+        login_timeout=60,           # timeout para autenticar (mas tiempo para MFA)
+        network_timeout=90,         # 90s max por query — evita colgarse para siempre.
+                                    # Chile no lo necesita (tablas rapidas), Peru si.
+                                    # Queries que pasen 90s fallaran con error visible
+                                    # en el expander del dashboard, no colgan la app.
+        # MFA token caching: la 1ra vez pide el MFA, despues usa el token
+        # guardado localmente sin volver a pedir el segundo factor.
+        client_store_temporary_credential=True,
     )
     if authenticator == "snowflake":
         connect_kwargs["password"] = os.environ["SNOWFLAKE_PASSWORD"]

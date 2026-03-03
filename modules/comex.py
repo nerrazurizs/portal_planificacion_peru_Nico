@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from db.queries import QUERY_COMEX_BASE
+from db.queries import QUERY_COMEX_BASE, _PROD
 from utils.sql_builder import (
     build_in_clause,
     build_ilike,
@@ -18,10 +18,10 @@ from config import COLORS, dorel_layout, apply_pm_filter
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _load_distinct(_conn, col):
-    """Load distinct non-null values for a dv_producto column. Cached 1 hour."""
+    """Load distinct non-null values for a vw_producto column. Cached 1 hour."""
     df = pd.read_sql(
-        f"SELECT DISTINCT {col} FROM db_dimensiones.dim.vw_producto "
-        f"WHERE {col} IS NOT NULL AND TRIM({col}) != '' ORDER BY {col}",
+        f"SELECT DISTINCT p.{col} FROM {_PROD} p "
+        f"WHERE p.{col} IS NOT NULL AND TRIM(CAST(p.{col} AS VARCHAR)) != '' ORDER BY p.{col}",
         _conn,
     )
     return df.iloc[:, 0].dropna().astype(str).str.strip().tolist()

@@ -1,11 +1,180 @@
+# ============================================================
+# PERU COLUMN NORMALIZATION WRAPPERS
+# These inline-view wrappers expose the same column names as
+# Chile code expects, bridging the Peru table schema differences.
+# ft_vcm: ID_PERIODO->fecha, COD_PRODUCTO->sku_producto, UNIDADES->cantidad, aporte computed
+# vw_producto: COD_PRODUCTO->sku_producto, DESCRIPCION_PRODUCTO->nom_producto,
+#              GRUPO->area, FAMILIA->sublinea, FEC_ULT_ING_CD->ultimo_ingreso_cd
+# ft_compras: NUMERO_OC->po, CODIGO_PRODUCTO_OC->sku_producto, CANTIDAD_OC->cantidad_final_corregida
+#             CANTIDAD_INGRESADA->cantidad_carpeta_recepcionada, MONTO_TOTAL_OC_MN->montomn
+#             FECHA_INGRESO_CD->fecha_recepcion_en_cd, FECHA_EMBARQUE->etd, FECHA_ETA->eta
+# ============================================================
+
+_VCM = """(
+    SELECT
+        TRY_TO_DATE(CAST(id_periodo AS VARCHAR), 'YYYYMMDD') AS fecha,
+        cod_producto    AS sku_producto,
+        unidades        AS cantidad,
+        (neto - costo)  AS aporte,
+        cod_canal,
+        cod_ccosto,
+        cod_agencia,
+        id_venta,
+        id_venta_detalle,
+        cod_cliente,
+        cod_clientedireccion,
+        cod_moneda,
+        neto,
+        costo,
+        total,
+        igv,
+        descuento,
+        precio_unitario,
+        valor_descuento,
+        flg_eliminado,
+        promocion
+    FROM db_finanzas.fct.ft_vcm
+)"""
+
+_PROD = """(
+    SELECT
+        cod_producto            AS sku_producto,
+        descripcion_producto    AS nom_producto,
+        grupo                   AS area,
+        linea,
+        familia                 AS sublinea,
+        marca,
+        modelo,
+        mix_oficial,
+        mix,
+        procedencia,
+        cod_proveedor,
+        proveedor,
+        costo                   AS ultimo_costo,
+        pvp,
+        precio_fob              AS costo_fob_usd,
+        tipo_cambio,
+        factor_importacion,
+        fec_ult_ing_cd          AS ultimo_ingreso_cd,
+        meses_ingreso_cd,
+        rango_meses_aging,
+        costo_proyectado,
+        sku_proveedor,
+        moderno,
+        outlet,
+        tradicional,
+        oferta
+    FROM db_dimensiones.dim.vw_producto
+)"""
+
+_COMPRAS = """(
+    SELECT
+        CAST(numero_oc AS VARCHAR)                                   AS po,
+        codigo_producto_oc                                           AS sku_producto,
+        cantidad_oc                                                  AS cantidad_final_corregida,
+        cantidad_ingresada                                           AS cantidad_carpeta_recepcionada,
+        monto_total_oc_mn                                            AS montomn,
+        precio_unitario_oc                                           AS purchprice,
+        monto_total_oc                                               AS lineamount,
+        TRY_TO_DATE(CAST(fecha_emision_oc AS VARCHAR), 'YYYYMMDD')  AS fecha_entrega,
+        COALESCE(
+            TRY_TO_DATE(CAST(fecha_embarque AS VARCHAR), 'YYYY-MM-DD'),
+            TRY_TO_DATE(CAST(fecha_emision_oc AS VARCHAR), 'YYYYMMDD')
+        )                                                            AS etd,
+        COALESCE(
+            TRY_TO_DATE(CAST(fecha_eta AS VARCHAR), 'YYYY-MM-DD'),
+            DATEADD(day, 47, TRY_TO_DATE(CAST(fecha_emision_oc AS VARCHAR), 'YYYYMMDD'))
+        )                                                            AS eta,
+        TRY_TO_DATE(CAST(fecha_ingreso_cd AS VARCHAR), 'YYYY-MM-DD') AS fecha_recepcion_en_cd,
+        CAST(tipocambio AS FLOAT)                                    AS paridad_moneda,
+        CAST(tipocambio AS FLOAT)                                    AS dolar_sistema,
+        CAST(moneda AS VARCHAR)                                      AS cod_moneda,
+        CAST(codigo_proveedor_oc AS VARCHAR)                         AS cod_proveedor,
+        situacion                                                    AS nom_status,
+        estatus,
+        NULL::VARCHAR                                                AS nom_proveedor,
+        NULL::VARCHAR                                                AS nom_producto,
+        NULL::VARCHAR                                                AS carpeta_comex,
+        NULL::VARCHAR                                                AS factura,
+        NULL::VARCHAR                                                AS nom_estadoaprobacion,
+        CASE WHEN fecha_ingreso_cd IS NULL
+             THEN 'Si' ELSE 'No'
+        END                                                          AS entransito,
+        NULL::BOOLEAN                                                AS tiene_bl,
+        NULL::VARCHAR                                                AS tiene_carpeta_comex,
+        NULL::VARCHAR                                                AS status_booking,
+        NULL::VARCHAR                                                AS forma_pago,
+        NULL::VARCHAR                                                AS area,
+        NULL::VARCHAR                                                AS linea,
+        NULL::VARCHAR                                                AS sublinea,
+        NULL::VARCHAR                                                AS marca,
+        NULL::VARCHAR                                                AS modelo,
+        NULL::FLOAT                                                  AS factor_importacion,
+        codigo_sucursal,
+        procedencia_oc,
+        almacen_ingreso_cd
+    FROM db_supply.fct.ft_compras
+)"""
+
+# ============================================================
+# INSTOCK WRAPPERS — ht_in_stock y ht_in_stock_cd de Peru no tienen
+# todas las columnas CANTIDAD_PROM_* que Chile. Se exponen como NULL
+# para compatibilidad con el codigo Python existente.
+#
+# Columnas confirmadas como EXISTENTES en Peru:
+#   ht_in_stock    : fecha, sku_producto, cod_bodega, stock_unidades,
+#                    stock_costo, min_exhibicion, perfil, ultimo_costo,
+#                    mix_oficial, cantidad_prom_90, cantidad_prom_180
+#   ht_in_stock_cd : fecha, sku_producto, stock_unidades, stock_costo,
+#                    cantidad_prom_90_cia, cantidad_prom_180_cia, costo_prom_90_cia
+#
+# Columnas FALTANTES (NULL en wrapper):
+#   ht_in_stock    : cantidad_prom_365, cantidad_prom_*b, in_stock_presentacion
+#   ht_in_stock_cd : cantidad_prom_365_cia
+# ============================================================
+
+_INSTOCK = """(
+    SELECT
+        fecha,
+        sku_producto,
+        cod_bodega,
+        stock_unidades,
+        stock_costo,
+        min_exhibicion,
+        perfil,
+        ultimo_costo,
+        mix_oficial,
+        cantidad_prom_90,
+        cantidad_prom_180,
+        NULL::FLOAT  AS cantidad_prom_365,
+        NULL::FLOAT  AS cantidad_prom_90b,
+        NULL::FLOAT  AS cantidad_prom_180b,
+        NULL::FLOAT  AS cantidad_prom_365b,
+        NULL::FLOAT  AS in_stock_presentacion
+    FROM db_supply.hst.ht_in_stock
+)"""
+
+_INSTOCK_CD = """(
+    SELECT
+        fecha,
+        sku_producto,
+        stock_unidades,
+        stock_costo,
+        cantidad_prom_90_cia,
+        cantidad_prom_180_cia,
+        NULL::FLOAT  AS cantidad_prom_365_cia,
+        costo_prom_90_cia
+    FROM db_supply.hst.ht_in_stock_cd
+)"""
+
 # Stock Base (parametrized - uses %s placeholders for fecha_inicio and fecha_fin)
-QUERY_STOCK_BASE = """
+QUERY_STOCK_BASE = f"""
 select
   a.fecha,
   a.sku_producto,
   a.cod_bodega,
   coalesce(b.id_sucursal, a.cod_bodega) as id_sucursal,
-  coalesce(b.descripcion_sucursal, 'Sin descripción') as descripcion_sucursal,
+  coalesce(b.descripcion_sucursal, 'Sin descripcion') as descripcion_sucursal,
   case
     when b.canal_de_distribucion is not null then b.canal_de_distribucion
     when a.cod_bodega in ('1100001', '1100002') then 'CD'
@@ -45,231 +214,180 @@ select
     when datediff('day', c.ultimo_ingreso_cd, current_date()) / 30.44 >= 3  then '>= 3 meses'
     else '< 3 meses'
   end as rango_antiguedad
-from db_supply.hst.vw_in_stock a
+from db_supply.hst.ht_in_stock a
 left join db_syncros.public.coo_maestro_sucursal b
   on a.cod_bodega = b.id_sucursal
-left join db_dimensiones.dim.vw_producto c
+left join {_PROD} c
   on a.sku_producto = c.sku_producto
-left join db_supply.hst.vw_in_stock_cd d
+left join db_supply.hst.ht_in_stock_cd d
   on a.fecha = d.fecha
  and a.sku_producto = d.sku_producto
 where a.fecha >= %s and a.fecha <= %s
 group by 1,2,3,4,5,6,7,8,9,10,11,12,13
 """
 
-QUERY_MAESTRA = """
-select a.*
-from db_dimensiones.dim.vw_producto a
+QUERY_MAESTRA = f"""
+select p.*
+from {_PROD} p
 """
 
-# ── Dashboard ejecutivo (queries livianas) ──
+# -- Dashboard ejecutivo (queries livianas) --
 
-QUERY_DASHBOARD_VENTAS_MTD = """
+QUERY_DASHBOARD_VENTAS_MTD = f"""
 select
     a.cod_canal,
     sum(a.cantidad) as cantidad_mtd,
     sum(a.neto)     as neto_mtd
-from db_finanzas.fct.ft_vcm a
-left join db_dimensiones.dim.vw_producto c on a.sku_producto = c.sku_producto
+from {_VCM} a
 where a.cantidad > 0
   and a.fecha >= date_trunc('month', current_date())
   and a.fecha <  current_date()
 group by 1
 """
 
-QUERY_DASHBOARD_COMEX = """
+QUERY_DASHBOARD_COMEX = f"""
 select
-    count(distinct po) as n_pos,
-    sum(cantidad_final_corregida) as und_transito,
-    sum(montomn) as costo_transito
-from db_supply.fct.ft_compras
-where fecha_recepcion_en_cd is null
-  and cantidad_final_corregida > 0
+    count(distinct c.po) as n_pos,
+    sum(c.cantidad_final_corregida) as und_transito,
+    sum(c.montomn) as costo_transito
+from {_COMPRAS} c
+where c.fecha_recepcion_en_cd is null
+  and c.cantidad_final_corregida > 0
 """
 
-QUERY_COMEX_BASE = """
+QUERY_COMEX_BASE = f"""
 SELECT *,
-    CASE
-        WHEN CARPETA_COMEX IS NULL OR CARPETA_COMEX = '' THEN FECHA_ENTREGA
-        ELSE ETD
-    END as ETD_CALC,
-    CASE
-        WHEN CARPETA_COMEX IS NULL OR CARPETA_COMEX = '' THEN DATEADD(day, 47, FECHA_ENTREGA)
-        ELSE ETA
-    END as ETA_CALC
-FROM db_supply.fct.ft_compras
+    c.etd AS ETD_CALC,
+    c.eta AS ETA_CALC
+FROM {_COMPRAS} c
 WHERE 1=1
 """
 
-# POs atrasadas: ETA calculada ya paso y aun no han llegado al CD
-# POs atrasadas: ETA calculada + 10 dias de buffer (agenda/programacion CD) ya paso
-QUERY_COMEX_ATRASADAS = """
+# POs atrasadas: ETA ya paso y aun no han llegado al CD
+QUERY_COMEX_ATRASADAS = f"""
 SELECT
-    PO,
-    SKU_PRODUCTO,
-    NOM_PRODUCTO,
-    NOM_PROVEEDOR,
-    CARPETA_COMEX,
-    FECHA_ENTREGA,
-    ETD,
-    ETA,
-    CASE
-        WHEN CARPETA_COMEX IS NULL OR CARPETA_COMEX = '' THEN DATEADD(day, 47, FECHA_ENTREGA)
-        ELSE ETA
-    END AS ETA_CALC,
-    GREATEST(0, COALESCE(CANTIDAD_FINAL_CORREGIDA, 0)
-                - COALESCE(CANTIDAD_CARPETA_RECEPCIONADA, 0)) AS QTY_PENDIENTE,
-    CANTIDAD_FINAL_CORREGIDA,
-    MONTOMN,
-    AREA,
-    LINEA,
-    SUBLINEA,
-    MARCA,
+    c.po,
+    c.sku_producto,
+    c.nom_producto,
+    c.nom_proveedor,
+    c.carpeta_comex,
+    c.fecha_entrega,
+    c.etd,
+    c.eta,
+    c.eta AS ETA_CALC,
+    GREATEST(0, COALESCE(c.cantidad_final_corregida, 0)
+                - COALESCE(c.cantidad_carpeta_recepcionada, 0)) AS QTY_PENDIENTE,
+    c.cantidad_final_corregida,
+    c.montomn,
+    c.area,
+    c.linea,
+    c.sublinea,
+    c.marca,
     DATEDIFF('day',
-        DATEADD(day, 10,
-            CASE
-                WHEN CARPETA_COMEX IS NULL OR CARPETA_COMEX = ''
-                THEN DATEADD(day, 47, FECHA_ENTREGA)
-                ELSE ETA
-            END
-        ),
+        DATEADD(day, 10, c.eta),
         CURRENT_DATE()
     ) AS DIAS_ATRASO
-FROM db_supply.fct.ft_compras
-WHERE FECHA_RECEPCION_EN_CD IS NULL
-  AND CANTIDAD_FINAL_CORREGIDA > 0
-  AND PO LIKE 'PO-%%'
-  AND DATEADD(day, 10,
-        CASE
-            WHEN CARPETA_COMEX IS NULL OR CARPETA_COMEX = ''
-            THEN DATEADD(day, 47, FECHA_ENTREGA)
-            ELSE ETA
-        END
-      ) < CURRENT_DATE()
-ORDER BY ETA_CALC ASC
+FROM {_COMPRAS} c
+WHERE c.fecha_recepcion_en_cd IS NULL
+  AND c.cantidad_final_corregida > 0
+  AND DATEADD(day, 10, c.eta) < CURRENT_DATE()
+ORDER BY c.eta ASC
 """
 
-# POs sin carpeta comex creada (CARPETA_COMEX es NULL o vacia)
-QUERY_COMEX_SIN_CARPETA = """
+# POs sin carpeta comex creada
+QUERY_COMEX_SIN_CARPETA = f"""
 SELECT
-    PO,
-    SKU_PRODUCTO,
-    NOM_PRODUCTO,
-    NOM_PROVEEDOR,
-    FECHA_ENTREGA,
-    CANTIDAD_FINAL_CORREGIDA,
-    MONTOMN,
-    AREA,
-    LINEA,
-    DATEDIFF('day', FECHA_ENTREGA, CURRENT_DATE()) AS DIAS_DESDE_ENTREGA
-FROM db_supply.fct.ft_compras
-WHERE (CARPETA_COMEX IS NULL OR TRIM(CARPETA_COMEX) = '')
-  AND FECHA_RECEPCION_EN_CD IS NULL
-  AND CANTIDAD_FINAL_CORREGIDA > 0
-  AND PO LIKE 'PO-%%'
-ORDER BY FECHA_ENTREGA ASC
+    c.po,
+    c.sku_producto,
+    c.nom_producto,
+    c.nom_proveedor,
+    c.fecha_entrega,
+    c.cantidad_final_corregida,
+    c.montomn,
+    c.area,
+    c.linea,
+    DATEDIFF('day', c.fecha_entrega, CURRENT_DATE()) AS DIAS_DESDE_ENTREGA
+FROM {_COMPRAS} c
+WHERE c.fecha_recepcion_en_cd IS NULL
+  AND c.cantidad_final_corregida > 0
+ORDER BY c.fecha_entrega ASC
 """
 
-# POs en transito sin diario de factura creado
-QUERY_COMEX_SIN_FACTURA = """
+# POs en transito sin factura
+QUERY_COMEX_SIN_FACTURA = f"""
 SELECT
-    PO,
-    SKU_PRODUCTO,
-    NOM_PRODUCTO,
-    NOM_PROVEEDOR,
-    CARPETA_COMEX,
-    CASE
-        WHEN CARPETA_COMEX IS NULL OR CARPETA_COMEX = '' THEN FECHA_ENTREGA
-        ELSE ETD
-    END AS ETD_CALC,
-    CASE
-        WHEN CARPETA_COMEX IS NULL OR CARPETA_COMEX = '' THEN DATEADD(day, 47, FECHA_ENTREGA)
-        ELSE ETA
-    END AS ETA_CALC,
-    GREATEST(0, COALESCE(CANTIDAD_FINAL_CORREGIDA, 0)
-                - COALESCE(CANTIDAD_CARPETA_RECEPCIONADA, 0)) AS QTY_PENDIENTE,
-    CANTIDAD_FINAL_CORREGIDA,
-    MONTOMN,
-    AREA,
-    LINEA,
-    SUBLINEA,
-    MARCA
-FROM db_supply.fct.ft_compras
-WHERE FECHA_RECEPCION_EN_CD IS NULL
-  AND CANTIDAD_FINAL_CORREGIDA > 0
-  AND PO LIKE 'PO-%%'
-  AND CASE
-        WHEN CARPETA_COMEX IS NULL OR CARPETA_COMEX = '' THEN FECHA_ENTREGA
-        ELSE ETD
-      END <= CURRENT_DATE()
-  AND FACTURA IS NULL
-ORDER BY ETA_CALC ASC
+    c.po,
+    c.sku_producto,
+    c.nom_producto,
+    c.nom_proveedor,
+    c.carpeta_comex,
+    c.etd   AS ETD_CALC,
+    c.eta   AS ETA_CALC,
+    GREATEST(0, COALESCE(c.cantidad_final_corregida, 0)
+                - COALESCE(c.cantidad_carpeta_recepcionada, 0)) AS QTY_PENDIENTE,
+    c.cantidad_final_corregida,
+    c.montomn,
+    c.area,
+    c.linea,
+    c.sublinea,
+    c.marca
+FROM {_COMPRAS} c
+WHERE c.fecha_recepcion_en_cd IS NULL
+  AND c.cantidad_final_corregida > 0
+  AND c.etd <= CURRENT_DATE()
+  AND c.factura IS NULL
+ORDER BY c.eta ASC
 """
 
 # POs proximas a llegar (ETA within next 45 days)
-QUERY_COMEX_PROXIMAS = """
+QUERY_COMEX_PROXIMAS = f"""
 SELECT
-    PO,
-    SKU_PRODUCTO,
-    NOM_PRODUCTO,
-    NOM_PROVEEDOR,
-    CARPETA_COMEX,
+    c.po,
+    c.sku_producto,
+    c.nom_producto,
+    c.nom_proveedor,
+    c.carpeta_comex,
+    c.etd   AS ETD_CALC,
+    c.eta   AS ETA_CALC,
+    GREATEST(0, COALESCE(c.cantidad_final_corregida, 0)
+                - COALESCE(c.cantidad_carpeta_recepcionada, 0)) AS QTY_PENDIENTE,
     CASE
-        WHEN CARPETA_COMEX IS NULL OR CARPETA_COMEX = '' THEN FECHA_ENTREGA
-        ELSE ETD
-    END AS ETD_CALC,
-    CASE
-        WHEN CARPETA_COMEX IS NULL OR CARPETA_COMEX = '' THEN DATEADD(day, 47, FECHA_ENTREGA)
-        ELSE ETA
-    END AS ETA_CALC,
-    GREATEST(0, COALESCE(CANTIDAD_FINAL_CORREGIDA, 0)
-                - COALESCE(CANTIDAD_CARPETA_RECEPCIONADA, 0)) AS QTY_PENDIENTE,
-    CASE
-        WHEN COALESCE(CANTIDAD_FINAL_CORREGIDA, 0) > 0
-        THEN GREATEST(0, COALESCE(CANTIDAD_FINAL_CORREGIDA, 0)
-                         - COALESCE(CANTIDAD_CARPETA_RECEPCIONADA, 0))
-             / CANTIDAD_FINAL_CORREGIDA
-             * COALESCE(MONTOMN, 0)
+        WHEN COALESCE(c.cantidad_final_corregida, 0) > 0
+        THEN GREATEST(0, COALESCE(c.cantidad_final_corregida, 0)
+                         - COALESCE(c.cantidad_carpeta_recepcionada, 0))
+             / c.cantidad_final_corregida
+             * COALESCE(c.montomn, 0)
         ELSE 0
     END AS MONTO_PENDIENTE_CLP,
-    CANTIDAD_FINAL_CORREGIDA,
-    MONTOMN,
-    AREA,
-    LINEA,
-    SUBLINEA,
-    MARCA,
-    DATEDIFF('day', CURRENT_DATE(),
-        CASE
-            WHEN CARPETA_COMEX IS NULL OR CARPETA_COMEX = '' THEN DATEADD(day, 47, FECHA_ENTREGA)
-            ELSE ETA
-        END
-    ) AS DIAS_HASTA_ETA
-FROM db_supply.fct.ft_compras
-WHERE FECHA_RECEPCION_EN_CD IS NULL
-  AND CANTIDAD_FINAL_CORREGIDA > 0
-  AND PO LIKE 'PO-%%'
-  AND CASE
-        WHEN CARPETA_COMEX IS NULL OR CARPETA_COMEX = '' THEN DATEADD(day, 47, FECHA_ENTREGA)
-        ELSE ETA
-      END BETWEEN CURRENT_DATE() AND DATEADD(day, 45, CURRENT_DATE())
-ORDER BY ETA_CALC ASC
+    c.cantidad_final_corregida,
+    c.montomn,
+    c.area,
+    c.linea,
+    c.sublinea,
+    c.marca,
+    DATEDIFF('day', CURRENT_DATE(), c.eta) AS DIAS_HASTA_ETA
+FROM {_COMPRAS} c
+WHERE c.fecha_recepcion_en_cd IS NULL
+  AND c.cantidad_final_corregida > 0
+  AND c.eta BETWEEN CURRENT_DATE() AND DATEADD(day, 45, CURRENT_DATE())
+ORDER BY c.eta ASC
 """
 
-# Precio promedio de venta por SKU (ultimos 90 dias, para VN_POTENCIAL)
-QUERY_PRECIO_PROM_SKU = """
+# Precio promedio de venta por SKU (ultimos 90 dias)
+QUERY_PRECIO_PROM_SKU = f"""
 SELECT
     a.sku_producto,
     SUM(a.neto) / NULLIF(SUM(a.cantidad), 0) AS PRECIO_PROM_90D,
     SUM(a.cantidad) AS UNIDADES_90D,
     SUM(a.neto) AS NETO_90D
-FROM db_finanzas.fct.ft_vcm a
+FROM {_VCM} a
 WHERE a.fecha >= DATEADD('day', -90, CURRENT_DATE())
   AND a.cantidad > 0
 GROUP BY 1
 """
 
-# Canasta de Productos (basket analysis)
-QUERY_CANASTA = """
+# Canasta de Productos
+QUERY_CANASTA = f"""
 SELECT
     a.fecha,
     a.id_venta,
@@ -285,15 +403,15 @@ SELECT
     c.linea,
     c.sublinea,
     c.marca
-FROM db_finanzas.fct.ft_vcm a
-LEFT JOIN db_dimensiones.dim.vw_producto c
+FROM {_VCM} a
+LEFT JOIN {_PROD} c
     ON a.sku_producto = c.sku_producto
 WHERE a.cantidad > 0
   AND a.fecha >= %s
   AND a.fecha <= %s
 """
 
-# Pasillo Infinito
+# Pasillo Infinito (tabla puede no existir en Peru)
 QUERY_PASILLO_INFINITO = """
 SELECT
     fecha,
@@ -311,37 +429,29 @@ WHERE estado = 'Pagado'
 QUERY_SYNCRO_CONFIG = "select * from db_syncros.public.coo_config_sku_sucursal"
 QUERY_SYNCRO_SUCURSAL = "select * from db_syncros.public.coo_maestro_sucursal"
 
-# Dimension Tiendas — enriquecida con lat/lon, cluster, supervisor, m2, distrito, zona, etc.
-# Tabla real: db_dimensiones.dim.dv_tienda
-# Join: coo_maestro_sucursal.id_sucursal = dv_tienda."Cod_Bodega"
-# Columnas con espacios/mayúsculas deben ir entre comillas dobles en Snowflake.
-# Lat/lon y Mt2 Totales están almacenados como VARCHAR con coma decimal → REPLACE+TRY_TO_DOUBLE.
-# Activa = Status = 'Abierta'.
 QUERY_DT_TIENDA = """
 SELECT
     b.id_sucursal,
     b.descripcion_sucursal,
     b.canal_de_distribucion,
-    coalesce(TRY_TO_DOUBLE(REPLACE(CAST(t."Latitud"      AS VARCHAR), ',', '.')), 0) AS latitud,
-    coalesce(TRY_TO_DOUBLE(REPLACE(CAST(t."Longitud"     AS VARCHAR), ',', '.')), 0) AS longitud,
-    coalesce(t."Cluster Final",  'Sin Cluster')      AS cluster,
-    coalesce(t."Supervisor",     'Sin Supervisor')   AS supervisor,
-    coalesce(t."Grupo",          'Sin Grupo')        AS grupo,
-    coalesce(t."Tipo",           'Sin Tipo')         AS tipo,
-    coalesce(TRY_TO_DOUBLE(REPLACE(CAST(t."Mt2 Totales" AS VARCHAR), ',', '.')), 0) AS mts2,
-    coalesce(t."Direccion",      '')                 AS direccion,
-    coalesce(CAST(t."Distrito" AS VARCHAR), 'Sin Distrito') AS distrito,
-    coalesce(t."Ciudad",         'Sin Ciudad')       AS ciudad,
-    coalesce(t."Comuna",         'Sin Comuna')       AS comuna,
-    coalesce(t."Zona",           'Sin Zona')         AS zona,
-    coalesce(t."Operador",       'Sin Operador')     AS operador,
-    CASE WHEN t."Status" = 'Abierta' THEN TRUE ELSE FALSE END AS activa
+    0::FLOAT             AS latitud,
+    0::FLOAT             AS longitud,
+    'Sin Cluster'        AS cluster,
+    'Sin Supervisor'     AS supervisor,
+    'Sin Grupo'          AS grupo,
+    'Sin Tipo'           AS tipo,
+    0::FLOAT             AS mts2,
+    ''                   AS direccion,
+    'Sin Distrito'       AS distrito,
+    'Sin Ciudad'         AS ciudad,
+    'Sin Comuna'         AS comuna,
+    'Sin Zona'           AS zona,
+    'Sin Operador'       AS operador,
+    TRUE                 AS activa
 FROM db_syncros.public.coo_maestro_sucursal b
-LEFT JOIN db_dimensiones.dim.dv_tienda t
-    ON b.id_sucursal = t."Cod_Bodega"
 """
 
-# Perfil resumen: sucursales con perfil > 0 y total unidades perfil por SKU
+# Perfil resumen
 QUERY_PERFIL_RESUMEN = """
 select
     c.id_material as sku_producto,
@@ -352,53 +462,51 @@ where c.min_inv_requerido > 0
 group by 1
 """
 QUERY_SYNCRO_PRODUCTO = "select * from db_syncros.public.coo_maestro_producto"
-QUERY_SYNCRO_LEADTIMES = """
+QUERY_SYNCRO_LEADTIMES = f"""
 SELECT
     t.*,
-    p.NOM_PRODUCTO,
-    p.MARCA,
-    p.LINEA,
-    p.SUBLINEA,
-    p.AREA
+    p.nom_producto,
+    p.marca,
+    p.linea,
+    p.sublinea,
+    p.area
 FROM db_syncros.PUBLIC.coo_rel_proveedor_sku t
-LEFT JOIN db_dimensiones.dim.vw_producto p
-    ON t.ID_MATERIAL = p.SKU_PRODUCTO
+LEFT JOIN {_PROD} p
+    ON t.ID_MATERIAL = p.sku_producto
 """
 
 # Ventas MTD
-QUERY_VENTAS_MTD = """
+QUERY_VENTAS_MTD = f"""
 select
     a.cod_canal,
     a.sku_producto,
     sum(a.cantidad) as cantidad_mtd,
     sum(a.neto)     as neto_mtd,
     sum(a.neto) / nullif(sum(a.cantidad), 0) as precio_prom_mtd
-from db_finanzas.fct.ft_vcm a
+from {_VCM} a
 where a.cantidad > 0
   and a.fecha >= date_trunc('month', current_date())
   and a.fecha <  current_date()
 group by 1,2
 """
 
-# Ventas MTD diarias (simulacion diaria: filas HISTORICO dia a dia)
-QUERY_VENTAS_MTD_DIARIA = """
+# Ventas MTD diarias
+QUERY_VENTAS_MTD_DIARIA = f"""
 select
     a.fecha,
     a.cod_canal,
     a.sku_producto,
     sum(a.cantidad) as cantidad,
     sum(a.neto)     as neto
-from db_finanzas.fct.ft_vcm a
+from {_VCM} a
 where a.cantidad > 0
   and a.fecha >= date_trunc('month', current_date())
   and a.fecha <  current_date()
 group by 1, 2, 3
 """
 
-# Ventas Mes Anterior Completo (para filas HISTORICO en proyeccion)
-# Nota: NO filtramos a.cantidad > 0 para incluir devoluciones/notas credito en el neto
-# El precio_prom usa solo registros con cantidad > 0 (CASE) para evitar distorsion
-QUERY_VENTAS_MES_ANTERIOR = """
+# Ventas Mes Anterior Completo
+QUERY_VENTAS_MES_ANTERIOR = f"""
 select
     a.cod_canal,
     a.sku_producto,
@@ -406,15 +514,14 @@ select
     sum(a.neto)     as neto_mes,
     sum(case when a.cantidad > 0 then a.neto else 0 end)
       / nullif(sum(case when a.cantidad > 0 then a.cantidad else 0 end), 0) as precio_prom
-from db_finanzas.fct.ft_vcm a
+from {_VCM} a
 where a.fecha >= date_trunc('month', dateadd('month', -1, current_date()))
   and a.fecha <  date_trunc('month', current_date())
 group by 1,2
 """
 
-# Ventas Ano Anterior completo (para comparacion YoY en proyeccion)
-# Agrupa por canal, SKU y mes para total anual + drill-down mensual
-QUERY_VENTAS_AA = """
+# Ventas Ano Anterior completo
+QUERY_VENTAS_AA = f"""
 select
     a.cod_canal,
     a.sku_producto,
@@ -422,14 +529,15 @@ select
     sum(a.cantidad) as cantidad_aa,
     sum(a.neto)     as neto_aa,
     sum(a.aporte)   as aporte_aa
-from db_finanzas.fct.ft_vcm a
+from {_VCM} a
 where a.fecha >= date_trunc('year', dateadd('year', -1, current_date()))
   and a.fecha <  date_trunc('year', current_date())
 group by 1, 2, 3
 """
 
-# Ventas Historicas (13 meses — usado por charts de tendencia)
-QUERY_VENTAS_HISTORICAS = """
+# Ventas Historicas (13 meses)
+# NOTE Peru: join on cod_ccosto = id_sucursal (Chile used CUSTOM 1)
+QUERY_VENTAS_HISTORICAS = f"""
 select
   a.fecha,
   b.id_sucursal,
@@ -440,36 +548,36 @@ select
   sum(a.neto) / nullif(sum(a.cantidad), 0) as PRECIO_PROMEDIO,
   sum(a.aporte) as APORTE_TOTAL,
   sum(a.aporte) / nullif(sum(a.neto),0) as MARGEN
-from db_finanzas.fct.ft_vcm a
+from {_VCM} a
 left join db_syncros.public.coo_maestro_sucursal b
-  on a.cod_ccosto = b."CUSTOM 1"
+  on a.cod_ccosto = b.id_sucursal
 where a.fecha >= date_trunc('year', dateadd('year', -1, current_date()))
   and a.fecha < date_trunc('month', current_date())
 group by 1,2,3,4
 """
 
-# Ventas YTD (1 Ene ano actual → hoy) — Torre de Control KPIs
-QUERY_VENTAS_YTD = """
+# Ventas YTD
+QUERY_VENTAS_YTD = f"""
 select
   b.canal_de_distribucion,
   sum(a.cantidad)                                   as UNIDADES_VENDIDAS,
   sum(a.neto)                                       as NETO_TOTAL,
   sum(a.aporte)                                     as APORTE_TOTAL,
   sum(a.aporte) / nullif(sum(a.neto), 0)            as MARGEN
-from db_finanzas.fct.ft_vcm a
+from {_VCM} a
 left join db_syncros.public.coo_maestro_sucursal b
-  on a.cod_ccosto = b."CUSTOM 1"
+  on a.cod_ccosto = b.id_sucursal
 where a.fecha >= date_trunc('year', current_date())
   and a.fecha <= current_date()
 group by 1
 """
 
-# Ventas YTD Ano Anterior (mismo periodo, ano previo — para delta YoY)
-QUERY_VENTAS_YTD_AA = """
+# Ventas YTD Ano Anterior
+QUERY_VENTAS_YTD_AA = f"""
 select
   sum(a.neto)    as NETO_AA,
   sum(a.aporte)  as APORTE_AA
-from db_finanzas.fct.ft_vcm a
+from {_VCM} a
 where a.fecha >= dateadd('year', -1, date_trunc('year', current_date()))
   and a.fecha <= dateadd('year', -1, current_date())
 """
@@ -485,20 +593,20 @@ select
   end as canal_std,
   SUM(a.stock_unidades) as stock_unidades,
   sum(a.min_exhibicion) as perfil_tiendas
-from db_supply.hst.vw_in_stock a
+from db_supply.hst.ht_in_stock a
 left join db_syncros.public.coo_maestro_sucursal b
   on a.cod_bodega = b.id_sucursal
 where a.fecha = (
     select max(fecha)
-    from db_supply.hst.vw_in_stock
+    from db_supply.hst.ht_in_stock
     where fecha < current_date()
 )
 and b.canal_de_distribucion in ('TIENDA', 'CD')
 group by 1,2,3
 """
 
-# Stock Critico - Metrics (deduplicated: marca and ultimo_ingreso_cd appear once each)
-QUERY_STOCK_CRITICO_METRICS = """
+# Stock Critico - Metrics
+QUERY_STOCK_CRITICO_METRICS = f"""
 select
   a.fecha,
   a.sku_producto,
@@ -536,20 +644,20 @@ select
     when datediff('day', c.ultimo_ingreso_cd, current_date()) / 30.44 >= 3  then '>= 3 meses'
     else '< 3 meses'
   end as rango_antiguedad
-from db_supply.hst.vw_in_stock a
-left join db_dimensiones.dim.vw_producto c
+from db_supply.hst.ht_in_stock a
+left join {_PROD} c
   on a.sku_producto = c.sku_producto
-left join db_supply.hst.vw_in_stock_cd d
+left join db_supply.hst.ht_in_stock_cd d
   on a.fecha = d.fecha
  and a.sku_producto = d.sku_producto
 where a.fecha >= '2025-01-01'
-  and (dayname(a.fecha) = 'Mon' or a.fecha = (select max(fecha) from db_supply.hst.vw_in_stock))
+  and (dayname(a.fecha) = 'Mon' or a.fecha = (select max(fecha) from db_supply.hst.ht_in_stock))
 group by 1,2,3,4,5,6,7,8,9,10
 """
 
 # Stock Critico - Detail
-# Enriquecido con id_sucursal, supervisor, cluster y mts2 desde dv_tienda
-QUERY_STOCK_CRITICO_DETAIL = """
+# NOTE Peru: dt_almacen replaces dt_bodega
+QUERY_STOCK_CRITICO_DETAIL = f"""
 select
   a.fecha,
   a.sku_producto,
@@ -560,15 +668,15 @@ select
   c.marca,
   a.cod_bodega,
   coalesce(b.id_sucursal, a.cod_bodega)                                    as id_sucursal,
-  coalesce(b.descripcion_sucursal, bo.nom_bodega, 'Bodega ' || a.cod_bodega) as descripcion_sucursal,
+  coalesce(b.descripcion_sucursal, bo.nom_almacen, 'Bodega ' || a.cod_bodega) as descripcion_sucursal,
   coalesce(b.canal_de_distribucion, 'Sin Canal')                           as canal_de_distribucion,
   coalesce(cast(b.cd as varchar), 'N')                                     as cd,
-  coalesce(max(t."Supervisor"),    'Sin Supervisor') as supervisor,
-  coalesce(max(t."Cluster Final"), 'Sin Cluster')    as cluster,
-  coalesce(max(TRY_TO_DOUBLE(REPLACE(CAST(t."Mt2 Totales" AS VARCHAR), ',', '.'))), 0) as mts2,
+  'Sin Supervisor' as supervisor,
+  'Sin Cluster'    as cluster,
+  0                as mts2,
   sum(a.stock_costo) as stock_costo,
   sum(a.stock_unidades) as stock_unidades
-from db_supply.hst.vw_in_stock a
+from db_supply.hst.ht_in_stock a
 left join (
     select id_sucursal,
            max(descripcion_sucursal) as descripcion_sucursal,
@@ -578,28 +686,26 @@ left join (
     group by id_sucursal
   ) b on a.cod_bodega = b.id_sucursal
 left join (
-    select sku_producto,
-           max(nom_producto) as nom_producto,
-           max(area) as area,
-           max(linea) as linea,
-           max(sublinea) as sublinea,
-           max(marca) as marca
-    from db_dimensiones.dim.vw_producto
-    group by sku_producto
+    select p.sku_producto,
+           max(p.nom_producto) as nom_producto,
+           max(p.area) as area,
+           max(p.linea) as linea,
+           max(p.sublinea) as sublinea,
+           max(p.marca) as marca
+    from {_PROD} p
+    group by p.sku_producto
   ) c on a.sku_producto = c.sku_producto
-left join db_dimensiones.dim.dv_tienda t
-  on a.cod_bodega = t."Cod_Bodega"
 left join (
-    select cod_bodega, max(nom_bodega) as nom_bodega
-    from db_dimensiones.dim.dt_bodega
-    group by cod_bodega
-  ) bo on a.cod_bodega = bo.cod_bodega
-where a.fecha = (select max(fecha) from db_supply.hst.vw_in_stock)
+    select cod_almacen, max(nom_almacen) as nom_almacen
+    from db_dimensiones.dim.dt_almacen
+    group by cod_almacen
+  ) bo on a.cod_bodega = bo.cod_almacen
+where a.fecha = (select max(fecha) from db_supply.hst.ht_in_stock)
 group by 1,2,3,4,5,6,7,8,9,10,11,12
 """
 
 # Stock Critico - Sales
-QUERY_STOCK_CRITICO_SALES = """
+QUERY_STOCK_CRITICO_SALES = f"""
 select
   a.fecha,
   b.id_sucursal,
@@ -610,20 +716,19 @@ select
   sum(a.neto) / nullif(sum(a.cantidad), 0) as precio_promedio,
   sum(a.aporte) as aporte_total,
   sum(a.aporte) / nullif(sum(a.neto),0) as margen
-from db_finanzas.fct.ft_vcm a
+from {_VCM} a
 left join db_syncros.public.coo_maestro_sucursal b
-  on a.cod_ccosto = b."CUSTOM 1"
+  on a.cod_ccosto = b.id_sucursal
 where a.fecha >= dateadd('month', -12, date_trunc('month', current_date()))
 group by 1,2,3,4
 """
 
 # COGS mensual a nivel compania (ultimos 6 meses completos)
-# Usado por stock_critico para MOI Historico a nivel CIA
-QUERY_COGS_COMPANY_6M = """
+QUERY_COGS_COMPANY_6M = f"""
 select
     date_trunc('month', a.fecha) as PERIODO,
     sum(a.neto) - sum(a.aporte) as COGS_MENSUAL
-from db_finanzas.fct.ft_vcm a
+from {_VCM} a
 where a.cantidad > 0
   and a.fecha >= dateadd('month', -6, date_trunc('month', current_date()))
   and a.fecha <  date_trunc('month', current_date())
@@ -631,18 +736,12 @@ group by 1
 order by 1
 """
 
-# Stock en transito clasificado para KPIs (en agua vs pendiente zarpe)
-QUERY_TRANSIT_STOCK_KPI = """
+# Stock en transito clasificado para KPIs
+QUERY_TRANSIT_STOCK_KPI = f"""
 select
     case
-        when (case when c.carpeta_comex is null or c.carpeta_comex = ''
-                   then c.fecha_entrega else c.etd end) <= current_date()
-         and (case when c.carpeta_comex is null or c.carpeta_comex = ''
-                   then dateadd(day, 47, c.fecha_entrega) else c.eta end) > current_date()
-        then 'EN_AGUA'
-        when (case when c.carpeta_comex is null or c.carpeta_comex = ''
-                   then c.fecha_entrega else c.etd end) > current_date()
-        then 'PENDIENTE_ZARPE'
+        when c.etd <= current_date() and c.eta > current_date() then 'EN_AGUA'
+        when c.etd > current_date() then 'PENDIENTE_ZARPE'
         else 'OTRO'
     end as STATUS_TRANSITO,
     c.area,
@@ -662,43 +761,42 @@ select
              * coalesce(c.montomn, 0)
         else 0
     end) as MONTO_PENDIENTE_CLP
-from db_supply.fct.ft_compras c
+from {_COMPRAS} c
 where c.fecha_recepcion_en_cd is null
   and coalesce(c.cantidad_final_corregida, 0) > 0
-  and c.po like 'PO-%%'
 group by 1, 2, 3, 4, 5, 6, 7, 8
 """
 
 # Forecast Mirror queries
-QUERY_MIRROR_QUALITY = """
+QUERY_MIRROR_QUALITY = f"""
 SELECT
     a.sku_producto as espejo,
     YEAR(a.fecha) as anio,
     MONTH(a.fecha) as mes,
     COUNT(DISTINCT a.fecha) as dias_con_venta
-FROM db_finanzas.fct.ft_vcm a
-WHERE a.sku_producto IN ({placeholders})
+FROM {_VCM} a
+WHERE a.sku_producto IN ({{placeholders}})
   AND a.fecha BETWEEN %s AND %s
   AND a.cantidad > 0
 GROUP BY 1, 2, 3
 ORDER BY 1, 2, 3
 """
 
-QUERY_MIRROR_HIERARCHY = """
-SELECT sku_producto as espejo, linea, sublinea, area
-FROM db_dimensiones.dim.vw_producto
-WHERE sku_producto IN ({placeholders})
+QUERY_MIRROR_HIERARCHY = f"""
+SELECT p.sku_producto as espejo, p.linea, p.sublinea, p.area
+FROM {_PROD} p
+WHERE p.sku_producto IN ({{placeholders}})
 """
 
-QUERY_MIRROR_HIST_SKU = """
+QUERY_MIRROR_HIST_SKU = f"""
 SELECT
     a.sku_producto as espejo,
     b.id_sucursal,
     a.fecha,
     SUM(a.cantidad) as venta_qty
-FROM db_finanzas.fct.ft_vcm a
-LEFT JOIN db_syncros.public.coo_maestro_sucursal b ON a.cod_ccosto = b."CUSTOM 1"
-WHERE a.sku_producto IN ({placeholders})
+FROM {_VCM} a
+LEFT JOIN db_syncros.public.coo_maestro_sucursal b ON a.cod_ccosto = b.id_sucursal
+WHERE a.sku_producto IN ({{placeholders}})
   AND a.fecha BETWEEN %s AND %s
   AND b.canal_de_distribucion = 'TIENDA'
   AND a.cantidad > 0
@@ -710,8 +808,8 @@ SELECT id_sucursal, descripcion_sucursal, canal_de_distribucion as canal
 FROM db_syncros.public.coo_maestro_sucursal
 """
 
-# Mirror monthly sales by sucursal + canal (for forecast-from-mirror generation)
-QUERY_MIRROR_HIST_MONTHLY = """
+# Mirror monthly sales by sucursal + canal
+QUERY_MIRROR_HIST_MONTHLY = f"""
 SELECT
     a.sku_producto as espejo,
     b.id_sucursal,
@@ -719,9 +817,9 @@ SELECT
     b.canal_de_distribucion as canal,
     DATE_TRUNC('month', a.fecha) as periodo,
     SUM(a.cantidad) as venta_qty
-FROM db_finanzas.fct.ft_vcm a
+FROM {_VCM} a
 LEFT JOIN db_syncros.public.coo_maestro_sucursal b
-    ON a.cod_ccosto = b."CUSTOM 1"
+    ON a.cod_ccosto = b.id_sucursal
 WHERE a.sku_producto = %s
   AND a.fecha BETWEEN %s AND %s
   AND a.cantidad > 0
@@ -731,20 +829,13 @@ ORDER BY 5, 2
 """
 
 # Comex Full (used by proyeccion module)
-QUERY_COMEX_FULL = """
+QUERY_COMEX_FULL = f"""
 select *
-from db_supply.fct.ft_compras
+from {_COMPRAS}
 """
 
-# Plan de Compras — tránsitos y POs con campos financieros clave
-# Nombres de columnas reales en ft_compras:
-#   PO, SKU_PRODUCTO, NOM_PRODUCTO, NOM_PROVEEDOR, COD_PROVEEDOR, COD_MONEDA
-#   NOM_ESTADOAPROBACION, NOM_STATUS, ENTRANSITO, CARPETA_COMEX, FORMA_PAGO
-#   CANTIDAD_FINAL_CORREGIDA (qty ordenada corregida), CANTIDAD_CARPETA_RECEPCIONADA
-#   SALDO (qty pendiente ya calculada), PURCHPRICE, LINEAMOUNT, MONTOMN, PARIDAD_MONEDA
-#   ETA, ETD, FECHA_ENTREGA, FECHA_RECEPCION_EN_CD, ANO_ETA, MES_ETA
-#   AREA, LINEA, SUBLINEA, MARCA, MODELO, FACTOR_IMPORTACION, DOLAR_SISTEMA
-QUERY_PLAN_COMPRAS = """
+# Plan de Compras
+QUERY_PLAN_COMPRAS = f"""
 select
     c.po                                                    as N_PO,
     c.sku_producto,
@@ -765,34 +856,20 @@ select
     c.status_booking,
     c.carpeta_comex,
     c.forma_pago,
-    -- Fechas clave (ETA_CALC / ETD_CALC ya están calculadas en la vista)
-    case
-        when c.carpeta_comex is null or c.carpeta_comex = ''
-        then c.fecha_entrega
-        else c.etd
-    end                                                     as ETD_CALC,
-    case
-        when c.carpeta_comex is null or c.carpeta_comex = ''
-        then dateadd(day, 47, c.fecha_entrega)
-        else c.eta
-    end                                                     as ETA_CALC,
+    c.etd                                                   as ETD_CALC,
+    c.eta                                                   as ETA_CALC,
     c.fecha_recepcion_en_cd,
-    -- Cantidades
     c.cantidad_final_corregida                              as QTY_ORDENADA,
     c.cantidad_carpeta_recepcionada                         as QTY_RECEPCIONADA,
-    -- QTY_PENDIENTE = max(0, ordenada - recepcionada) para evitar negativos
     greatest(0, coalesce(c.cantidad_final_corregida, 0)
                 - coalesce(c.cantidad_carpeta_recepcionada, 0))
                                                             as QTY_PENDIENTE,
-    -- Montos en moneda original
     c.purchprice                                            as PRECIO_UNITARIO,
     c.lineamount                                            as MONTO_MONEDA_ORIG,
-    -- Montos en CLP
     c.montomn                                               as MONTO_CLP,
     c.paridad_moneda                                        as TC_PO,
     c.dolar_sistema                                         as TC_SISTEMA,
     c.factor_importacion,
-    -- Monto pendiente CLP (proporcional a qty pendiente / qty ordenada)
     case
         when coalesce(c.cantidad_final_corregida, 0) > 0
         then greatest(0, coalesce(c.cantidad_final_corregida, 0)
@@ -801,27 +878,17 @@ select
              * coalesce(c.montomn, 0)
         else 0
     end                                                     as MONTO_PENDIENTE_CLP,
-    -- Periodos para agrupación mensual (ya vienen calculados en la vista)
-    date_trunc('month',
-        case
-            when c.carpeta_comex is null or c.carpeta_comex = ''
-            then dateadd(day, 47, c.fecha_entrega)
-            else c.eta
-        end
-    )                                                       as PERIODO_ETA,
+    date_trunc('month', c.eta)                              as PERIODO_ETA,
     date_trunc('month', c.fecha_recepcion_en_cd)            as PERIODO_RECEPCION,
-    c.ano_eta,
-    c.mes_eta,
-    c.anomes_eta
-from db_supply.fct.ft_compras c
-where c.po <> 'N/A'
-  and coalesce(c.cantidad_final_corregida, 0) > 0
+    YEAR(c.eta)                                             as ano_eta,
+    MONTH(c.eta)                                            as mes_eta,
+    CAST(YEAR(c.eta) AS VARCHAR) || LPAD(CAST(MONTH(c.eta) AS VARCHAR), 2, '0') as anomes_eta
+from {_COMPRAS} c
+where coalesce(c.cantidad_final_corregida, 0) > 0
 """
 
 # Venta a costo mensual proyectada para plan de compras
-# Lógica: promedio mensual últimos 6 meses de APORTE (= venta a costo) por Área/Línea
-# Se usa como estimación de salida de inventario mes a mes
-QUERY_VENTA_COSTO_PROYECTADA = """
+QUERY_VENTA_COSTO_PROYECTADA = f"""
 select
     c.area,
     c.linea,
@@ -843,27 +910,27 @@ from (
         a.sku_producto,
         date_trunc('month', a.fecha)    as mes,
         sum(a.aporte)                   as monthly_aporte
-    from db_finanzas.fct.ft_vcm a
+    from {_VCM} a
     where a.fecha >= dateadd('month', -6, date_trunc('month', current_date()))
       and a.fecha <  date_trunc('month', current_date())
       and a.cantidad > 0
     group by 1, 2
 ) ventas_sku
-left join db_dimensiones.dim.vw_producto c
+left join {_PROD} c
     on ventas_sku.sku_producto = c.sku_producto
 where c.area is not null and c.linea is not null
 group by c.area, c.linea, 3
 """
 
-# Versión simplificada: promedio mensual de aporte por Área/Línea (últimos 6 meses)
-QUERY_VENTA_COSTO_HIST = """
+# Venta a costo historica
+QUERY_VENTA_COSTO_HIST = f"""
 select
     c.area,
     c.linea,
     date_trunc('month', a.fecha)        as PERIODO,
     sum(a.aporte)                       as VENTA_COSTO_CLP
-from db_finanzas.fct.ft_vcm a
-left join db_dimensiones.dim.vw_producto c
+from {_VCM} a
+left join {_PROD} c
     on a.sku_producto = c.sku_producto
 where a.fecha >= dateadd('month', -6, date_trunc('month', current_date()))
   and a.fecha <  date_trunc('month', current_date())
@@ -873,8 +940,7 @@ where a.fecha >= dateadd('month', -6, date_trunc('month', current_date()))
 group by 1, 2, 3
 """
 
-# Stock on hand actual por SKU (CD + Tienda) para plan de compras
-# Usa ft_in_stock (fecha más reciente < hoy) + maestro sucursal para canal
+# Stock on hand actual por SKU
 QUERY_STOCK_ONHAND = """
 select
     a.sku_producto,
@@ -882,35 +948,35 @@ select
     sum(case when b.canal_de_distribucion = 'TIENDA' then a.stock_unidades else 0 end) as STOCK_TIENDA,
     sum(a.stock_unidades)                                                              as STOCK_TOTAL,
     sum(a.stock_costo)                                                                 as STOCK_COSTO_TOTAL
-from db_supply.hst.vw_in_stock a
+from db_supply.hst.ht_in_stock a
 left join db_syncros.public.coo_maestro_sucursal b
     on a.cod_bodega = b.id_sucursal
 where a.fecha = (
     select max(fecha)
-    from db_supply.hst.vw_in_stock
+    from db_supply.hst.ht_in_stock
     where fecha < current_date()
 )
 group by 1
 """
 
-# Ventas diarias ultimos 90 dias (usado por alertas_quiebre)
-QUERY_VENTAS_DIARIAS_90D = """
+# Ventas diarias ultimos 90 dias
+QUERY_VENTAS_DIARIAS_90D = f"""
 select
     a.sku_producto,
     a.fecha,
     b.canal_de_distribucion,
     sum(a.cantidad) as unidades,
     sum(a.neto)     as neto
-from db_finanzas.fct.ft_vcm a
+from {_VCM} a
 left join db_syncros.public.coo_maestro_sucursal b
-  on a.cod_ccosto = b."CUSTOM 1"
+  on a.cod_ccosto = b.id_sucursal
 where a.fecha >= dateadd('day', -90, current_date())
   and a.cantidad > 0
 group by 1, 2, 3
 """
 
-# Ventas mensuales por SKU x Canal (usado por elasticidad - precio vs demanda)
-QUERY_VENTAS_MENSUAL_PRECIO = """
+# Ventas mensuales por SKU x Canal (elasticidad)
+QUERY_VENTAS_MENSUAL_PRECIO = f"""
 select
     a.sku_producto,
     a.cod_canal,
@@ -920,30 +986,27 @@ select
     sum(a.aporte)   as aporte,
     sum(case when a.cantidad > 0 then a.neto else 0 end)
       / nullif(sum(case when a.cantidad > 0 then a.cantidad else 0 end), 0) as precio_promedio
-from db_finanzas.fct.ft_vcm a
+from {_VCM} a
 where a.fecha >= dateadd('month', -24, date_trunc('month', current_date()))
   and a.fecha <  date_trunc('month', current_date())
 group by 1, 2, 3
 having sum(a.cantidad) > 0
 """
 
-# Ventas semanales ultimo ano (usado por abc_xyz)
-QUERY_VENTAS_SEMANALES = """
+# Ventas semanales ultimo ano (abc_xyz)
+QUERY_VENTAS_SEMANALES = f"""
 select
     a.sku_producto,
     date_trunc('week', a.fecha) as semana,
     sum(a.cantidad) as unidades,
     sum(a.aporte)   as aporte
-from db_finanzas.fct.ft_vcm a
+from {_VCM} a
 where a.fecha >= dateadd('year', -1, current_date())
   and a.cantidad > 0
 group by 1, 2
 """
 
-# Store-level InStock snapshot (last date) — used by InStock Proyectado.
-# Returns one row per SKU×Store with the EXACT same fields that
-# QUERY_INSTOCK_DAILY_TIENDA aggregates, so the re-computed IS%
-# matches the pre-aggregated dashboard perfectly.
+# InStock Store Detail snapshot
 QUERY_INSTOCK_STORE_DETAIL = """
 select
     a.sku_producto,
@@ -952,19 +1015,19 @@ select
     a.perfil,
     a.stock_unidades,
     coalesce(a.cantidad_prom_90, 0) as cantidad_prom_90
-from db_supply.hst.vw_in_stock a
+from db_supply.hst.ht_in_stock a
 join db_syncros.public.coo_maestro_sucursal b
     on a.cod_bodega = b.id_sucursal
 where b.canal_de_distribucion = 'TIENDA'
   and a.fecha = (
       select max(fecha)
-      from db_supply.hst.vw_in_stock
+      from db_supply.hst.ht_in_stock
       where fecha < current_date()
   )
   and a.perfil = 'SI'
 """
 
-# Stock por SKU desglosado CD vs TIENDA con perfil (usado por higiene abastecimiento)
+# Stock por SKU desglosado CD vs TIENDA
 QUERY_STOCK_HIGIENE = """
 select
     a.sku_producto,
@@ -973,52 +1036,49 @@ select
     b.canal_de_distribucion,
     sum(a.stock_unidades)  as stock_unidades,
     sum(a.min_exhibicion)  as perfil_tiendas
-from db_supply.hst.vw_in_stock a
+from db_supply.hst.ht_in_stock a
 left join db_syncros.public.coo_maestro_sucursal b
     on a.cod_bodega = b.id_sucursal
 where a.fecha = (
     select max(fecha)
-    from db_supply.hst.vw_in_stock
+    from db_supply.hst.ht_in_stock
     where fecha < current_date()
 )
 group by 1, 2, 3, 4
 having sum(a.stock_unidades) > 0 or sum(a.min_exhibicion) > 0
 """
 
-# Forecast anual por SKU x Canal (usado por higiene abastecimiento)
-# Trae forecast del periodo actual hasta fin de ano
-QUERY_FORECAST_ANUAL = """
+# Forecast anual por SKU x Canal
+QUERY_FORECAST_ANUAL = f"""
 select
     a.cod_canal,
     a.sku_producto,
     date_trunc('month', a.fecha) as periodo,
     sum(a.cantidad) as forecast_qty
-from db_finanzas.fct.ft_vcm a
+from {_VCM} a
 where a.fecha >= date_trunc('year', current_date())
   and a.fecha <  dateadd('year', 1, date_trunc('year', current_date()))
   and a.cantidad > 0
 group by 1, 2, 3
 """
 
-# Ventas semanales por SKU (ultimas 24 semanas, para deteccion de tendencia)
-QUERY_VENTAS_SEMANAL_TENDENCIA = """
+# Ventas semanales por SKU (24 semanas, tendencia)
+QUERY_VENTAS_SEMANAL_TENDENCIA = f"""
 select
     a.sku_producto,
     date_trunc('week', a.fecha) as semana,
     sum(a.cantidad) as unidades,
     sum(a.neto)     as neto
-from db_finanzas.fct.ft_vcm a
+from {_VCM} a
 where a.fecha >= dateadd('week', -24, current_date())
   and a.cantidad > 0
 group by 1, 2
 """
 
 # ---------------------------------------------------------------------------
-# InStock Historico — tienda level (aggregated across stores per SKU per date)
-# Sampled on Mondays + latest available date for performance.
-# Includes CD InStock join so Python can filter by "solo SKUs con InStock CD=1".
+# InStock Historico — tienda level
 # ---------------------------------------------------------------------------
-QUERY_INSTOCK_HIST_TIENDA = """
+QUERY_INSTOCK_HIST_TIENDA = f"""
 select
     a.fecha,
     a.sku_producto,
@@ -1027,9 +1087,7 @@ select
     c.sublinea,
     c.marca,
     c.mix_oficial,
-    -- All tiendas
     count(*)                                                as n_tiendas,
-    -- ── IS CALCULADO v.A: stock >= vta_prom (promedio todos los dias) ───
     count(*)                                                as n_tiendas_is90,
     count(*)                                                as n_tiendas_is180,
     count(*)                                                as n_tiendas_is365,
@@ -1042,7 +1100,6 @@ select
     sum(case when a.stock_unidades > 0
              and a.stock_unidades >= coalesce(a.cantidad_prom_365, 0)
              then 1 else 0 end)                             as tiendas_is365,
-    -- ── IS CALCULADO v.B: stock >= vta_prom (promedio solo dias con stock)
     sum(case when a.stock_unidades > 0
              and a.stock_unidades >= coalesce(a.cantidad_prom_90b, 0)
              then 1 else 0 end)                             as tiendas_is90b,
@@ -1055,26 +1112,18 @@ select
     sum(coalesce(a.in_stock_presentacion, 0))               as tiendas_is_pres,
     sum(coalesce(a.stock_unidades, 0))                      as stock_und_tienda,
     sum(coalesce(a.stock_costo, 0))                         as stock_costo_tienda,
-    -- PERFIL=SI: denominadores = total perfil=SI
-    sum(case when a.perfil = 'SI' then 1 else 0 end)
-                                                            as n_tiendas_is90_perfil,
-    sum(case when a.perfil = 'SI' then 1 else 0 end)
-                                                            as n_tiendas_is180_perfil,
-    sum(case when a.perfil = 'SI' then 1 else 0 end)
-                                                            as n_tiendas_is365_perfil,
+    sum(case when a.perfil = 'SI' then 1 else 0 end)        as n_tiendas_is90_perfil,
+    sum(case when a.perfil = 'SI' then 1 else 0 end)        as n_tiendas_is180_perfil,
+    sum(case when a.perfil = 'SI' then 1 else 0 end)        as n_tiendas_is365_perfil,
     sum(case when a.perfil = 'SI' and a.stock_unidades > 0
              and a.stock_unidades >= coalesce(a.cantidad_prom_90, 0)
-             then 1 else 0 end)
-                                                            as tiendas_is90_perfil,
+             then 1 else 0 end)                             as tiendas_is90_perfil,
     sum(case when a.perfil = 'SI' and a.stock_unidades > 0
              and a.stock_unidades >= coalesce(a.cantidad_prom_180, 0)
-             then 1 else 0 end)
-                                                            as tiendas_is180_perfil,
+             then 1 else 0 end)                             as tiendas_is180_perfil,
     sum(case when a.perfil = 'SI' and a.stock_unidades > 0
              and a.stock_unidades >= coalesce(a.cantidad_prom_365, 0)
-             then 1 else 0 end)
-                                                            as tiendas_is365_perfil,
-    -- CD InStock calculado
+             then 1 else 0 end)                             as tiendas_is365_perfil,
     coalesce(max(case when d.stock_unidades > 0
                       and d.stock_unidades >= coalesce(d.cantidad_prom_90_cia, 0)
                       then 1 else 0 end), 0)                as instock_cd_90,
@@ -1084,23 +1133,23 @@ select
     coalesce(max(case when d.stock_unidades > 0
                       and d.stock_unidades >= coalesce(d.cantidad_prom_365_cia, 0)
                       then 1 else 0 end), 0)                as instock_cd_365
-from db_supply.hst.vw_in_stock a
+from {_INSTOCK} a
 join db_syncros.public.coo_maestro_sucursal b
     on a.cod_bodega = b.id_sucursal
-left join db_dimensiones.dim.vw_producto c
+left join {_PROD} c
     on a.sku_producto = c.sku_producto
-left join db_supply.hst.vw_in_stock_cd d
+left join {_INSTOCK_CD} d
     on a.fecha = d.fecha
    and a.sku_producto = d.sku_producto
 where b.canal_de_distribucion = 'TIENDA'
   and a.fecha >= '2023-01-01'
   and (dayname(a.fecha) = 'Mon'
-       or a.fecha = (select max(fecha) from db_supply.hst.vw_in_stock))
+       or a.fecha = (select max(fecha) from db_supply.hst.ht_in_stock))
 group by 1, 2, 3, 4, 5, 6, 7
 """
 
-# InStock Historico — CD level (one row per SKU per date)
-QUERY_INSTOCK_HIST_CD = """
+# InStock Historico — CD level
+QUERY_INSTOCK_HIST_CD = f"""
 select
     a.fecha,
     a.sku_producto,
@@ -1111,7 +1160,6 @@ select
     c.mix_oficial,
     a.stock_unidades                   as stock_und_cd,
     a.stock_costo                      as stock_costo_cd,
-    -- IS calculado: stock >= vta prom cia
     case when a.stock_unidades > 0
          and a.stock_unidades >= coalesce(a.cantidad_prom_90_cia, 0)
          then 1 else 0 end            as instock_cd_90,
@@ -1123,16 +1171,16 @@ select
          then 1 else 0 end            as instock_cd_365,
     a.cantidad_prom_90_cia,
     a.costo_prom_90_cia
-from db_supply.hst.vw_in_stock_cd a
-left join db_dimensiones.dim.vw_producto c
+from {_INSTOCK_CD} a
+left join {_PROD} c
     on a.sku_producto = c.sku_producto
 where a.fecha >= '2023-01-01'
   and (dayname(a.fecha) = 'Mon'
-       or a.fecha = (select max(fecha) from db_supply.hst.vw_in_stock_cd))
+       or a.fecha = (select max(fecha) from db_supply.hst.ht_in_stock_cd))
 """
 
-# InStock diario (últimos 30 días, todos los días — para vista PowerBI)
-QUERY_INSTOCK_DAILY_TIENDA = """
+# InStock diario (ultimos 30 dias — tienda)
+QUERY_INSTOCK_DAILY_TIENDA = f"""
 select
     a.fecha,
     a.sku_producto,
@@ -1142,7 +1190,6 @@ select
     c.marca,
     c.mix_oficial,
     count(*)                                                as n_tiendas,
-    -- IS CALCULADO v.A: stock >= vta_prom (promedio todos los dias)
     count(*)                                                as n_tiendas_is90,
     count(*)                                                as n_tiendas_is180,
     count(*)                                                as n_tiendas_is365,
@@ -1155,7 +1202,6 @@ select
     sum(case when a.stock_unidades > 0
              and a.stock_unidades >= coalesce(a.cantidad_prom_365, 0)
              then 1 else 0 end)                             as tiendas_is365,
-    -- IS CALCULADO v.B: stock >= vta_prom (promedio solo dias con stock)
     sum(case when a.stock_unidades > 0
              and a.stock_unidades >= coalesce(a.cantidad_prom_90b, 0)
              then 1 else 0 end)                             as tiendas_is90b,
@@ -1168,26 +1214,18 @@ select
     sum(coalesce(a.in_stock_presentacion, 0))               as tiendas_is_pres,
     sum(coalesce(a.stock_unidades, 0))                      as stock_und_tienda,
     sum(coalesce(a.stock_costo, 0))                         as stock_costo_tienda,
-    -- PERFIL=SI
-    sum(case when a.perfil = 'SI' then 1 else 0 end)
-                                                            as n_tiendas_is90_perfil,
-    sum(case when a.perfil = 'SI' then 1 else 0 end)
-                                                            as n_tiendas_is180_perfil,
-    sum(case when a.perfil = 'SI' then 1 else 0 end)
-                                                            as n_tiendas_is365_perfil,
+    sum(case when a.perfil = 'SI' then 1 else 0 end)        as n_tiendas_is90_perfil,
+    sum(case when a.perfil = 'SI' then 1 else 0 end)        as n_tiendas_is180_perfil,
+    sum(case when a.perfil = 'SI' then 1 else 0 end)        as n_tiendas_is365_perfil,
     sum(case when a.perfil = 'SI' and a.stock_unidades > 0
              and a.stock_unidades >= coalesce(a.cantidad_prom_90, 0)
-             then 1 else 0 end)
-                                                            as tiendas_is90_perfil,
+             then 1 else 0 end)                             as tiendas_is90_perfil,
     sum(case when a.perfil = 'SI' and a.stock_unidades > 0
              and a.stock_unidades >= coalesce(a.cantidad_prom_180, 0)
-             then 1 else 0 end)
-                                                            as tiendas_is180_perfil,
+             then 1 else 0 end)                             as tiendas_is180_perfil,
     sum(case when a.perfil = 'SI' and a.stock_unidades > 0
              and a.stock_unidades >= coalesce(a.cantidad_prom_365, 0)
-             then 1 else 0 end)
-                                                            as tiendas_is365_perfil,
-    -- CD InStock calculado
+             then 1 else 0 end)                             as tiendas_is365_perfil,
     coalesce(max(case when d.stock_unidades > 0
                       and d.stock_unidades >= coalesce(d.cantidad_prom_90_cia, 0)
                       then 1 else 0 end), 0)                as instock_cd_90,
@@ -1197,12 +1235,12 @@ select
     coalesce(max(case when d.stock_unidades > 0
                       and d.stock_unidades >= coalesce(d.cantidad_prom_365_cia, 0)
                       then 1 else 0 end), 0)                as instock_cd_365
-from db_supply.hst.vw_in_stock a
+from {_INSTOCK} a
 join db_syncros.public.coo_maestro_sucursal b
     on a.cod_bodega = b.id_sucursal
-left join db_dimensiones.dim.vw_producto c
+left join {_PROD} c
     on a.sku_producto = c.sku_producto
-left join db_supply.hst.vw_in_stock_cd d
+left join {_INSTOCK_CD} d
     on a.fecha = d.fecha
    and a.sku_producto = d.sku_producto
 where b.canal_de_distribucion = 'TIENDA'
@@ -1210,7 +1248,7 @@ where b.canal_de_distribucion = 'TIENDA'
 group by 1, 2, 3, 4, 5, 6, 7
 """
 
-QUERY_INSTOCK_DAILY_CD = """
+QUERY_INSTOCK_DAILY_CD = f"""
 select
     a.fecha,
     a.sku_producto,
@@ -1221,7 +1259,6 @@ select
     c.mix_oficial,
     a.stock_unidades                   as stock_und_cd,
     a.stock_costo                      as stock_costo_cd,
-    -- IS calculado: stock >= vta prom cia
     case when a.stock_unidades > 0
          and a.stock_unidades >= coalesce(a.cantidad_prom_90_cia, 0)
          then 1 else 0 end            as instock_cd_90,
@@ -1233,14 +1270,14 @@ select
          then 1 else 0 end            as instock_cd_365,
     a.cantidad_prom_90_cia,
     a.costo_prom_90_cia
-from db_supply.hst.vw_in_stock_cd a
-left join db_dimensiones.dim.vw_producto c
+from {_INSTOCK_CD} a
+left join {_PROD} c
     on a.sku_producto = c.sku_producto
 where a.fecha >= dateadd('day', -30, current_date())
 """
 
-# Ventas diarias por SKU (ultimo ano, para desagregacion y patrones)
-QUERY_VENTAS_DIARIAS_PATRON = """
+# Ventas diarias por SKU (ultimo ano, patrones)
+QUERY_VENTAS_DIARIAS_PATRON = f"""
 select
     a.sku_producto,
     a.fecha,
@@ -1248,22 +1285,21 @@ select
     day(a.fecha)       as dia_mes,
     sum(a.cantidad) as unidades,
     sum(a.neto)     as neto
-from db_finanzas.fct.ft_vcm a
+from {_VCM} a
 where a.fecha >= dateadd('year', -1, current_date())
   and a.cantidad > 0
 group by 1, 2, 3, 4
 """
 
-# Pesos agregados DOW + WOM (para desagregacion diaria ponderada)
-# dayname() devuelve 'Mon','Tue',... → se mapea a Python weekday en el loader
-QUERY_PESOS_DIARIOS = """
+# Pesos DOW + WOM (desagregacion)
+QUERY_PESOS_DIARIOS = f"""
 with base as (
     select
         a.fecha,
         dayname(a.fecha)                as dow_name,
         ceil(day(a.fecha) / 7.0)::int   as wom,
         sum(a.cantidad)                 as unidades
-    from db_finanzas.fct.ft_vcm a
+    from {_VCM} a
     where a.fecha >= dateadd('month', -12, date_trunc('month', current_date()))
       and a.cantidad > 0
     group by 1, 2, 3
@@ -1280,12 +1316,8 @@ group by b.dow_name, b.wom, t.total
 order by b.dow_name, b.wom
 """
 
-# Pesos DOW × WOM × CANAL (para desagregacion diaria per-canal)
-# Cada canal tiene su propio patrón semanal:
-#   ETAIL: Lun~20% peak, cae a Sáb~11%
-#   TIENDA: Sáb~24% peak, Lun-Jue~11%
-#   MAYORISTA: Lun/Mié/Vie~21%, Sáb/Dom~3-5%
-QUERY_PESOS_DIARIOS_CANAL = """
+# Pesos DOW x WOM x CANAL
+QUERY_PESOS_DIARIOS_CANAL = f"""
 with base as (
     select
         a.fecha,
@@ -1293,9 +1325,9 @@ with base as (
         ceil(day(a.fecha) / 7.0)::int   as wom,
         b.canal_de_distribucion         as canal,
         sum(a.cantidad)                 as unidades
-    from db_finanzas.fct.ft_vcm a
+    from {_VCM} a
     left join db_syncros.public.coo_maestro_sucursal b
-        on a.cod_ccosto = b."CUSTOM 1"
+        on a.cod_ccosto = b.id_sucursal
     where a.fecha >= dateadd('month', -12, date_trunc('month', current_date()))
       and a.cantidad > 0
       and b.canal_de_distribucion in ('TIENDA', 'ETAIL', 'MAYORISTA')
@@ -1318,20 +1350,18 @@ group by b.dow_name, b.wom, b.canal, t.total
 order by b.canal, b.dow_name, b.wom
 """
 
-# Boosts por SUBLINEA × CANAL × EVENTO (data-driven desde historial de ventas)
-# Calcula ratio = promedio diario en ventana evento / promedio diario fuera de evento (mismo mes)
-# Usa últimos 2 años para tener al menos 2 ocurrencias de cada evento
-QUERY_EVENT_BOOSTS = """
+# Event Boosts por SUBLINEA x CANAL x EVENTO
+QUERY_EVENT_BOOSTS = f"""
 with ventas as (
     select
         a.fecha,
         p.sublinea,
         b.canal_de_distribucion  as canal,
         sum(a.cantidad)          as unidades
-    from db_finanzas.fct.ft_vcm a
+    from {_VCM} a
     left join db_syncros.public.coo_maestro_sucursal b
-        on a.cod_ccosto = b."CUSTOM 1"
-    left join db_dimensiones.dim.vw_producto p
+        on a.cod_ccosto = b.id_sucursal
+    left join {_PROD} p
         on a.sku_producto = p.sku_producto
     where a.fecha >= dateadd('year', -2, current_date())
       and a.cantidad > 0
@@ -1403,20 +1433,17 @@ having n_periodos >= 2
 order by sublinea, canal, evento
 """
 
-# Boosts por SKU × CANAL × EVENTO (data-driven, granular)
-# Misma lógica que QUERY_EVENT_BOOSTS pero a nivel SKU individual.
-# Solo incluye SKUs con al menos 5 und vendidas en ventana evento
-# y con dato "Normal" en el mismo periodo para calcular ratio confiable.
-QUERY_EVENT_BOOSTS_SKU = """
+# Event Boosts por SKU x CANAL x EVENTO
+QUERY_EVENT_BOOSTS_SKU = f"""
 with ventas as (
     select
         a.sku_producto,
         a.fecha,
         b.canal_de_distribucion  as canal,
         sum(a.cantidad)          as unidades
-    from db_finanzas.fct.ft_vcm a
+    from {_VCM} a
     left join db_syncros.public.coo_maestro_sucursal b
-        on a.cod_ccosto = b."CUSTOM 1"
+        on a.cod_ccosto = b.id_sucursal
     where a.fecha >= dateadd('year', -2, current_date())
       and a.cantidad > 0
       and b.canal_de_distribucion in ('TIENDA', 'ETAIL', 'MAYORISTA')
@@ -1488,16 +1515,14 @@ having n_periodos >= 2
 order by sku_producto, canal, evento
 """
 
-# ── Redistribucion de Stock ─────────────────────────────────────────
-
-# Transito CD → Tiendas (columnas desconocidas — SELECT * + norm_cols)
+# Redistribucion de Stock — tabla Peru (puede diferir de Chile)
 QUERY_TRANSITO_ENTRE_SUCURSALES = """
 select *
-from DJCHL_SYNCROS.PUBLIC.COO_INVENTARIO_TRANSITO_ENTRE_SUCURSALES
+from db_syncros.public.coo_inventario_transito_entre_sucursales
 """
 
-# Ventas ultimos 90 dias por SKU × Sucursal (velocidad por tienda)
-QUERY_VENTAS_90D_SUCURSAL = """
+# Ventas ultimos 90 dias por SKU x Sucursal
+QUERY_VENTAS_90D_SUCURSAL = f"""
 select
     a.sku_producto,
     b.id_sucursal,
@@ -1506,20 +1531,20 @@ select
     sum(a.cantidad)         as unidades_90d,
     sum(a.neto)             as neto_90d,
     count(distinct a.fecha) as dias_con_venta
-from db_finanzas.fct.ft_vcm a
+from {_VCM} a
 left join db_syncros.public.coo_maestro_sucursal b
-    on a.cod_ccosto = b."CUSTOM 1"
+    on a.cod_ccosto = b.id_sucursal
 where a.fecha >= dateadd('day', -90, current_date())
   and a.cantidad > 0
 group by 1, 2, 3, 4
 """
 
-
 # ===========================================================================
 # SUPPLY OPERATIONS — Pedidos, Picking, Stock Actual, Bultos, Despachos
+# NOTE: ft_pedidotransferencia and ft_picking do NOT exist in Peru.
+#       The Operaciones Supply module is disabled for Peru in app.py.
 # ===========================================================================
 
-# Pedidos de transferencia (ultimos 90 dias) — CD→tienda + inter-bodega
 QUERY_SUPPLY_PEDIDOS_TRANSFER = """
 select
     pt.cod_pedidotransferencia,
@@ -1551,7 +1576,6 @@ left join db_syncros.public.coo_maestro_sucursal bd
 where pt.fecha_creacion >= dateadd('day', -90, current_date())
 """
 
-# Picking con estados, tiempos, operario (ultimos 90 dias)
 QUERY_SUPPLY_PICKING = """
 select
     pk.cod_picking,
@@ -1584,7 +1608,6 @@ where pk.fecha_activacion >= dateadd('day', -90, current_date())
    or pk.fecha_inicio >= dateadd('day', -90, current_date())
 """
 
-# Stock actual por bodega/SKU (snapshot sin filtro fecha)
 QUERY_SUPPLY_STOCK_ACTUAL = """
 select
     sa.cod_bodega,
@@ -1600,7 +1623,6 @@ left join db_syncros.public.coo_maestro_sucursal b
 where sa.stock_actual != 0 or sa.stock_reservado != 0
 """
 
-# Bultos por pedido/picking (ultimos 90 dias)
 QUERY_SUPPLY_BULTOS = """
 select
     bu.cod_correlativo,
@@ -1618,7 +1640,6 @@ from db_supply.fct.ft_bulto bu
 where bu.fecha_creacion >= dateadd('day', -90, current_date())
 """
 
-# Despachos FedEx con tracking (ultimos 90 dias)
 QUERY_SUPPLY_DESPACHOS_FEDEX = """
 select
     df.tracking_number,

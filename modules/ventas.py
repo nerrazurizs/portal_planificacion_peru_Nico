@@ -6,14 +6,15 @@ from utils.sql_builder import build_in_clause, build_ilike, append_condition
 from utils.filters import limpiar_lista, fmt_clp
 from utils.export import download_buttons
 from utils.ui_animations import lottie_spinner
+from db.queries import _VCM, _PROD
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _load_distinct(_conn, col: str) -> list[str]:
     """Load distinct non-null values for a dimension column. Cached 1 hour."""
     df = pd.read_sql(
-        f"SELECT DISTINCT {col} FROM db_dimensiones.dim.vw_producto "
-        f"WHERE {col} IS NOT NULL AND TRIM({col}) != '' ORDER BY {col}",
+        f"SELECT DISTINCT p.{col} FROM {_PROD} p "
+        f"WHERE p.{col} IS NOT NULL AND TRIM(CAST(p.{col} AS VARCHAR)) != '' ORDER BY p.{col}",
         _conn,
     )
     return df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
@@ -106,11 +107,12 @@ def render_ventas(conn):
         ]
 
         # Base query with parameterized dates
+        # Peru: use _VCM and _PROD wrappers for column normalization
         query = (
             f"select {','.join(select_fields + metricas)} "
-            "from db_finanzas.fct.ft_vcm a "
-            'left join db_syncros.public.coo_maestro_sucursal b on a.cod_ccosto = b."CUSTOM 1" '
-            "left join db_dimensiones.dim.vw_producto c on a.sku_producto = c.sku_producto "
+            f"from {_VCM} a "
+            "left join db_syncros.public.coo_maestro_sucursal b on a.cod_ccosto = b.id_sucursal "
+            f"left join {_PROD} c on a.sku_producto = c.sku_producto "
             "where a.fecha between %s and %s"
         )
         params = [str(fecha_inicio), str(fecha_fin)]

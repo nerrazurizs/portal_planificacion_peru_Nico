@@ -42,6 +42,7 @@ from modules.redistribucion import render_redistribucion
 from modules.analisis_transitos import render_analisis_transitos
 from modules.capacidad_volumetrica import render_capacidad_volumetrica
 from modules.operaciones_supply import render_operaciones_supply
+from modules.diagnostico import render_diagnostico
 from db.cache import cached_query as cq, clear_all as clear_query_cache, last_refresh_label, auto_refresh_if_new_day
 from utils.ui_animations import lottie_spinner, show_lottie, animated_kpi_row
 
@@ -264,6 +265,7 @@ def main_app():
             ("💰", "Ventas"),
             ("🚢", "Comex"),
             ("🔄", "Tablas Syncro"),
+            ("🔬", "Diagnostico Tablas"),
         ],
         "PLANIFICACION": [
             ("🎲", "Generador Forecast"),
@@ -468,6 +470,7 @@ def main_app():
         "Capacidad Volumetrica": render_capacidad_volumetrica,
         # Operaciones Supply: tablas ft_pedidotransferencia y ft_picking no existen en Peru
         "Operaciones Supply": None,
+        "Diagnostico Tablas": render_diagnostico,
     }
 
     if current == "Inicio":
@@ -511,40 +514,49 @@ def main_app():
         else:
             # ── Load dashboard data (centralized cache) ──
             try:
-                with lottie_spinner("snowflake"):
-                    # Parallel query loading — reduces cold-cache time ~3-4×
-                    _loaders = [
-                        ("stock",      lambda: cq.stock_onhand(conn)),
-                        ("ventas",     lambda: cq.dashboard_ventas_mtd(conn)),
-                        ("is_cd",      lambda: cq.instock_daily_cd(conn)),
-                        ("is_tienda",  lambda: cq.instock_daily_tienda(conn)),
-                        ("ytd",        lambda: cq.ventas_ytd(conn)),
-                        ("ytd_aa",     lambda: cq.ventas_ytd_aa(conn)),
-                        ("v90d",       lambda: cq.ventas_diarias_90d(conn)),
-                        ("stock_proy", lambda: cq.stock_proyeccion(conn)),
-                        ("comex",      lambda: cq.comex_full(conn)),
-                        ("transit",    lambda: cq.transit_stock_kpi(conn)),
-                        ("maestra",    lambda: cq.maestra(conn)),
-                        ("crit",       lambda: cq.stock_critico_metrics(conn)),
-                    ]
-                    _data: dict = {}
-                    with ThreadPoolExecutor(max_workers=4) as _pool:
-                        _futs = {_pool.submit(fn): name for name, fn in _loaders}
-                        for _f in as_completed(_futs):
-                            _data[_futs[_f]] = _f.result()
+                _loaders = [
+                    ("stock",      lambda: cq.stock_onhand(conn)),
+                    ("ventas",     lambda: cq.dashboard_ventas_mtd(conn)),
+                    ("is_cd",      lambda: cq.instock_daily_cd(conn)),
+                    ("is_tienda",  lambda: cq.instock_daily_tienda(conn)),
+                    ("ytd",        lambda: cq.ventas_ytd(conn)),
+                    ("ytd_aa",     lambda: cq.ventas_ytd_aa(conn)),
+                    ("v90d",       lambda: cq.ventas_diarias_90d(conn)),
+                    ("stock_proy", lambda: cq.stock_proyeccion(conn)),
+                    ("comex",      lambda: cq.comex_full(conn)),
+                    ("transit",    lambda: cq.transit_stock_kpi(conn)),
+                    ("maestra",    lambda: cq.maestra(conn)),
+                    ("crit",       lambda: cq.stock_critico_metrics(conn)),
+                ]
+                _data: dict = {}
+                _query_errors: dict = {}
+                with st.spinner("Consultando Snowflake..."):
+                    for _name, _fn in _loaders:
+                        try:
+                            _data[_name] = _fn()
+                        except Exception as _qe:
+                            _query_errors[_name] = str(_qe)
+                            _data[_name] = pd.DataFrame()
 
-                    df_stock      = apply_pm_filter(_data["stock"])
-                    df_ventas     = apply_pm_filter(_data["ventas"])
-                    df_is_cd      = apply_pm_filter(_data["is_cd"])
-                    df_is_tienda  = apply_pm_filter(_data["is_tienda"])
-                    df_ytd        = apply_pm_filter(_data["ytd"])
-                    df_ytd_aa     = apply_pm_filter(_data["ytd_aa"])
-                    df_v90d       = apply_pm_filter(_data["v90d"])
-                    df_stock_proy = apply_pm_filter(_data["stock_proy"])
-                    df_comex_full = apply_pm_filter(_data["comex"])
-                    df_transit    = apply_pm_filter(_data["transit"])
-                    df_maestra    = _data["maestra"]  # No filtrar maestra (usada para joins)
-                    df_crit       = apply_pm_filter(_data["crit"])
+                # Asignar siempre (queries fallidas entregan DataFrame vacío)
+                df_stock      = apply_pm_filter(_data["stock"])
+                df_ventas     = apply_pm_filter(_data["ventas"])
+                df_is_cd      = apply_pm_filter(_data["is_cd"])
+                df_is_tienda  = apply_pm_filter(_data["is_tienda"])
+                df_ytd        = apply_pm_filter(_data["ytd"])
+                df_ytd_aa     = apply_pm_filter(_data["ytd_aa"])
+                df_v90d       = apply_pm_filter(_data["v90d"])
+                df_stock_proy = apply_pm_filter(_data["stock_proy"])
+                df_comex_full = apply_pm_filter(_data["comex"])
+                df_transit    = apply_pm_filter(_data["transit"])
+                df_maestra    = _data["maestra"]  # No filtrar maestra (usada para joins)
+                df_crit       = apply_pm_filter(_data["crit"])
+
+                # Mostrar errores visibles al usuario
+                if _query_errors:
+                    with st.expander(f"⚠️ {len(_query_errors)} query(s) fallaron — ver detalle", expanded=True):
+                        for qname, qerr in _query_errors.items():
+                            st.error(f"**{qname}**: {qerr}")
 
                 # ── Helpers ──
                 def _moi_color(val):

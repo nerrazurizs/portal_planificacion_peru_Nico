@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from db.queries import QUERY_MAESTRA
+from db.queries import QUERY_MAESTRA, _PROD
 from config import apply_pm_filter
 from utils.sql_builder import build_ilike, build_in_clause, append_condition
 from utils.filters import limpiar_lista, fmt_clp
@@ -47,8 +47,8 @@ def _save_profiles(profiles: dict) -> None:
 def _load_distinct(_conn, col: str) -> list[str]:
     """Load distinct non-null values for a maestra column. Cached 1 hour."""
     df = pd.read_sql(
-        f"SELECT DISTINCT {col} FROM db_dimensiones.dim.vw_producto "
-        f"WHERE {col} IS NOT NULL AND TRIM({col}) != '' ORDER BY {col}",
+        f"SELECT DISTINCT p.{col} FROM {_PROD} p "
+        f"WHERE p.{col} IS NOT NULL AND TRIM(CAST(p.{col} AS VARCHAR)) != '' ORDER BY p.{col}",
         _conn,
     )
     return df.iloc[:, 0].dropna().astype(str).str.strip().tolist()

@@ -28,6 +28,7 @@ from db.queries import (
     QUERY_COMEX_ATRASADAS, QUERY_COMEX_SIN_CARPETA,
     QUERY_COMEX_SIN_FACTURA, QUERY_COMEX_PROXIMAS,
     QUERY_STOCK_CRITICO_DETAIL,
+    _COMPRAS,
 )
 from utils.budget import load_budget
 from utils.email_sender import build_alert_email, get_smtp_config, send_alert_email
@@ -69,18 +70,15 @@ MOI_THRESHOLD        = 8
 ANTIGUEDAD_THRESHOLD = 8
 
 # ── Plan compras query (standalone, no Streamlit cache) ───────────────────────
-_PLAN_COMPRAS_QUERY = """
+# Peru: usa _COMPRAS wrapper que normaliza columnas de ft_compras
+_PLAN_COMPRAS_QUERY = f"""
 SELECT
-    PO, NOM_PRODUCTO, NOM_PROVEEDOR, CARPETA_COMEX,
-    CASE
-        WHEN CARPETA_COMEX IS NULL OR TRIM(CARPETA_COMEX) = '' THEN DATEADD(day, 47, FECHA_ENTREGA)
-        ELSE ETA
-    END AS ETA_CALC,
-    CANTIDAD_FINAL_CORREGIDA, MONTOMN
-FROM db_supply.fct.ft_compras
-WHERE FECHA_RECEPCION_EN_CD IS NULL AND CANTIDAD_FINAL_CORREGIDA > 0
-  AND PO LIKE 'PO-%%'
-ORDER BY ETA_CALC ASC LIMIT 200
+    po, nom_producto, nom_proveedor, carpeta_comex,
+    eta AS ETA_CALC,
+    cantidad_final_corregida, montomn
+FROM {_COMPRAS}
+WHERE fecha_recepcion_en_cd IS NULL AND cantidad_final_corregida > 0
+ORDER BY eta ASC LIMIT 200
 """
 
 

@@ -10,6 +10,8 @@ from db.queries import (
     QUERY_MIRROR_HIST_SKU,
     QUERY_MIRROR_HIST_MONTHLY,
     QUERY_MIRROR_SUCURSAL,
+    _VCM,
+    _PROD,
 )
 from config import COLORS, dorel_layout, apply_pm_filter
 from db.cache import cached_query as cq
@@ -354,9 +356,9 @@ def process_forecast_mirror(df_input, conn, start_date, end_date, dates_map=None
             subs_placeholders = ", ".join(["%s"] * len(sublineas))
             q_nivel2 = f"""
             SELECT c.sublinea, b.id_sucursal, SUM(a.cantidad) as venta_qty
-            FROM db_finanzas.fct.ft_vcm a
-            LEFT JOIN db_syncros.public.coo_maestro_sucursal b ON a.cod_ccosto = b."CUSTOM 1"
-            LEFT JOIN db_dimensiones.dim.vw_producto c ON a.sku_producto = c.sku_producto
+            FROM {_VCM} a
+            LEFT JOIN db_syncros.public.coo_maestro_sucursal b ON a.cod_ccosto = b.id_sucursal
+            LEFT JOIN {_PROD} c ON a.sku_producto = c.sku_producto
             WHERE c.sublinea IN ({subs_placeholders})
               AND a.fecha BETWEEN %s AND %s
               AND b.canal_de_distribucion = 'TIENDA'
@@ -367,10 +369,10 @@ def process_forecast_mirror(df_input, conn, start_date, end_date, dates_map=None
             df_hist_sub.columns = [c.upper() for c in df_hist_sub.columns]
 
         # Global fallback
-        q_global = """
+        q_global = f"""
         SELECT b.id_sucursal, SUM(a.cantidad) as venta_global
-        FROM db_finanzas.fct.ft_vcm a
-        LEFT JOIN db_syncros.public.coo_maestro_sucursal b ON a.cod_ccosto = b."CUSTOM 1"
+        FROM {_VCM} a
+        LEFT JOIN db_syncros.public.coo_maestro_sucursal b ON a.cod_ccosto = b.id_sucursal
         WHERE a.fecha BETWEEN %s AND %s
           AND b.canal_de_distribucion = 'TIENDA'
         GROUP BY 1
@@ -601,9 +603,9 @@ def _load_mirror_history_batch(conn, espejo_skus, start_date, end_date):
         b.canal_de_distribucion as canal,
         DATE_TRUNC('month', a.fecha) as periodo,
         SUM(a.cantidad) as venta_qty
-    FROM db_finanzas.fct.ft_vcm a
+    FROM {_VCM} a
     LEFT JOIN db_syncros.public.coo_maestro_sucursal b
-        ON a.cod_ccosto = b."CUSTOM 1"
+        ON a.cod_ccosto = b.id_sucursal
     WHERE a.sku_producto IN ({placeholders})
       AND a.fecha BETWEEN %s AND %s
       AND a.cantidad > 0
