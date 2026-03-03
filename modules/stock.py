@@ -20,17 +20,45 @@ def _load_distinct(_conn, col: str) -> list[str]:
     return df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_canales(_conn) -> list[str]:
+    """Load distinct canal_de_distribucion values from maestro sucursal."""
+    df = pd.read_sql(
+        "SELECT DISTINCT canal_de_distribucion "
+        "FROM db_syncros.public.coo_maestro_sucursal "
+        "WHERE canal_de_distribucion IS NOT NULL "
+        "ORDER BY canal_de_distribucion",
+        _conn,
+    )
+    return df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _max_fecha_stock(_conn):
+    """Return the latest available date in ht_in_stock."""
+    df = pd.read_sql(
+        "SELECT MAX(fecha) as max_fecha FROM db_supply.hst.ht_in_stock WHERE fecha < CURRENT_DATE()",
+        _conn,
+    )
+    val = df.iloc[0, 0]
+    if val is None:
+        return (datetime.now() - timedelta(days=1)).date()
+    return pd.to_datetime(val).date()
+
+
 def render_stock(conn):
     st.html("<h2 class='sub-header'>Consulta de Stock</h2>")
     st.info("Muestra la foto de stock disponible. Incluye calculo de MOI y Antiguedad.")
 
     # Load distinct values for dropdown filters (cached 1hr)
     with lottie_spinner("snowflake"):
-        opts_area = _load_distinct(conn, "AREA")
-        opts_linea = _load_distinct(conn, "LINEA")
-        opts_sublinea = _load_distinct(conn, "SUBLINEA")
-        opts_marca = _load_distinct(conn, "MARCA")
+        opts_area      = _load_distinct(conn, "AREA")
+        opts_linea     = _load_distinct(conn, "LINEA")
+        opts_sublinea  = _load_distinct(conn, "SUBLINEA")
+        opts_marca     = _load_distinct(conn, "MARCA")
         opts_proveedor = _load_distinct(conn, "PROVEEDOR")
+        opts_canales   = _load_canales(conn)
+        max_fecha      = _max_fecha_stock(conn)
 
     filtros = {}
     with st.expander("Filtros de Busqueda", expanded=True):
@@ -43,7 +71,7 @@ def render_stock(conn):
 
         # Col 2 — Canal, Area, Linea, Sublinea (multiselect)
         filtros["canal"] = c2.multiselect(
-            "Canal", ["TIENDA", "CD", "ETAIL", "MAYOR"], default=["TIENDA", "CD"]
+            "Canal", opts_canales, default=opts_canales
         )
         filtros["area"] = c3.multiselect("Area", opts_area)
         filtros["linea"] = c3.multiselect("Linea", opts_linea)
@@ -63,11 +91,10 @@ def render_stock(conn):
         )
         filtros["mix_oficial"] = c6.text_input("Mix Oficial (contiene)")
 
-        # Date inputs
+        # Date inputs — default a la ultima fecha disponible en ht_in_stock
         c10, c11 = st.columns(2)
-        today = datetime.now().date()
-        filtros["fecha_inicio"] = c10.date_input("Fecha Inicio", value=today - timedelta(days=1))
-        filtros["fecha_fin"] = c11.date_input("Fecha Fin", value=today - timedelta(days=1))
+        filtros["fecha_inicio"] = c10.date_input("Fecha Inicio", value=max_fecha)
+        filtros["fecha_fin"]    = c11.date_input("Fecha Fin",    value=max_fecha)
 
     if st.button("Ejecutar Stock", type="primary"):
         # The base query uses %s for fecha_inicio and fecha_fin
