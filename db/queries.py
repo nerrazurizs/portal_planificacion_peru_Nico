@@ -63,8 +63,7 @@ _PROD = """(
         moderno,
         outlet,
         tradicional,
-        oferta,
-        cod_pm
+        oferta
     FROM db_dimensiones.dim.vw_producto
 )"""
 
@@ -1639,6 +1638,75 @@ select
     bu.blk
 from db_supply.fct.ft_bulto bu
 where bu.fecha_creacion >= dateadd('day', -90, current_date())
+"""
+
+# ===========================================================================
+# VENTA PERDIDA (Lost Sales) — Stock vs Demanda VCM (excl. Diciembre)
+# ===========================================================================
+
+# Stock tienda snapshot (por fecha)
+QUERY_VP_STOCK_TIENDA = f"""
+SELECT
+    a.fecha,
+    a.sku_producto,
+    a.cod_bodega,
+    COALESCE(b.id_sucursal, a.cod_bodega) AS id_sucursal,
+    COALESCE(b.descripcion_sucursal, 'Sin descripcion') AS descripcion_sucursal,
+    SUM(a.stock_unidades) AS stock_unidades
+FROM {_INSTOCK} a
+LEFT JOIN db_syncros.public.coo_maestro_sucursal b
+    ON a.cod_bodega = b.id_sucursal
+WHERE a.fecha >= %s AND a.fecha <= %s
+  AND COALESCE(b.canal_de_distribucion, 'TIENDA') NOT IN ('CD')
+GROUP BY 1,2,3,4,5
+"""
+
+# Stock CD snapshot (por fecha)
+QUERY_VP_STOCK_CD = f"""
+SELECT
+    a.fecha,
+    a.sku_producto,
+    a.stock_unidades AS stock_cd
+FROM {_INSTOCK_CD} a
+WHERE a.fecha >= %s AND a.fecha <= %s
+"""
+
+# Ventas VCM por SKU x Sucursal (tiendas) — ventana de demanda
+QUERY_VP_VENTAS_TIENDA = f"""
+SELECT
+    v.sku_producto,
+    COALESCE(b.id_sucursal, v.cod_ccosto) AS id_sucursal,
+    SUM(v.cantidad)                    AS total_und,
+    SUM(v.neto)                        AS total_neto,
+    CASE WHEN SUM(v.cantidad) > 0
+         THEN SUM(v.neto) / SUM(v.cantidad)
+         ELSE 0 END                    AS avg_price
+FROM {_VCM} v
+LEFT JOIN db_syncros.public.coo_maestro_sucursal b
+    ON v.cod_ccosto = b.id_sucursal
+WHERE v.fecha >= %s AND v.fecha <= %s
+  AND v.cantidad > 0
+  AND COALESCE(b.canal_de_distribucion, 'TIENDA') NOT IN ('CD')
+GROUP BY 1, 2
+"""
+
+# Ventas VCM por SKU x Canal CD (MAYOR, ETAIL) — ventana de demanda
+QUERY_VP_VENTAS_CD = f"""
+SELECT
+    v.sku_producto,
+    b.canal_de_distribucion AS canal,
+    SUM(v.cantidad)                    AS total_und,
+    SUM(v.neto)                        AS total_neto,
+    CASE WHEN SUM(v.cantidad) > 0
+         THEN SUM(v.neto) / SUM(v.cantidad)
+         ELSE 0 END                    AS avg_price
+FROM {_VCM} v
+LEFT JOIN db_syncros.public.coo_maestro_sucursal b
+    ON v.cod_ccosto = b.id_sucursal
+WHERE v.fecha >= %s AND v.fecha <= %s
+  AND v.cantidad > 0
+  AND b.canal_de_distribucion IN ('MAYOR', 'ETAIL')
+GROUP BY 1, 2
 """
 
 QUERY_SUPPLY_DESPACHOS_FEDEX = """

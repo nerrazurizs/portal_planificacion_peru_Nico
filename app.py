@@ -42,6 +42,7 @@ from modules.redistribucion import render_redistribucion
 from modules.analisis_transitos import render_analisis_transitos
 from modules.capacidad_volumetrica import render_capacidad_volumetrica
 from modules.operaciones_supply import render_operaciones_supply
+from modules.venta_perdida import render_venta_perdida
 from modules.diagnostico import render_diagnostico
 from db.cache import cached_query as cq, clear_all as clear_query_cache, last_refresh_label, auto_refresh_if_new_day
 from utils.ui_animations import lottie_spinner, show_lottie, animated_kpi_row
@@ -286,6 +287,7 @@ def main_app():
             ("🛍️", "Pasillo Infinito"),
             ("🛒", "Canasta Productos"),
             ("📐", "Capacidad Volumetrica"),
+            ("📉", "Venta Perdida"),
         ],
         "OPERACION Y ALERTAS": [
             ("🗼", "Torre Control S&OP"),
@@ -488,6 +490,7 @@ def main_app():
         "Capacidad Volumetrica": render_capacidad_volumetrica,
         # Operaciones Supply: tablas ft_pedidotransferencia y ft_picking no existen en Peru
         "Operaciones Supply": None,
+        "Venta Perdida": render_venta_perdida,
         "Diagnostico Tablas": render_diagnostico,
     }
 
