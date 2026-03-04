@@ -182,7 +182,7 @@ def _build_mix_in(mix_values):
 
 
 def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
-                       filter_cd_instock=True):
+                       filter_cd_instock="stock_gt_0"):
     """Build the shared WITH ... CTE block for tienda VP queries.
 
     Returns the SQL string starting with ``WITH ... n_perfil AS (...)``
@@ -192,10 +192,17 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
     - Hardcoded exclusion of closed stores (Bellavista, Chiclayo 2).
     - ``cd_instock`` CTE (optional): CD daily stock for filtering.
 
+    Args:
+        filter_cd_instock: CD filter mode:
+            "none"        – no CD filter
+            "stock_gt_0"  – only VP where CD stock > 0 (default)
+            "instock_cd"  – only VP where InStock CD = 1
+                            (stock >= cantidad_prom_90_cia)
+
     Params (positional %s, 4 or 6 total):
         demand_start, demand_end  (demand CTE)
         stock_start, stock_end    (stock_daily CTE)
-      [if filter_cd_instock=True]:
+      [if filter_cd_instock != "none"]:
         stock_start, stock_end    (cd_instock CTE)
     """
     mix_clause = _build_mix_in(mix_values)
@@ -240,7 +247,13 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
         "AND UPPER(COALESCE(b.descripcion_sucursal, '')) "
         "NOT LIKE '%%OUTLET%%' "
         "AND UPPER(COALESCE(b.descripcion_sucursal, '')) "
-        "NOT LIKE '%%CAJAMARCA%%'"
+        "NOT LIKE '%%CAJAMARCA%%' "
+        "AND UPPER(COALESCE(b.descripcion_sucursal, '')) "
+        "NOT LIKE '%%TRUJILLO 2%%' "
+        "AND UPPER(COALESCE(b.descripcion_sucursal, '')) "
+        "NOT LIKE '%%TRUJILLO2%%' "
+        "AND CAST(b.id_sucursal AS VARCHAR) "
+        "NOT IN ('143', '148')"
     )
 
     return f"""
@@ -298,26 +311,32 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
     )""" + (f""",
     cd_instock AS (
         SELECT fecha, sku_producto, stock_unidades AS stock_cd,
+               COALESCE(cantidad_prom_90_cia, 0) AS cantidad_prom_90_cia,
                CASE WHEN stock_unidades > 0
                     AND stock_unidades >= COALESCE(cantidad_prom_90_cia, 0)
                     THEN 1 ELSE 0 END AS instock_cd
         FROM {_INSTOCK_CD}
         WHERE fecha >= %s AND fecha <= %s
-    )""" if filter_cd_instock else "")
+    )""" if filter_cd_instock != "none" else "")
 
 
 def _sql_vp_tienda(dias_ventana, mix_values=None, perfil_only=True,
-                   filter_cd_instock=True):
+                   filter_cd_instock="stock_gt_0"):
     """VP per SKU x day (aggregated across stores)."""
     cte = _build_tienda_ctes(dias_ventana, mix_values, perfil_only,
                              filter_cd_instock)
-    cd_join = (
-        """
+    if filter_cd_instock == "instock_cd":
+        cd_join = """
     INNER JOIN cd_instock ci
         ON s.fecha = ci.fecha AND s.sku_producto = ci.sku_producto
         AND ci.instock_cd = 1"""
-        if filter_cd_instock else ""
-    )
+    elif filter_cd_instock == "stock_gt_0":
+        cd_join = """
+    INNER JOIN cd_instock ci
+        ON s.fecha = ci.fecha AND s.sku_producto = ci.sku_producto
+        AND ci.stock_cd > 0"""
+    else:
+        cd_join = ""
     return cte + f"""
     SELECT
         s.fecha,
@@ -353,17 +372,22 @@ def _sql_vp_tienda(dias_ventana, mix_values=None, perfil_only=True,
 
 
 def _sql_vp_tienda_by_store(dias_ventana, mix_values=None,
-                            perfil_only=True, filter_cd_instock=True):
+                            perfil_only=True, filter_cd_instock="stock_gt_0"):
     """VP per store x day (aggregated across SKUs)."""
     cte = _build_tienda_ctes(dias_ventana, mix_values, perfil_only,
                              filter_cd_instock)
-    cd_join = (
-        """
+    if filter_cd_instock == "instock_cd":
+        cd_join = """
     INNER JOIN cd_instock ci
         ON s.fecha = ci.fecha AND s.sku_producto = ci.sku_producto
         AND ci.instock_cd = 1"""
-        if filter_cd_instock else ""
-    )
+    elif filter_cd_instock == "stock_gt_0":
+        cd_join = """
+    INNER JOIN cd_instock ci
+        ON s.fecha = ci.fecha AND s.sku_producto = ci.sku_producto
+        AND ci.stock_cd > 0"""
+    else:
+        cd_join = ""
     return cte + f"""
     SELECT
         s.fecha,
@@ -454,7 +478,7 @@ def _sql_vp_cd(dias_ventana, mix_values=None):
         {mix_join_v}
         WHERE v.fecha >= %s AND v.fecha <= %s
           AND v.cantidad > 0
-          AND b.canal_de_distribucion IN ('MAYOR', 'ETAIL')
+          AND b.canal_de_distribucion IN ('MAYOR', 'MAYORISTA', 'ETAIL')
         GROUP BY 1, 2
     ),
     demand_total AS (
@@ -492,23 +516,32 @@ def _sql_vp_cd(dias_ventana, mix_values=None):
 
 
 def _sql_vp_tienda_detail(dias_ventana, mix_values=None, perfil_only=True,
-                          filter_cd_instock=True):
+                          filter_cd_instock="stock_gt_0"):
     """VP detail per SKU x Store x Day — full calculation audit.
 
     Returns every intermediate value: stock, demand, demand_per_store,
-    instock flag, VP units, VP $, price used, plus stock_cd when
-    filter_cd_instock is active.
+    instock flag, VP units, VP $, price used, plus stock_cd and
+    instock_cd when cd filter is active.
     """
     cte = _build_tienda_ctes(dias_ventana, mix_values, perfil_only,
                              filter_cd_instock)
-    cd_join = (
-        """
+    if filter_cd_instock == "instock_cd":
+        cd_join = """
     INNER JOIN cd_instock ci
         ON s.fecha = ci.fecha AND s.sku_producto = ci.sku_producto
         AND ci.instock_cd = 1"""
-        if filter_cd_instock else ""
-    )
-    cd_col = "ci.stock_cd" if filter_cd_instock else "NULL::FLOAT AS stock_cd"
+    elif filter_cd_instock == "stock_gt_0":
+        cd_join = """
+    INNER JOIN cd_instock ci
+        ON s.fecha = ci.fecha AND s.sku_producto = ci.sku_producto
+        AND ci.stock_cd > 0"""
+    else:
+        cd_join = ""
+    if filter_cd_instock != "none":
+        cd_col = "ci.stock_cd, ci.cantidad_prom_90_cia, ci.instock_cd"
+    else:
+        cd_col = ("NULL::FLOAT AS stock_cd, NULL::FLOAT AS cantidad_prom_90_cia, "
+                  "NULL::INT AS instock_cd")
     return cte + f"""
     SELECT
         s.fecha,
@@ -553,7 +586,7 @@ def _sql_vp_tienda_detail(dias_ventana, mix_values=None, perfil_only=True,
 
 def _compute_vp_range(conn, stock_start, stock_end,
                       mix_values=None, perfil_only=True,
-                      filter_cd_instock=True,
+                      filter_cd_instock="stock_gt_0",
                       apply_grace=False, grace_lead_days=3,
                       progress_bar=None):
     """Compute VP for a date range, running queries per month.
@@ -561,7 +594,10 @@ def _compute_vp_range(conn, stock_start, stock_end,
     Each month uses its own demand window (rolling, excl December).
 
     Args:
-        filter_cd_instock: Only include SKU×day where CD had stock > 0.
+        filter_cd_instock: CD filter mode:
+            "none"        – no CD filter
+            "stock_gt_0"  – VP where CD stock > 0 (default)
+            "instock_cd"  – VP where InStock CD = 1 (stock >= demand avg 90d)
         apply_grace: Apply lead-time grace period after CD recovery.
         grace_lead_days: Days to wait after CD recovery before measuring VP.
 
@@ -577,12 +613,12 @@ def _compute_vp_range(conn, stock_start, stock_end,
         f_ini, f_fin = _get_demand_window(date(ms.year, ms.month, 15))
         dias_ventana = (f_fin - f_ini).days + 1
 
-        # Tienda queries: 4 base params + 2 more if cd_instock filter
+        # Tienda queries: 4 base params + 2 more if cd filter active
         prm_tienda = [
             str(f_ini), str(f_fin),   # demand
             str(ms), str(me),         # stock_daily
         ]
-        if filter_cd_instock:
+        if filter_cd_instock != "none":
             prm_tienda.extend([str(ms), str(me)])  # cd_instock
         # CD query keeps original 4 params
         prm_cd = [str(f_ini), str(f_fin), str(ms), str(me)]
@@ -1155,12 +1191,22 @@ def render_venta_perdida(conn):
             value=True,
             help="Medir VP solo en SKU x Tienda con perfil = SI",
         )
-        f_cd_filter = c_chk2.checkbox(
-            "Solo InStock CD = 1",
-            value=True,
-            help="Solo medir VP tiendas para SKUs donde el CD tenia "
-                 "stock ese dia. VP accionable por falla de reposicion.",
+        _cd_options = {
+            "Stock CD > 0": "stock_gt_0",
+            "InStock CD formal": "instock_cd",
+            "Sin filtro CD": "none",
+        }
+        _cd_sel = c_chk2.selectbox(
+            "Filtro CD",
+            options=list(_cd_options.keys()),
+            index=0,
+            help=(
+                "Stock CD > 0: VP donde CD tenía algo de stock. "
+                "InStock CD formal: VP donde stock CD ≥ demanda prom 90d. "
+                "Sin filtro: todas las combinaciones SKU×día."
+            ),
         )
+        f_cd_filter = _cd_options[_cd_sel]
         f_grace = c_chk3.checkbox(
             "Gracia lead time",
             value=False,
@@ -1368,15 +1414,22 @@ def render_venta_perdida(conn):
     # ── Excluded stores info (hardcoded) ──
     st.info(
         "**Tiendas excluidas** (cerradas): Bellavista, Chiclayo 2, "
-        "San Miguel 2, Tienda Outlet, Cajamarca",
+        "San Miguel 2, Outlet, Cajamarca, Trujillo 2, 143, 148",
         icon="🏪",
     )
 
     # ── Filter info banners ──
-    if st.session_state.get("vp_cd_filter"):
+    _cd_mode = st.session_state.get("vp_cd_filter", "none")
+    if _cd_mode == "stock_gt_0":
         st.info(
-            "**Filtro activo**: Solo VP tiendas para SKUs con InStock CD = 1 "
-            "(stock CD >= demanda prom 90d → VP accionable)",
+            "**Filtro CD activo**: Solo VP tiendas para SKUs donde CD "
+            "tenía stock > 0 ese día",
+            icon="📦",
+        )
+    elif _cd_mode == "instock_cd":
+        st.info(
+            "**Filtro CD activo**: Solo VP tiendas para SKUs con "
+            "InStock CD = 1 (stock CD ≥ demanda prom 90d)",
             icon="📦",
         )
     if st.session_state.get("vp_grace"):
@@ -1408,7 +1461,7 @@ def render_venta_perdida(conn):
                 st.dataframe(diag["demanda_tienda"], hide_index=True)
             st.write(
                 "**Tiendas excluidas (cerradas):** Bellavista, Chiclayo 2, "
-                "San Miguel 2, Tienda Outlet, Cajamarca"
+                "San Miguel 2, Outlet, Cajamarca, Trujillo 2, 143, 148"
             )
 
     # ── Tabs ──
@@ -1791,7 +1844,8 @@ def render_venta_perdida(conn):
             st.html(_hdr("📦 VP Centro de Distribucion"))
             vp_mayor = (
                 df_sku_c.loc[
-                    df_sku_c["CANAL"] == "MAYOR", "VP_PESOS"
+                    df_sku_c["CANAL"].isin(["MAYOR", "MAYORISTA"]),
+                    "VP_PESOS",
                 ].sum() if "CANAL" in df_sku_c.columns else 0
             )
             vp_etail = (
@@ -1956,6 +2010,8 @@ def render_venta_perdida(conn):
                 "DESCRIPCION_SUCURSAL": "first",
                 "STOCK_UNIDADES": "mean",
                 "STOCK_CD": "mean",
+                "CANTIDAD_PROM_90_CIA": "mean",
+                "INSTOCK_CD": "mean",
                 "DEMANDA_TOTAL_DIA": "mean",
                 "N_TIENDAS_PERFIL": "max",
                 "DEMANDA_POR_TIENDA": "mean",
@@ -2020,6 +2076,7 @@ def render_venta_perdida(conn):
                     "AREA", "LINEA", "MARCA", "MIX_OFICIAL",
                     "PRODUCTO_STATUS",
                     "STOCK_UNIDADES", "STOCK_CD",
+                    "CANTIDAD_PROM_90_CIA", "INSTOCK_CD",
                     "DEMANDA_POR_TIENDA",
                     "N_TIENDAS_PERFIL",
                     "DIAS_INSTOCK", "DIAS_TOTAL", "INSTOCK_PCT",
@@ -2052,6 +2109,15 @@ def render_venta_perdida(conn):
                         "STOCK_CD": st.column_config.NumberColumn(
                             "Stock CD Prom", format="%.1f",
                             help="Stock promedio diario en CD para este SKU",
+                        ),
+                        "CANTIDAD_PROM_90_CIA": st.column_config.NumberColumn(
+                            "Dda Prom 90d CIA", format="%.1f",
+                            help="Demanda promedio diaria 90d a nivel cia "
+                                 "(umbral InStock CD)",
+                        ),
+                        "INSTOCK_CD": st.column_config.NumberColumn(
+                            "IS CD", format="%d",
+                            help="1 = stock CD >= demanda prom 90d cia, 0 = no",
                         ),
                         "DEMANDA_POR_TIENDA": st.column_config.NumberColumn(
                             "Dda/Tienda/Dia", format="%.2f",
@@ -2123,6 +2189,7 @@ def render_venta_perdida(conn):
                 "AREA", "LINEA", "MARCA", "MIX_OFICIAL",
                 "PRODUCTO_STATUS", "FIRST_SALE_DATE",
                 "STOCK_UNIDADES", "STOCK_CD",
+                "CANTIDAD_PROM_90_CIA", "INSTOCK_CD",
                 "DEMANDA_TOTAL_DIA",
                 "N_TIENDAS_PERFIL", "DEMANDA_POR_TIENDA",
                 "INSTOCK", "VP_UNIDADES", "VP_PESOS",

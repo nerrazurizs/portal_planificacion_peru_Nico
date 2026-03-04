@@ -374,11 +374,10 @@ def main_app():
     def _load_pm_options(_conn):
         try:
             import pandas as pd
-            from db.queries import _PROD
             df = pd.read_sql(
-                f"SELECT DISTINCT p.cod_pm FROM {_PROD} p "
-                f"WHERE p.cod_pm IS NOT NULL AND TRIM(CAST(p.cod_pm AS VARCHAR)) != '' "
-                f"ORDER BY p.cod_pm",
+                "SELECT DISTINCT cod_pm FROM db_dimensiones.dim.vw_producto "
+                "WHERE cod_pm IS NOT NULL AND TRIM(CAST(cod_pm AS VARCHAR)) != '' "
+                "ORDER BY cod_pm",
                 _conn,
             )
             return df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
