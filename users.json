@@ -1,0 +1,34 @@
+{
+  "users": {
+    "camilo.onate@dorel.cl": {
+      "nombre": "Camilo Onate",
+      "cargo": "Administrador",
+      "rol": "admin",
+      "jefe": null,
+      "areas": ["*"],
+      "password_hash": "7a402612d17e4ee2ba20489317cc4f86ff87091a3d587b282c975c32ad10d27b",
+      "must_change_password": false,
+      "activo": true
+    },
+    "sebastian.gibaja@comexa.com.pe": {
+      "nombre": "Sebastian Gibaja",
+      "cargo": "Planificador",
+      "rol": "planner",
+      "jefe": null,
+      "areas": ["*"],
+      "password_hash": "7a402612d17e4ee2ba20489317cc4f86ff87091a3d587b282c975c32ad10d27b",
+      "must_change_password": false,
+      "activo": true
+    },
+    "kevin.diaz@comexa.com.pe": {
+      "nombre": "Kevin Diaz",
+      "cargo": "Planificador",
+      "rol": "planner",
+      "jefe": null,
+      "areas": ["*"],
+      "password_hash": "cd5e264ed3442291e6710ecc3293322ac6d38fb0a8a054966a6a028dd3794521",
+      "must_change_password": false,
+      "activo": true
+    }
+  }
+}
