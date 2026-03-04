@@ -670,17 +670,18 @@ def _compute_vp_range(conn, stock_start, stock_end,
 
     # ── CD InStock filter (post-hoc on detail, then re-aggregate) ──
     if filter_cd_instock != "none" and not df_detail.empty:
-        if "INSTOCK_CD" in df_detail.columns:
+        _pre_filter_n = len(df_detail)
+        if "STOCK_CD" in df_detail.columns:
             if filter_cd_instock == "instock_cd":
-                mask = df_detail["INSTOCK_CD"] == 1
+                # Keep rows where InStock CD = 1 OR where we have no CD data (NULL)
+                mask = df_detail["INSTOCK_CD"].isna() | (df_detail["INSTOCK_CD"] == 1)
             else:  # stock_gt_0
-                mask = (
-                    df_detail["STOCK_CD"].fillna(0) > 0
-                    if "STOCK_CD" in df_detail.columns
-                    else pd.Series(True, index=df_detail.index)
-                )
+                # Keep rows where CD stock > 0 OR where we have no CD data (NULL)
+                mask = df_detail["STOCK_CD"].isna() | (df_detail["STOCK_CD"] > 0)
             df_detail = df_detail[mask].copy()
-        df_tienda, df_by_store = _reaggregate_from_detail(df_detail)
+        # Only re-aggregate if filter kept some rows
+        if not df_detail.empty:
+            df_tienda, df_by_store = _reaggregate_from_detail(df_detail)
 
     # ── Grace period: zero VP during lead-time after CD recovery ──
     if apply_grace and not df_detail.empty:
@@ -690,7 +691,8 @@ def _compute_vp_range(conn, stock_start, stock_end,
             df_detail, df_recovery, grace_lead_days,
         )
         # Re-aggregate tienda and by_store from grace-adjusted detail
-        df_tienda, df_by_store = _reaggregate_from_detail(df_detail)
+        if not df_detail.empty:
+            df_tienda, df_by_store = _reaggregate_from_detail(df_detail)
 
     return df_tienda, df_cd, df_by_store, df_detail
 
