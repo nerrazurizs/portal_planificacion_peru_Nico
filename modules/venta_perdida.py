@@ -270,7 +270,8 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
     demand AS (
         SELECT
             v.sku_producto,
-            v.cod_ccosto AS id_sucursal,
+            COALESCE(CAST(b.id_sucursal AS VARCHAR),
+                     CAST(v.cod_ccosto AS VARCHAR)) AS id_sucursal,
             SUM(v.cantidad) / NULLIF({dias_ventana}::FLOAT, 0)
                 AS demand_per_store,
             CASE WHEN SUM(v.cantidad) > 0
@@ -308,7 +309,8 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
         SELECT
             a.fecha,
             a.sku_producto,
-            a.cod_bodega AS id_sucursal,
+            COALESCE(CAST(b.id_sucursal AS VARCHAR),
+                     CAST(a.cod_bodega AS VARCHAR)) AS id_sucursal,
             MAX(COALESCE(b.descripcion_sucursal,
                          CAST(a.cod_bodega AS VARCHAR)))
                 AS descripcion_sucursal,
@@ -620,6 +622,51 @@ def _compute_vp_range(conn, stock_start, stock_end,
         df_t = norm_cols(pd.read_sql(sql_t, conn, params=prm_base))
         if not df_t.empty:
             all_tienda.append(df_t)
+
+        # ── Diagnostic: check store ID overlap (first month only) ──
+        if i == 0:
+            try:
+                _diag_sql = f"""
+                SELECT
+                    'demand' AS src,
+                    COUNT(*) AS n_rows,
+                    COUNT(DISTINCT id_sucursal) AS n_stores,
+                    LISTAGG(DISTINCT id_sucursal, ', ')
+                        WITHIN GROUP (ORDER BY id_sucursal) AS sample_ids
+                FROM (
+                    SELECT COALESCE(CAST(b.id_sucursal AS VARCHAR),
+                                    CAST(v.cod_ccosto AS VARCHAR)) AS id_sucursal
+                    FROM {_VCM} v
+                    LEFT JOIN db_syncros.public.coo_maestro_sucursal b
+                        ON v.cod_ccosto = b.id_sucursal
+                    WHERE v.fecha >= %s AND v.fecha <= %s
+                      AND v.cantidad > 0
+                      AND COALESCE(b.canal_de_distribucion, 'TIENDA')
+                          NOT IN ('CD', 'MAYOR', 'ETAIL', 'MAYORISTA')
+                )
+                UNION ALL
+                SELECT
+                    'stock' AS src,
+                    COUNT(*) AS n_rows,
+                    COUNT(DISTINCT id_sucursal) AS n_stores,
+                    LISTAGG(DISTINCT id_sucursal, ', ')
+                        WITHIN GROUP (ORDER BY id_sucursal) AS sample_ids
+                FROM (
+                    SELECT COALESCE(CAST(b.id_sucursal AS VARCHAR),
+                                    CAST(a.cod_bodega AS VARCHAR)) AS id_sucursal
+                    FROM {_INSTOCK} a
+                    LEFT JOIN db_syncros.public.coo_maestro_sucursal b
+                        ON a.cod_bodega = b.id_sucursal
+                    WHERE a.fecha >= %s AND a.fecha <= %s
+                      AND COALESCE(b.canal_de_distribucion, 'TIENDA')
+                          NOT IN ('CD', 'MAYOR', 'ETAIL', 'MAYORISTA')
+                )
+                """
+                _diag_prm = [str(f_ini), str(f_fin), str(ms), str(me)]
+                _df_diag = pd.read_sql(_diag_sql, conn, params=_diag_prm)
+                st.session_state["vp_store_diag"] = _df_diag
+            except Exception:
+                pass
 
         # ── Tienda VP (store level) — always unfiltered ──
         sql_ts = _sql_vp_tienda_by_store(
@@ -1470,20 +1517,26 @@ def render_venta_perdida(conn):
 
     # ── Diagnostics (if tiendas empty) ──
     diag = st.session_state.get("vp_diagnostics")
-    if df_tienda.empty and diag:
+    _store_diag = st.session_state.get("vp_store_diag")
+    if df_tienda.empty:
         with st.expander("🔧 Diagnostico VP Tiendas = $0", expanded=True):
-            if diag.get("canales") is not None:
-                st.write("**Canales en coo_maestro_sucursal:**")
-                st.dataframe(diag["canales"], hide_index=True)
-            if diag.get("stock_por_canal") is not None:
-                st.write("**Stock (INSTOCK) por canal:**")
-                st.dataframe(diag["stock_por_canal"], hide_index=True)
-            if diag.get("perfil") is not None:
-                st.write("**Distribucion PERFIL (tiendas):**")
-                st.dataframe(diag["perfil"], hide_index=True)
-            if diag.get("demanda_tienda") is not None:
-                st.write("**Demanda VCM tiendas:**")
-                st.dataframe(diag["demanda_tienda"], hide_index=True)
+            # Store ID overlap diagnostic
+            if _store_diag is not None and not _store_diag.empty:
+                st.write("**Overlap tiendas demand vs stock:**")
+                st.dataframe(_store_diag, hide_index=True)
+            if diag:
+                if diag.get("canales") is not None:
+                    st.write("**Canales en coo_maestro_sucursal:**")
+                    st.dataframe(diag["canales"], hide_index=True)
+                if diag.get("stock_por_canal") is not None:
+                    st.write("**Stock (INSTOCK) por canal:**")
+                    st.dataframe(diag["stock_por_canal"], hide_index=True)
+                if diag.get("perfil") is not None:
+                    st.write("**Distribucion PERFIL (tiendas):**")
+                    st.dataframe(diag["perfil"], hide_index=True)
+                if diag.get("demanda_tienda") is not None:
+                    st.write("**Demanda VCM tiendas:**")
+                    st.dataframe(diag["demanda_tienda"], hide_index=True)
             st.write(
                 "**Tiendas excluidas (cerradas):** Bellavista, Chiclayo 2, "
                 "San Miguel 2, Outlet, Cajamarca, Trujillo 2, 143, 148"
