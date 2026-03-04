@@ -334,23 +334,14 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
     )""" if filter_cd_instock != "none" else "")
 
 
-def _sql_vp_tienda(dias_ventana, mix_values=None, perfil_only=True,
-                   filter_cd_instock="stock_gt_0"):
-    """VP per SKU x day (aggregated across stores)."""
+def _sql_vp_tienda(dias_ventana, mix_values=None, perfil_only=True):
+    """VP per SKU x day (aggregated across stores).
+
+    Always runs WITHOUT cd_instock filter (4 params).
+    CD filter is applied post-hoc in Python via detail data.
+    """
     cte = _build_tienda_ctes(dias_ventana, mix_values, perfil_only,
-                             filter_cd_instock)
-    if filter_cd_instock == "instock_cd":
-        cd_join = """
-    INNER JOIN cd_instock ci
-        ON s.fecha = ci.fecha AND s.sku_producto = ci.sku_producto
-        AND ci.instock_cd = 1"""
-    elif filter_cd_instock == "stock_gt_0":
-        cd_join = """
-    INNER JOIN cd_instock ci
-        ON s.fecha = ci.fecha AND s.sku_producto = ci.sku_producto
-        AND ci.stock_cd > 0"""
-    else:
-        cd_join = ""
+                             filter_cd_instock="none")
     return cte + f"""
     SELECT
         s.fecha,
@@ -380,28 +371,17 @@ def _sql_vp_tienda(dias_ventana, mix_values=None, perfil_only=True,
         ON s.fecha = np.fecha AND s.sku_producto = np.sku_producto
     LEFT JOIN prod_price pp
         ON s.sku_producto = pp.sku_producto
-    {cd_join}
     GROUP BY 1, 2
     """
 
 
-def _sql_vp_tienda_by_store(dias_ventana, mix_values=None,
-                            perfil_only=True, filter_cd_instock="stock_gt_0"):
-    """VP per store x day (aggregated across SKUs)."""
+def _sql_vp_tienda_by_store(dias_ventana, mix_values=None, perfil_only=True):
+    """VP per store x day (aggregated across SKUs).
+
+    Always runs WITHOUT cd_instock filter (4 params).
+    """
     cte = _build_tienda_ctes(dias_ventana, mix_values, perfil_only,
-                             filter_cd_instock)
-    if filter_cd_instock == "instock_cd":
-        cd_join = """
-    INNER JOIN cd_instock ci
-        ON s.fecha = ci.fecha AND s.sku_producto = ci.sku_producto
-        AND ci.instock_cd = 1"""
-    elif filter_cd_instock == "stock_gt_0":
-        cd_join = """
-    INNER JOIN cd_instock ci
-        ON s.fecha = ci.fecha AND s.sku_producto = ci.sku_producto
-        AND ci.stock_cd > 0"""
-    else:
-        cd_join = ""
+                             filter_cd_instock="none")
     return cte + f"""
     SELECT
         s.fecha,
@@ -432,7 +412,6 @@ def _sql_vp_tienda_by_store(dias_ventana, mix_values=None,
         ON s.fecha = np.fecha AND s.sku_producto = np.sku_producto
     LEFT JOIN prod_price pp
         ON s.sku_producto = pp.sku_producto
-    {cd_join}
     GROUP BY 1, 2
     """
 
@@ -530,30 +509,26 @@ def _sql_vp_cd(dias_ventana, mix_values=None):
 
 
 def _sql_vp_tienda_detail(dias_ventana, mix_values=None, perfil_only=True,
-                          filter_cd_instock="stock_gt_0"):
+                          include_cd_cols=True):
     """VP detail per SKU x Store x Day — full calculation audit.
 
     Returns every intermediate value: stock, demand, demand_per_store,
-    instock flag, VP units, VP $, price used, plus stock_cd and
-    instock_cd when cd filter is active.
+    instock flag, VP units, VP $, price used.
+
+    When include_cd_cols=True, LEFT JOINs cd_instock to add:
+    stock_cd, daily_demand_all, instock_cd (for post-hoc filtering).
+    Uses 8 params; otherwise 4 params.
     """
+    _mode = "stock_gt_0" if include_cd_cols else "none"
     cte = _build_tienda_ctes(dias_ventana, mix_values, perfil_only,
-                             filter_cd_instock)
-    if filter_cd_instock == "instock_cd":
+                             filter_cd_instock=_mode)
+    if include_cd_cols:
         cd_join = """
-    INNER JOIN cd_instock ci
-        ON s.fecha = ci.fecha AND s.sku_producto = ci.sku_producto
-        AND ci.instock_cd = 1"""
-    elif filter_cd_instock == "stock_gt_0":
-        cd_join = """
-    INNER JOIN cd_instock ci
-        ON s.fecha = ci.fecha AND s.sku_producto = ci.sku_producto
-        AND ci.stock_cd > 0"""
-    else:
-        cd_join = ""
-    if filter_cd_instock != "none":
+    LEFT JOIN cd_instock ci
+        ON s.fecha = ci.fecha AND s.sku_producto = ci.sku_producto"""
         cd_col = "ci.stock_cd, ci.daily_demand_all, ci.instock_cd"
     else:
+        cd_join = ""
         cd_col = ("NULL::FLOAT AS stock_cd, NULL::FLOAT AS daily_demand_all, "
                   "NULL::INT AS instock_cd")
     return cte + f"""
@@ -623,47 +598,51 @@ def _compute_vp_range(conn, stock_start, stock_end,
     all_by_store = []
     all_detail = []
 
+    # Decide whether to include CD columns in detail query
+    include_cd = filter_cd_instock != "none"
+
     for i, (ms, me) in enumerate(month_ranges):
         f_ini, f_fin = _get_demand_window(date(ms.year, ms.month, 15))
         dias_ventana = (f_fin - f_ini).days + 1
 
-        # Tienda queries: 4 base params + 4 more if cd filter active
-        # Order: demand, [demand_all], stock_daily, [cd_instock]
-        prm_tienda = [
-            str(f_ini), str(f_fin),   # demand (tienda only)
-        ]
-        if filter_cd_instock != "none":
-            prm_tienda.extend([str(f_ini), str(f_fin)])  # demand_all
-        prm_tienda.extend([str(ms), str(me)])  # stock_daily
-        if filter_cd_instock != "none":
-            prm_tienda.extend([str(ms), str(me)])  # cd_instock
-        # CD query keeps original 4 params
+        # Base params (aggregate queries): demand + stock_daily = 4
+        prm_base = [str(f_ini), str(f_fin), str(ms), str(me)]
+
+        # Detail params: demand, [demand_all], stock_daily, [cd_instock]
+        prm_detail = [str(f_ini), str(f_fin)]
+        if include_cd:
+            prm_detail.extend([str(f_ini), str(f_fin)])  # demand_all
+        prm_detail.extend([str(ms), str(me)])  # stock_daily
+        if include_cd:
+            prm_detail.extend([str(ms), str(me)])  # cd_instock
+
+        # CD query: demand + stock = 4
         prm_cd = [str(f_ini), str(f_fin), str(ms), str(me)]
 
-        # Tienda VP (SKU level)
-        sql_t = _sql_vp_tienda(dias_ventana, mix_values, perfil_only,
-                               filter_cd_instock)
-        df_t = norm_cols(pd.read_sql(sql_t, conn, params=prm_tienda))
+        # ── Tienda VP (SKU level) — always unfiltered ──
+        sql_t = _sql_vp_tienda(dias_ventana, mix_values, perfil_only)
+        df_t = norm_cols(pd.read_sql(sql_t, conn, params=prm_base))
         if not df_t.empty:
             all_tienda.append(df_t)
 
-        # Tienda VP (store level)
+        # ── Tienda VP (store level) — always unfiltered ──
         sql_ts = _sql_vp_tienda_by_store(
-            dias_ventana, mix_values, perfil_only, filter_cd_instock,
+            dias_ventana, mix_values, perfil_only,
         )
-        df_ts = norm_cols(pd.read_sql(sql_ts, conn, params=prm_tienda))
+        df_ts = norm_cols(pd.read_sql(sql_ts, conn, params=prm_base))
         if not df_ts.empty:
             all_by_store.append(df_ts)
 
-        # Tienda VP detail (SKU x store x day — full audit)
+        # ── Tienda VP detail — LEFT JOIN cd_instock for columns ──
         sql_td = _sql_vp_tienda_detail(
-            dias_ventana, mix_values, perfil_only, filter_cd_instock,
+            dias_ventana, mix_values, perfil_only,
+            include_cd_cols=include_cd,
         )
-        df_td = norm_cols(pd.read_sql(sql_td, conn, params=prm_tienda))
+        df_td = norm_cols(pd.read_sql(sql_td, conn, params=prm_detail))
         if not df_td.empty:
             all_detail.append(df_td)
 
-        # CD VP (no closed-store / cd_instock filter)
+        # ── CD VP ──
         sql_c = _sql_vp_cd(dias_ventana, mix_values)
         df_c = norm_cols(pd.read_sql(sql_c, conn, params=prm_cd))
         if not df_c.empty:
@@ -688,6 +667,20 @@ def _compute_vp_range(conn, stock_start, stock_end,
         pd.concat(all_detail, ignore_index=True) if all_detail
         else pd.DataFrame()
     )
+
+    # ── CD InStock filter (post-hoc on detail, then re-aggregate) ──
+    if filter_cd_instock != "none" and not df_detail.empty:
+        if "INSTOCK_CD" in df_detail.columns:
+            if filter_cd_instock == "instock_cd":
+                mask = df_detail["INSTOCK_CD"] == 1
+            else:  # stock_gt_0
+                mask = (
+                    df_detail["STOCK_CD"].fillna(0) > 0
+                    if "STOCK_CD" in df_detail.columns
+                    else pd.Series(True, index=df_detail.index)
+                )
+            df_detail = df_detail[mask].copy()
+        df_tienda, df_by_store = _reaggregate_from_detail(df_detail)
 
     # ── Grace period: zero VP during lead-time after CD recovery ──
     if apply_grace and not df_detail.empty:
