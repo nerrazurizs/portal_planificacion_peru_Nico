@@ -1457,6 +1457,7 @@ def render_venta_perdida(conn):
         )
 
     # ── Diagnostics (if tiendas empty) ──
+    diag = st.session_state.get("vp_diagnostics")
     if df_tienda.empty and diag:
         with st.expander("🔧 Diagnostico VP Tiendas = $0", expanded=True):
             if diag.get("canales") is not None:
