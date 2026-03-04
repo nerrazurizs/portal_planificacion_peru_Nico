@@ -319,15 +319,14 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
             SUM(a.stock_unidades) AS stock_unidades
         FROM {_INSTOCK} a
         LEFT JOIN (
-            SELECT CAST(cod_almacen AS VARCHAR) AS cod_almacen,
-                   MAX(CAST(cod_ccosto AS VARCHAR)) AS cod_ccosto,
+            SELECT cod_almacen,
+                   MAX(cod_ccosto) AS cod_ccosto,
                    MAX(nom_almacen) AS nom_almacen
             FROM db_dimensiones.dim.dt_almacen
-            GROUP BY 1
-        ) al ON CAST(a.cod_bodega AS VARCHAR) = al.cod_almacen
+            GROUP BY cod_almacen
+        ) al ON a.cod_bodega = al.cod_almacen
         LEFT JOIN db_syncros.public.coo_maestro_sucursal b
-            ON COALESCE(al.cod_ccosto, CAST(a.cod_bodega AS VARCHAR))
-               = CAST(b.id_sucursal AS VARCHAR)
+            ON COALESCE(al.cod_ccosto, a.cod_bodega) = b.id_sucursal
         {mix_join_a}
         WHERE a.fecha >= %s AND a.fecha <= %s
           AND COALESCE(b.canal_de_distribucion, 'TIENDA')
@@ -656,17 +655,23 @@ def _compute_vp_range(conn, stock_start, stock_end,
                 )
                 UNION ALL
                 SELECT
-                    'stock' AS src,
+                    'stock (via dt_almacen)' AS src,
                     COUNT(*) AS n_rows,
                     COUNT(DISTINCT id_sucursal) AS n_stores,
                     LISTAGG(DISTINCT id_sucursal, ', ')
                         WITHIN GROUP (ORDER BY id_sucursal) AS sample_ids
                 FROM (
                     SELECT COALESCE(CAST(b.id_sucursal AS VARCHAR),
+                                    CAST(al.cod_ccosto AS VARCHAR),
                                     CAST(a.cod_bodega AS VARCHAR)) AS id_sucursal
                     FROM {_INSTOCK} a
+                    LEFT JOIN (
+                        SELECT cod_almacen, MAX(cod_ccosto) AS cod_ccosto
+                        FROM db_dimensiones.dim.dt_almacen
+                        GROUP BY cod_almacen
+                    ) al ON a.cod_bodega = al.cod_almacen
                     LEFT JOIN db_syncros.public.coo_maestro_sucursal b
-                        ON a.cod_bodega = b.id_sucursal
+                        ON COALESCE(al.cod_ccosto, a.cod_bodega) = b.id_sucursal
                     WHERE a.fecha >= %s AND a.fecha <= %s
                       AND COALESCE(b.canal_de_distribucion, 'TIENDA')
                           NOT IN ('CD', 'MAYOR', 'ETAIL', 'MAYORISTA')
