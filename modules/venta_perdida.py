@@ -1202,9 +1202,9 @@ def render_venta_perdida(conn):
             help="Medir VP solo en SKU x Tienda con perfil = SI",
         )
         _cd_options = {
-            "InStock CD (≥1 día)": "instock_cd",
-            "Stock CD > 0": "stock_gt_0",
             "Sin filtro CD": "none",
+            "Stock CD > 0": "stock_gt_0",
+            "InStock CD (≥1 día)": "instock_cd",
         }
         _cd_sel = c_chk2.selectbox(
             "Filtro CD",
@@ -1443,6 +1443,20 @@ def render_venta_perdida(conn):
             "**Filtro CD activo**: Solo VP tiendas para SKUs donde CD "
             "tenía stock > 0 ese día",
             icon="📦",
+        )
+
+    # ── CD InStock diagnostic ──
+    if (not df_detail.empty and "INSTOCK_CD" in df_detail.columns
+            and "STOCK_CD" in df_detail.columns):
+        _n_total = len(df_detail)
+        _n_cd_gt0 = int((df_detail["STOCK_CD"].fillna(0) > 0).sum())
+        _n_is_cd = int((df_detail["INSTOCK_CD"].fillna(0) == 1).sum())
+        _pct_gt0 = _n_cd_gt0 / _n_total * 100 if _n_total else 0
+        _pct_is = _n_is_cd / _n_total * 100 if _n_total else 0
+        st.caption(
+            f"📊 **Cobertura CD**: de {_n_total:,} registros detail → "
+            f"Stock CD > 0: {_n_cd_gt0:,} ({_pct_gt0:.1f}%) · "
+            f"InStock CD = 1: {_n_is_cd:,} ({_pct_is:.1f}%)"
         )
     if st.session_state.get("vp_grace"):
         gd = st.session_state.get("vp_grace_days", 3)
