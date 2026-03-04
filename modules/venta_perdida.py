@@ -310,14 +310,24 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
             a.fecha,
             a.sku_producto,
             COALESCE(CAST(b.id_sucursal AS VARCHAR),
+                     CAST(al.cod_ccosto AS VARCHAR),
                      CAST(a.cod_bodega AS VARCHAR)) AS id_sucursal,
             MAX(COALESCE(b.descripcion_sucursal,
+                         al.nom_almacen,
                          CAST(a.cod_bodega AS VARCHAR)))
                 AS descripcion_sucursal,
             SUM(a.stock_unidades) AS stock_unidades
         FROM {_INSTOCK} a
+        LEFT JOIN (
+            SELECT CAST(cod_almacen AS VARCHAR) AS cod_almacen,
+                   MAX(CAST(cod_ccosto AS VARCHAR)) AS cod_ccosto,
+                   MAX(nom_almacen) AS nom_almacen
+            FROM db_dimensiones.dim.dt_almacen
+            GROUP BY 1
+        ) al ON CAST(a.cod_bodega AS VARCHAR) = al.cod_almacen
         LEFT JOIN db_syncros.public.coo_maestro_sucursal b
-            ON a.cod_bodega = b.id_sucursal
+            ON COALESCE(al.cod_ccosto, CAST(a.cod_bodega AS VARCHAR))
+               = CAST(b.id_sucursal AS VARCHAR)
         {mix_join_a}
         WHERE a.fecha >= %s AND a.fecha <= %s
           AND COALESCE(b.canal_de_distribucion, 'TIENDA')
