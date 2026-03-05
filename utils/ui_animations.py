@@ -11,7 +11,6 @@ Provides:
 
 import json
 import os
-from contextlib import contextmanager
 from pathlib import Path
 
 import streamlit as st
@@ -90,13 +89,13 @@ _THEME_ICONS = {
 }
 
 
-@contextmanager
-def lottie_spinner(theme: str = "general", height: int = 200):
+class lottie_spinner:
     """Context manager that shows a fullscreen blur overlay with animation.
 
-    Renders a CSS-only animated loader inside a fixed overlay div so the
-    animation is guaranteed to sit above the blur backdrop (no z-index
-    issues with Streamlit iframes).
+    Implemented as a class (not @contextmanager generator) to avoid the
+    'generator didn't stop after throw()' RuntimeError that occurs when
+    exceptions propagate through generator-based context managers in
+    certain Streamlit execution contexts.
 
     Usage:
         with lottie_spinner("snowflake"):
@@ -104,99 +103,116 @@ def lottie_spinner(theme: str = "general", height: int = 200):
 
     Falls back to st.spinner if markup injection fails.
     """
-    _, message = LOADER_THEMES.get(theme, LOADER_THEMES["general"])
-    icon = _THEME_ICONS.get(theme, _THEME_ICONS["general"])
 
-    # Decide overlay vs fallback BEFORE the single yield to avoid
-    # the "generator didn't stop after throw()" double-yield bug.
-    use_overlay = True
-    placeholder = None
-    try:
-        overlay_id = f"_dorel_ov_{theme}_{id(message)}"
-        placeholder = st.empty()
-        with placeholder.container():
-            st.markdown(
-                f"""
-                <style>
-                #{overlay_id} {{
-                    position: fixed;
-                    top: 0; left: 0; right: 0; bottom: 0;
-                    z-index: 99999;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    padding-left: 16rem;
-                    backdrop-filter: blur(6px);
-                    -webkit-backdrop-filter: blur(6px);
-                    background: rgba(255, 255, 255, 0.50);
-                    animation: _drl_fade 0.3s ease-out;
-                }}
-                #{overlay_id} .card {{
-                    background: rgba(255, 255, 255, 0.92);
-                    border-radius: 24px;
-                    padding: 48px 56px 36px;
-                    box-shadow: 0 16px 48px rgba(0,0,0,0.12);
-                    display: flex;
-                    flex-direction: column;
-                    align-items: center;
-                    gap: 8px;
-                }}
-                #{overlay_id} .icon {{
-                    font-size: 52px;
-                    animation: _drl_bounce 1.8s ease-in-out infinite;
-                }}
-                #{overlay_id} .dots {{
-                    display: flex; gap: 8px; margin-top: 8px;
-                }}
-                #{overlay_id} .dots span {{
-                    width: 10px; height: 10px; border-radius: 50%;
-                    background: #065E8B;
-                    animation: _drl_dot 1.4s ease-in-out infinite both;
-                }}
-                #{overlay_id} .dots span:nth-child(1) {{ animation-delay: -0.32s; }}
-                #{overlay_id} .dots span:nth-child(2) {{ animation-delay: -0.16s; }}
-                #{overlay_id} .dots span:nth-child(3) {{ animation-delay: 0s; }}
-                #{overlay_id} .msg {{
-                    color: #4a4a4a; font-size: 1.05rem;
-                    font-weight: 600; letter-spacing: 0.3px;
-                    margin-top: 4px;
-                }}
-                @keyframes _drl_fade {{
-                    from {{ opacity: 0; }} to {{ opacity: 1; }}
-                }}
-                @keyframes _drl_bounce {{
-                    0%, 100% {{ transform: translateY(0); }}
-                    50%      {{ transform: translateY(-12px); }}
-                }}
-                @keyframes _drl_dot {{
-                    0%, 80%, 100% {{ transform: scale(0.4); opacity: 0.3; }}
-                    40%           {{ transform: scale(1.0); opacity: 1; }}
-                }}
-                </style>
-                <div id="{overlay_id}">
-                    <div class="card">
-                        <div class="icon">{icon}</div>
-                        <div class="dots">
-                            <span></span><span></span><span></span>
-                        </div>
-                        <div class="msg">{message}</div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-    except Exception:
-        use_overlay = False
+    def __init__(self, theme: str = "general", height: int = 200):
+        self._theme = theme
+        self._height = height
+        self._placeholder = None
+        self._use_overlay = False
+        self._spinner_cm = None  # fallback st.spinner context manager
 
-    if use_overlay:
+    def __enter__(self):
+        _, message = LOADER_THEMES.get(self._theme, LOADER_THEMES["general"])
+        icon = _THEME_ICONS.get(self._theme, _THEME_ICONS["general"])
+        self._message = message
+
         try:
-            yield
-        finally:
-            if placeholder is not None:
-                placeholder.empty()
-    else:
-        with st.spinner(message):
-            yield
+            overlay_id = f"_dorel_ov_{self._theme}_{id(message)}"
+            self._placeholder = st.empty()
+            with self._placeholder.container():
+                st.markdown(
+                    f"""
+                    <style>
+                    #{overlay_id} {{
+                        position: fixed;
+                        top: 0; left: 0; right: 0; bottom: 0;
+                        z-index: 99999;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        padding-left: 16rem;
+                        backdrop-filter: blur(6px);
+                        -webkit-backdrop-filter: blur(6px);
+                        background: rgba(255, 255, 255, 0.50);
+                        animation: _drl_fade 0.3s ease-out;
+                    }}
+                    #{overlay_id} .card {{
+                        background: rgba(255, 255, 255, 0.92);
+                        border-radius: 24px;
+                        padding: 48px 56px 36px;
+                        box-shadow: 0 16px 48px rgba(0,0,0,0.12);
+                        display: flex;
+                        flex-direction: column;
+                        align-items: center;
+                        gap: 8px;
+                    }}
+                    #{overlay_id} .icon {{
+                        font-size: 52px;
+                        animation: _drl_bounce 1.8s ease-in-out infinite;
+                    }}
+                    #{overlay_id} .dots {{
+                        display: flex; gap: 8px; margin-top: 8px;
+                    }}
+                    #{overlay_id} .dots span {{
+                        width: 10px; height: 10px; border-radius: 50%;
+                        background: #065E8B;
+                        animation: _drl_dot 1.4s ease-in-out infinite both;
+                    }}
+                    #{overlay_id} .dots span:nth-child(1) {{ animation-delay: -0.32s; }}
+                    #{overlay_id} .dots span:nth-child(2) {{ animation-delay: -0.16s; }}
+                    #{overlay_id} .dots span:nth-child(3) {{ animation-delay: 0s; }}
+                    #{overlay_id} .msg {{
+                        color: #4a4a4a; font-size: 1.05rem;
+                        font-weight: 600; letter-spacing: 0.3px;
+                        margin-top: 4px;
+                    }}
+                    @keyframes _drl_fade {{
+                        from {{ opacity: 0; }} to {{ opacity: 1; }}
+                    }}
+                    @keyframes _drl_bounce {{
+                        0%, 100% {{ transform: translateY(0); }}
+                        50%      {{ transform: translateY(-12px); }}
+                    }}
+                    @keyframes _drl_dot {{
+                        0%, 80%, 100% {{ transform: scale(0.4); opacity: 0.3; }}
+                        40%           {{ transform: scale(1.0); opacity: 1; }}
+                    }}
+                    </style>
+                    <div id="{overlay_id}">
+                        <div class="card">
+                            <div class="icon">{icon}</div>
+                            <div class="dots">
+                                <span></span><span></span><span></span>
+                            </div>
+                            <div class="msg">{message}</div>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            self._use_overlay = True
+        except Exception:
+            self._use_overlay = False
+            # Fallback: delegate to st.spinner
+            self._spinner_cm = st.spinner(message)
+            self._spinner_cm.__enter__()
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._use_overlay:
+            try:
+                if self._placeholder is not None:
+                    self._placeholder.empty()
+            except Exception:
+                pass  # Never let cleanup interfere with exception propagation
+        elif self._spinner_cm is not None:
+            try:
+                self._spinner_cm.__exit__(exc_type, exc_val, exc_tb)
+            except Exception:
+                pass
+        # Never suppress exceptions — always return False
+        return False
 
 
 def show_success(message: str = "Listo", height: int = 120):
