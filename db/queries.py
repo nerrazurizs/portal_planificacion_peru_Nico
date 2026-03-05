@@ -188,11 +188,14 @@ select
   a.cod_bodega,
   coalesce(b.id_sucursal, a.cod_bodega) as id_sucursal,
   coalesce(b.descripcion_sucursal, 'Sin descripcion') as descripcion_sucursal,
-  case
-    when b.canal_de_distribucion is not null then b.canal_de_distribucion
-    when a.cod_bodega in ('1100001', '1100002') then 'CD'
-    else 'TIENDA'
-  end as canal_de_distribucion,
+  COALESCE(b.canal_de_distribucion,
+    CASE TRIM(cc.cod_canal)
+      WHEN '03' THEN 'TIENDA'
+      WHEN '02' THEN 'MAYORISTA'
+      WHEN '06' THEN 'ETAIL'
+    END,
+    'TIENDA'
+  ) as canal_de_distribucion,
   c.nom_producto,
   c.area,
   c.linea,
@@ -230,6 +233,8 @@ select
 from db_supply.hst.ht_in_stock a
 left join db_syncros.public.coo_maestro_sucursal b
   on a.cod_bodega = b.id_sucursal
+left join db_dimensiones.dim.dt_ccosto cc
+  on TRIM(a.cod_bodega) = TRIM(cc.cod_ccosto)
 left join {_PROD} c
   on a.sku_producto = c.sku_producto
 left join db_supply.hst.ht_in_stock_cd d
@@ -622,7 +627,6 @@ select
            WHEN '06' THEN 'ETAIL'
          END
     ) = 'CD' then 'CD'
-    when a.cod_bodega in ('1100001', '1100002') then 'CD'
     else 'TIENDA'
   end as canal_std,
   SUM(a.stock_unidades) as stock_unidades,
@@ -996,7 +1000,6 @@ from (
                    WHEN '06' THEN 'ETAIL'
                  END
             ) = 'CD' then 'CD'
-            when a.cod_bodega in ('1100001', '1100002') then 'CD'
             else 'TIENDA'
         end as canal_std
     from db_supply.hst.ht_in_stock a
