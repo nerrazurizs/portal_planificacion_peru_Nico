@@ -67,53 +67,64 @@ _PROD = """(
     FROM db_dimensiones.dim.vw_producto
 )"""
 
-_COMPRAS = """(
+_COMPRAS = f"""(
     SELECT
-        CAST(numero_oc AS VARCHAR)                                   AS po,
-        codigo_producto_oc                                           AS sku_producto,
-        cantidad_oc                                                  AS cantidad_final_corregida,
-        cantidad_ingresada                                           AS cantidad_carpeta_recepcionada,
-        monto_total_oc_mn                                            AS montomn,
-        precio_unitario_oc                                           AS purchprice,
-        monto_total_oc                                               AS lineamount,
-        TRY_TO_DATE(CAST(fecha_emision_oc AS VARCHAR), 'YYYYMMDD')  AS fecha_entrega,
+        CAST(f.numero_oc AS VARCHAR)                                 AS po,
+        f.codigo_producto_oc                                         AS sku_producto,
+        f.cantidad_oc                                                AS cantidad_final_corregida,
+        f.cantidad_ingresada                                         AS cantidad_carpeta_recepcionada,
+        f.monto_total_oc_mn                                          AS montomn,
+        f.precio_unitario_oc                                         AS purchprice,
+        f.monto_total_oc                                             AS lineamount,
+        TRY_TO_DATE(CAST(f.fecha_emision_oc AS VARCHAR), 'YYYYMMDD') AS fecha_entrega,
         COALESCE(
-            TRY_TO_DATE(CAST(fecha_embarque AS VARCHAR), 'YYYY-MM-DD'),
-            TRY_TO_DATE(CAST(fecha_emision_oc AS VARCHAR), 'YYYYMMDD')
+            TRY_TO_DATE(CAST(f.fecha_embarque AS VARCHAR), 'YYYY-MM-DD'),
+            TRY_TO_DATE(CAST(f.fecha_embarque AS VARCHAR), 'YYYYMMDD'),
+            TRY_TO_DATE(CAST(f.fecha_emision_oc AS VARCHAR), 'YYYYMMDD')
         )                                                            AS etd,
         COALESCE(
-            TRY_TO_DATE(CAST(fecha_eta AS VARCHAR), 'YYYY-MM-DD'),
-            DATEADD(day, 47, TRY_TO_DATE(CAST(fecha_emision_oc AS VARCHAR), 'YYYYMMDD'))
+            TRY_TO_DATE(CAST(f.fecha_eta AS VARCHAR), 'YYYY-MM-DD'),
+            TRY_TO_DATE(CAST(f.fecha_eta AS VARCHAR), 'YYYYMMDD'),
+            TRY_TO_DATE(CAST(f.fecha_eta AS VARCHAR), 'DD/MM/YYYY'),
+            DATEADD(day, 47, COALESCE(
+                TRY_TO_DATE(CAST(f.fecha_embarque AS VARCHAR), 'YYYY-MM-DD'),
+                TRY_TO_DATE(CAST(f.fecha_embarque AS VARCHAR), 'YYYYMMDD'),
+                TRY_TO_DATE(CAST(f.fecha_emision_oc AS VARCHAR), 'YYYYMMDD')
+            ))
         )                                                            AS eta,
-        TRY_TO_DATE(CAST(fecha_ingreso_cd AS VARCHAR), 'YYYY-MM-DD') AS fecha_recepcion_en_cd,
-        CAST(tipocambio AS FLOAT)                                    AS paridad_moneda,
-        CAST(tipocambio AS FLOAT)                                    AS dolar_sistema,
-        CAST(moneda AS VARCHAR)                                      AS cod_moneda,
-        CAST(codigo_proveedor_oc AS VARCHAR)                         AS cod_proveedor,
-        situacion                                                    AS nom_status,
-        estatus,
-        NULL::VARCHAR                                                AS nom_proveedor,
-        NULL::VARCHAR                                                AS nom_producto,
+        COALESCE(
+            TRY_TO_DATE(CAST(f.fecha_ingreso_cd AS VARCHAR), 'YYYY-MM-DD'),
+            TRY_TO_DATE(CAST(f.fecha_ingreso_cd AS VARCHAR), 'YYYYMMDD')
+        )                                                            AS fecha_recepcion_en_cd,
+        CAST(f.tipocambio AS FLOAT)                                  AS paridad_moneda,
+        CAST(f.tipocambio AS FLOAT)                                  AS dolar_sistema,
+        CAST(f.moneda AS VARCHAR)                                    AS cod_moneda,
+        CAST(f.codigo_proveedor_oc AS VARCHAR)                       AS cod_proveedor,
+        f.situacion                                                  AS nom_status,
+        f.estatus,
+        p.proveedor                                                  AS nom_proveedor,
+        p.nom_producto                                               AS nom_producto,
         NULL::VARCHAR                                                AS carpeta_comex,
         NULL::VARCHAR                                                AS factura,
         NULL::VARCHAR                                                AS nom_estadoaprobacion,
-        CASE WHEN fecha_ingreso_cd IS NULL
+        CASE WHEN f.fecha_ingreso_cd IS NULL
              THEN 'Si' ELSE 'No'
         END                                                          AS entransito,
         NULL::BOOLEAN                                                AS tiene_bl,
         NULL::VARCHAR                                                AS tiene_carpeta_comex,
         NULL::VARCHAR                                                AS status_booking,
         NULL::VARCHAR                                                AS forma_pago,
-        NULL::VARCHAR                                                AS area,
-        NULL::VARCHAR                                                AS linea,
-        NULL::VARCHAR                                                AS sublinea,
-        NULL::VARCHAR                                                AS marca,
-        NULL::VARCHAR                                                AS modelo,
-        NULL::FLOAT                                                  AS factor_importacion,
-        codigo_sucursal,
-        procedencia_oc,
-        almacen_ingreso_cd
-    FROM db_supply.fct.ft_compras
+        p.area,
+        p.linea,
+        p.sublinea,
+        p.marca,
+        p.modelo,
+        p.factor_importacion,
+        f.codigo_sucursal,
+        f.procedencia_oc,
+        f.almacen_ingreso_cd
+    FROM db_supply.fct.ft_compras f
+    LEFT JOIN {_PROD} p ON f.codigo_producto_oc = p.sku_producto
 )"""
 
 # ============================================================

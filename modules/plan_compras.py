@@ -152,12 +152,24 @@ _PC_QUERY_HASH = hash(QUERY_PLAN_COMPRAS + QUERY_VENTA_COSTO_HIST)
 
 def _enrich_pos(df_pos, maestra):
     """
-    Enriquece las POs con nombre SKU, factor importación y costo CLP.
+    Enriquece las POs con nombre SKU, factor importación, dimensiones y costo CLP.
     """
-    # Merge con maestra para factor importación y nombre
+    # Peru's _COMPRAS wrapper sets area, linea, sublinea, marca, modelo,
+    # factor_importacion to NULL. Drop those all-NULL columns before merge
+    # so we can fill them from maestra without suffix conflicts (_x/_y).
+    _wrapper_null_cols = [
+        "AREA", "LINEA", "SUBLINEA", "MARCA", "MODELO", "FACTOR_IMPORTACION",
+        "NOM_PRODUCTO",
+    ]
+    for col in _wrapper_null_cols:
+        if col in df_pos.columns and df_pos[col].isna().all():
+            df_pos = df_pos.drop(columns=[col])
+
+    # Merge con maestra para dimensiones, factor importación y nombre
     maestra_cols = ["SKU_PRODUCTO"]
-    for c in ["SKU_NOM_PRODUCTO", "FACTOR_IMPORTACION", "ULTIMO_COSTO",
-              "COSTO_FOB_USD", "SUBLINEA", "PROCEDENCIA"]:
+    for c in ["SKU_NOM_PRODUCTO", "NOM_PRODUCTO", "AREA", "LINEA", "SUBLINEA",
+              "MARCA", "MODELO", "FACTOR_IMPORTACION", "ULTIMO_COSTO",
+              "COSTO_FOB_USD", "PROCEDENCIA"]:
         if c in maestra.columns:
             maestra_cols.append(c)
 
