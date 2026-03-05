@@ -995,7 +995,10 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
         chan_map = {
             "ETAIL": "FORECAST_VENTA_ETAIL",
             "MAYORISTA": "FORECAST_VENTA_MAYOR",
+            "MAYOR": "FORECAST_VENTA_MAYOR",
             "TIENDA": "FORECAST_VENTA_MINOR",
+            "RETAIL": "FORECAST_VENTA_MINOR",
+            "MINOR": "FORECAST_VENTA_MINOR",
         }
         col_canal = next((c for c in f_long.columns if "canal" in c.lower()), None)
         col_sku_fc = next((c for c in f_long.columns if "material" in c.lower() or "sku" in c.lower()), None)
@@ -1003,6 +1006,9 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
         if not col_canal or not col_sku_fc:
             st.error("Faltan columnas 'canal' o 'sku/material' en Forecast")
             return None
+
+        # Normalize channel values to uppercase to handle mixed casing
+        f_long[col_canal] = f_long[col_canal].astype(str).str.strip().str.upper()
 
         f_sales = f_long[f_long[col_canal].isin(chan_map)].copy()
         f_sales["col"] = f_sales[col_canal].map(chan_map)
@@ -1991,12 +1997,22 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
         )
         f_long["PERIODO"] = pd.to_datetime("01/" + f_long["mes"].astype(str), format="%d/%m/%Y", errors="coerce")
 
-        chan_map = {"ETAIL": "FORECAST_VENTA_ETAIL", "MAYORISTA": "FORECAST_VENTA_MAYOR", "TIENDA": "FORECAST_VENTA_MINOR"}
+        chan_map = {
+            "ETAIL": "FORECAST_VENTA_ETAIL",
+            "MAYORISTA": "FORECAST_VENTA_MAYOR",
+            "MAYOR": "FORECAST_VENTA_MAYOR",
+            "TIENDA": "FORECAST_VENTA_MINOR",
+            "RETAIL": "FORECAST_VENTA_MINOR",
+            "MINOR": "FORECAST_VENTA_MINOR",
+        }
         col_canal = next((c for c in f_long.columns if "canal" in c.lower()), None)
         col_sku_fc = next((c for c in f_long.columns if "material" in c.lower() or "sku" in c.lower()), None)
         if not col_canal or not col_sku_fc:
             st.error("Faltan columnas 'canal' o 'sku/material' en Forecast")
             return None
+
+        # Normalize channel values to uppercase to handle mixed casing
+        f_long[col_canal] = f_long[col_canal].astype(str).str.strip().str.upper()
 
         f_sales = f_long[f_long[col_canal].isin(chan_map)].copy()
         f_sales["col"] = f_sales[col_canal].map(chan_map)

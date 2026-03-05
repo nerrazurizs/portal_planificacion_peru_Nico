@@ -126,6 +126,10 @@ def _load_eta_pendiente(_conn):
     """Load next pending ETA per SKU from ft_compras (in-transit POs)."""
     df = pd.read_sql(QUERY_ETA_PENDIENTE_POR_SKU, _conn)
     df = norm_cols(df)
+    # Normalize SKU values — ft_compras.codigo_producto_oc may have
+    # trailing spaces or different formatting vs ft_vcm/vw_in_stock.
+    if "SKU_PRODUCTO" in df.columns:
+        df["SKU_PRODUCTO"] = df["SKU_PRODUCTO"].astype(str).str.strip()
     for c in ["QTY_PENDIENTE", "N_POS"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
@@ -2639,6 +2643,11 @@ def render_venta_perdida(conn):
                 )
 
                 if not skus_quiebre.empty:
+                    # Normalize SKU values before merge
+                    skus_quiebre["SKU_PRODUCTO"] = (
+                        skus_quiebre["SKU_PRODUCTO"].astype(str).str.strip()
+                    )
+
                     # Load ETA data
                     try:
                         df_eta_data = _load_eta_pendiente(conn)

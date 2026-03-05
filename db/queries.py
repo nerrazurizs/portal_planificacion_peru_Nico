@@ -376,7 +376,7 @@ ORDER BY c.eta ASC
 # Proxima ETA pendiente por SKU (para VP insights)
 QUERY_ETA_PENDIENTE_POR_SKU = f"""
 SELECT
-    c.sku_producto,
+    TRIM(c.sku_producto) AS sku_producto,
     MIN(c.eta)  AS proxima_eta,
     SUM(GREATEST(0, COALESCE(c.cantidad_final_corregida, 0)
         - COALESCE(c.cantidad_carpeta_recepcionada, 0))) AS qty_pendiente,
@@ -385,8 +385,8 @@ SELECT
 FROM {_COMPRAS} c
 WHERE c.fecha_recepcion_en_cd IS NULL
   AND c.cantidad_final_corregida > 0
-  AND c.eta >= CURRENT_DATE()
-GROUP BY c.sku_producto
+  AND c.eta >= DATEADD('month', -3, CURRENT_DATE())
+GROUP BY TRIM(c.sku_producto)
 """
 
 # Precio promedio de venta por SKU (ultimos 90 dias)
