@@ -20,7 +20,10 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 from config import COLORS, apply_pm_filter
-from db.queries import QUERY_MAESTRA, _VCM, _INSTOCK, _INSTOCK_CD, _PROD
+from db.queries import (
+    QUERY_MAESTRA, QUERY_ETA_PENDIENTE_POR_SKU,
+    _VCM, _INSTOCK, _INSTOCK_CD, _PROD,
+)
 from utils.export import download_buttons
 from utils.filters import limpiar_lista, norm_cols
 from utils.ui_animations import lottie_spinner
@@ -118,6 +121,19 @@ def _load_cd_recovery_events(_conn, lookback_start, range_end):
     return df
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_eta_pendiente(_conn):
+    """Load next pending ETA per SKU from ft_compras (in-transit POs)."""
+    df = pd.read_sql(QUERY_ETA_PENDIENTE_POR_SKU, _conn)
+    df = norm_cols(df)
+    for c in ["QTY_PENDIENTE", "N_POS"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+    if "PROXIMA_ETA" in df.columns:
+        df["PROXIMA_ETA"] = pd.to_datetime(df["PROXIMA_ETA"])
+    return df
+
+
 # ── Demand window logic ──────────────────────────────────────────────────────
 
 
@@ -182,7 +198,8 @@ def _build_mix_in(mix_values):
 
 
 def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
-                       filter_cd_instock="stock_gt_0"):
+                       filter_cd_instock="stock_gt_0",
+                       always_include_cd_ctes=False):
     """Build the shared WITH ... CTE block for tienda VP queries.
 
     Returns the SQL string starting with ``WITH ... n_perfil AS (...)``
@@ -198,14 +215,17 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
             "stock_gt_0"  – only VP where CD stock > 0 (default)
             "instock_cd"  – only VP where InStock CD = 1
                             (stock >= cantidad_prom_90_cia)
+        always_include_cd_ctes: When True, demand_all and cd_instock CTEs
+            are always generated regardless of filter_cd_instock. Used by
+            the detail query to support TIPO_VP classification.
 
-    Params (positional %s, 6 or 12 total):
+    Params (positional %s, 6 or 10 total):
         demand_start, demand_end        (demand CTE — per store)
-      [if filter_cd_instock != "none"]:
+      [if filter_cd_instock != "none" OR always_include_cd_ctes]:
         demand_start, demand_end        (demand_all CTE)
         stock_start, stock_end          (stock_daily CTE)
         stock_start, stock_end          (dates CTE — independent)
-      [if filter_cd_instock != "none"]:
+      [if filter_cd_instock != "none" OR always_include_cd_ctes]:
         stock_start, stock_end          (cd_instock CTE)
     """
     mix_clause = _build_mix_in(mix_values)
@@ -308,7 +328,7 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
         WHERE v.fecha >= %s AND v.fecha <= %s
           AND v.cantidad > 0
         GROUP BY 1
-    ),""" if filter_cd_instock != "none" else "") + f"""
+    ),""" if filter_cd_instock != "none" or always_include_cd_ctes else "") + f"""
     stock_daily AS (
         SELECT
             a.fecha,
@@ -343,7 +363,7 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
         FROM {_INSTOCK_CD} cd
         LEFT JOIN demand_all da ON cd.sku_producto = da.sku_producto
         WHERE cd.fecha >= %s AND cd.fecha <= %s
-    )""" if filter_cd_instock != "none" else "")
+    )""" if filter_cd_instock != "none" or always_include_cd_ctes else "")
 
 
 def _sql_vp_tienda(dias_ventana, mix_values=None, perfil_only=True):
@@ -516,28 +536,21 @@ def _sql_vp_cd(dias_ventana, mix_values=None):
 
 
 def _sql_vp_tienda_detail(dias_ventana, mix_values=None, perfil_only=True,
-                          include_cd_cols=True):
+                          filter_cd_instock="none"):
     """VP detail per SKU x Store x Day — full calculation audit.
 
-    Returns every intermediate value: stock, demand, demand_per_store,
-    instock flag, VP units, VP $, price used.
+    Always includes CD columns (stock_cd, daily_demand_all, instock_cd)
+    via LEFT JOIN to cd_instock CTE for TIPO_VP classification.
 
-    When include_cd_cols=True, LEFT JOINs cd_instock to add:
-    stock_cd, daily_demand_all, instock_cd (for post-hoc filtering).
-    Uses 8 params; otherwise 4 params.
+    Params: always 10 (demand, demand_all, stock_daily, dates, cd_instock).
     """
-    _mode = "stock_gt_0" if include_cd_cols else "none"
     cte = _build_tienda_ctes(dias_ventana, mix_values, perfil_only,
-                             filter_cd_instock=_mode)
-    if include_cd_cols:
-        cd_join = """
+                             filter_cd_instock=filter_cd_instock,
+                             always_include_cd_ctes=True)
+    cd_join = """
     LEFT JOIN cd_instock ci
         ON dts.fecha = ci.fecha AND d.sku_producto = ci.sku_producto"""
-        cd_col = "ci.stock_cd, ci.daily_demand_all, ci.instock_cd"
-    else:
-        cd_join = ""
-        cd_col = ("NULL::FLOAT AS stock_cd, NULL::FLOAT AS daily_demand_all, "
-                  "NULL::INT AS instock_cd")
+    cd_col = "ci.stock_cd, ci.daily_demand_all, ci.instock_cd"
     return cte + f"""
     SELECT
         dts.fecha,
@@ -600,16 +613,14 @@ def _compute_vp_range(conn, stock_start, stock_end,
         apply_grace: Apply lead-time grace period after CD recovery.
         grace_lead_days: Days to wait after CD recovery before measuring VP.
 
-    Returns (df_tienda, df_cd, df_by_store, df_detail).
+    Returns (df_tienda, df_cd, df_by_store, df_detail, df_detail_full).
+    df_detail_full is the UNFILTERED detail with TIPO_VP classification.
     """
     month_ranges = _split_into_months(stock_start, stock_end)
     all_tienda = []
     all_cd = []
     all_by_store = []
     all_detail = []
-
-    # Decide whether to include CD columns in detail query
-    include_cd = filter_cd_instock != "none"
 
     for i, (ms, me) in enumerate(month_ranges):
         f_ini, f_fin = _get_demand_window(date(ms.year, ms.month, 15))
@@ -619,14 +630,15 @@ def _compute_vp_range(conn, stock_start, stock_end,
         prm_base = [str(f_ini), str(f_fin), str(ms), str(me),
                     str(ms), str(me)]  # dates CTE (independent)
 
-        # Detail params: demand, [demand_all], stock_daily, dates, [cd_instock]
-        prm_detail = [str(f_ini), str(f_fin)]
-        if include_cd:
-            prm_detail.extend([str(f_ini), str(f_fin)])  # demand_all
-        prm_detail.extend([str(ms), str(me)])  # stock_daily
-        prm_detail.extend([str(ms), str(me)])  # dates CTE (independent)
-        if include_cd:
-            prm_detail.extend([str(ms), str(me)])  # cd_instock
+        # Detail params: ALWAYS 10 (demand, demand_all, stock_daily,
+        #                           dates, cd_instock)
+        prm_detail = [
+            str(f_ini), str(f_fin),   # demand CTE
+            str(f_ini), str(f_fin),   # demand_all CTE (always present)
+            str(ms), str(me),         # stock_daily CTE
+            str(ms), str(me),         # dates CTE (independent)
+            str(ms), str(me),         # cd_instock CTE (always present)
+        ]
 
         # CD query: demand + stock = 4
         prm_cd = [str(f_ini), str(f_fin), str(ms), str(me)]
@@ -732,10 +744,10 @@ def _compute_vp_range(conn, stock_start, stock_end,
         if not df_ts.empty:
             all_by_store.append(df_ts)
 
-        # ── Tienda VP detail — LEFT JOIN cd_instock for columns ──
+        # ── Tienda VP detail — always includes CD columns for TIPO_VP ──
         sql_td = _sql_vp_tienda_detail(
             dias_ventana, mix_values, perfil_only,
-            include_cd_cols=include_cd,
+            filter_cd_instock=filter_cd_instock,
         )
         df_td = norm_cols(pd.read_sql(sql_td, conn, params=prm_detail))
         if not df_td.empty:
@@ -767,6 +779,36 @@ def _compute_vp_range(conn, stock_start, stock_end,
         else pd.DataFrame()
     )
 
+    # ── TIPO_VP classification (before any filtering) ──
+    if not df_detail.empty:
+        if "VP_UNIDADES" in df_detail.columns:
+            df_detail["VP_UNIDADES"] = pd.to_numeric(
+                df_detail["VP_UNIDADES"], errors="coerce"
+            ).fillna(0)
+        if "STOCK_CD" in df_detail.columns:
+            df_detail["STOCK_CD"] = pd.to_numeric(
+                df_detail["STOCK_CD"], errors="coerce"
+            ).fillna(0)
+            df_detail["TIPO_VP"] = np.where(
+                df_detail["VP_UNIDADES"] <= 0,
+                "SIN_VP",
+                np.where(
+                    df_detail["STOCK_CD"] <= 0,
+                    "QUIEBRE_PRODUCTO",
+                    "REPOSICION",
+                ),
+            )
+        else:
+            # Fallback: no CD data → all VP is "unknown"
+            df_detail["TIPO_VP"] = np.where(
+                df_detail["VP_UNIDADES"] > 0,
+                "QUIEBRE_PRODUCTO",
+                "SIN_VP",
+            )
+
+    # Save unfiltered detail for Insights tab
+    df_detail_full = df_detail.copy() if not df_detail.empty else pd.DataFrame()
+
     # ── CD InStock filter (post-hoc on detail, then re-aggregate) ──
     if filter_cd_instock != "none" and not df_detail.empty:
         _pre_filter_n = len(df_detail)
@@ -793,7 +835,7 @@ def _compute_vp_range(conn, stock_start, stock_end,
         if not df_detail.empty:
             df_tienda, df_by_store = _reaggregate_from_detail(df_detail)
 
-    return df_tienda, df_cd, df_by_store, df_detail
+    return df_tienda, df_cd, df_by_store, df_detail, df_detail_full
 
 
 def _enrich_with_maestra(df, conn):
@@ -912,6 +954,38 @@ def _reaggregate_from_detail(df_detail):
         )
         .reset_index()
     )
+
+    # ── TIPO_VP breakdown columns ──
+    if "TIPO_VP" in df_detail.columns:
+        vp_rows = df_detail[df_detail["VP_UNIDADES"] > 0]
+        if not vp_rows.empty:
+            tipo_agg = (
+                vp_rows.groupby(["FECHA", "SKU_PRODUCTO", "TIPO_VP"])
+                .agg(
+                    _VP_UND=("VP_UNIDADES", "sum"),
+                    _VP_PES=("VP_PESOS", "sum"),
+                )
+                .reset_index()
+            )
+            for tipo, sfx in [("QUIEBRE_PRODUCTO", "_QP"),
+                               ("REPOSICION", "_REP")]:
+                sub = (
+                    tipo_agg[tipo_agg["TIPO_VP"] == tipo]
+                    .rename(columns={
+                        "_VP_UND": f"VP_UNIDADES{sfx}",
+                        "_VP_PES": f"VP_PESOS{sfx}",
+                    })
+                    .drop(columns=["TIPO_VP"])
+                )
+                df_tienda = df_tienda.merge(
+                    sub, on=["FECHA", "SKU_PRODUCTO"], how="left",
+                )
+        for c in ["VP_UNIDADES_QP", "VP_PESOS_QP",
+                   "VP_UNIDADES_REP", "VP_PESOS_REP"]:
+            if c in df_tienda.columns:
+                df_tienda[c] = df_tienda[c].fillna(0)
+            else:
+                df_tienda[c] = 0.0
 
     # df_by_store: store x day
     agg_dict = {
@@ -1075,46 +1149,73 @@ def _instock_dot(pct: float) -> str:
 # ── Charts ────────────────────────────────────────────────────────────────────
 
 
-def _chart_evolucion(df_tienda, df_cd):
-    """Dual-axis chart: VP diaria (bars) + InStock % (line)."""
-    parts = []
+def _chart_evolucion(df_tienda, df_cd, df_detail_full=None):
+    """Dual-axis chart: VP diaria (stacked bars) + InStock % (line).
+
+    When df_detail_full has TIPO_VP, VP Tiendas is split into
+    Quiebre Producto (dark red) and Reposicion (orange).
+    """
+    # ── Try to build Quiebre / Repo split from detail_full ──
+    has_tipo = (
+        df_detail_full is not None
+        and not df_detail_full.empty
+        and "TIPO_VP" in df_detail_full.columns
+    )
+    day_tipo = None
+    if has_tipo:
+        vp_rows = df_detail_full[df_detail_full["VP_UNIDADES"] > 0]
+        if not vp_rows.empty:
+            day_tipo = (
+                vp_rows.groupby(["FECHA", "TIPO_VP"])["VP_PESOS"]
+                .sum()
+                .unstack(fill_value=0)
+                .reset_index()
+            )
+            day_tipo["FECHA"] = pd.to_datetime(day_tipo["FECHA"])
+
+    # ── InStock % from df_tienda ──
+    is_data = None
     if not df_tienda.empty:
-        day_t = df_tienda.groupby("FECHA").agg(
-            VP_TIENDA=("VP_PESOS", "sum"),
+        is_data = df_tienda.groupby("FECHA").agg(
             TIENDAS_IS=("N_TIENDAS_INSTOCK", "sum"),
             TIENDAS_TOTAL=("N_TIENDAS_TOTAL", "sum"),
         ).reset_index()
-        parts.append(day_t)
-    if not df_cd.empty:
-        day_c = df_cd.groupby("FECHA").agg(
-            VP_CD=("VP_PESOS", "sum"),
-            CD_IS=("INSTOCK_CD", "sum"),
-            CD_TOTAL=("INSTOCK_CD", "count"),
-        ).reset_index()
-        parts.append(day_c)
+        is_data["FECHA"] = pd.to_datetime(is_data["FECHA"])
 
-    if not parts:
+    # ── CD VP ──
+    day_cd = None
+    if not df_cd.empty:
+        day_cd = df_cd.groupby("FECHA").agg(
+            VP_CD=("VP_PESOS", "sum"),
+        ).reset_index()
+        day_cd["FECHA"] = pd.to_datetime(day_cd["FECHA"])
+
+    # Merge all into one daily DF
+    if day_tipo is not None:
+        daily = day_tipo.copy()
+    elif not df_tienda.empty:
+        dt = df_tienda.groupby("FECHA").agg(
+            VP_TIENDA=("VP_PESOS", "sum"),
+        ).reset_index()
+        dt["FECHA"] = pd.to_datetime(dt["FECHA"])
+        daily = dt
+    else:
+        daily = pd.DataFrame(columns=["FECHA"])
+
+    if daily.empty and day_cd is not None:
+        daily = day_cd.copy()
+    elif day_cd is not None and not daily.empty:
+        daily = daily.merge(day_cd, on="FECHA", how="outer").fillna(0)
+
+    if is_data is not None and not daily.empty:
+        daily = daily.merge(is_data, on="FECHA", how="left").fillna(0)
+
+    if daily.empty:
         return None
 
-    if len(parts) == 2:
-        for p in parts:
-            p["FECHA"] = pd.to_datetime(p["FECHA"])
-        daily = parts[0].merge(parts[1], on="FECHA", how="outer").fillna(0)
-    else:
-        daily = parts[0].copy()
-        if "VP_TIENDA" not in daily.columns:
-            daily["VP_TIENDA"] = 0
-        if "VP_CD" not in daily.columns:
-            daily["VP_CD"] = 0
-        if "TIENDAS_IS" not in daily.columns:
-            daily["TIENDAS_IS"] = 0
-            daily["TIENDAS_TOTAL"] = 0
-
-    daily["FECHA"] = pd.to_datetime(daily["FECHA"])
     daily = daily.sort_values("FECHA")
-    daily["VP_TOTAL"] = daily.get("VP_TIENDA", 0) + daily.get("VP_CD", 0)
 
-    # InStock % (tiendas)
+    # InStock %
     if "TIENDAS_TOTAL" in daily.columns:
         daily["INSTOCK_PCT"] = np.where(
             daily["TIENDAS_TOTAL"] > 0,
@@ -1126,7 +1227,29 @@ def _chart_evolucion(df_tienda, df_cd):
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    if "VP_TIENDA" in daily.columns:
+    # ── Bars: Quiebre + Repo (or single VP Tiendas) ──
+    if day_tipo is not None:
+        if "QUIEBRE_PRODUCTO" in daily.columns:
+            fig.add_trace(
+                go.Bar(
+                    x=daily["FECHA"],
+                    y=daily["QUIEBRE_PRODUCTO"],
+                    name="Quiebre Producto",
+                    marker_color="#8B0000",
+                ),
+                secondary_y=False,
+            )
+        if "REPOSICION" in daily.columns:
+            fig.add_trace(
+                go.Bar(
+                    x=daily["FECHA"],
+                    y=daily["REPOSICION"],
+                    name="Reposicion",
+                    marker_color=COLORS.get("status_at_risk", "#F5A623"),
+                ),
+                secondary_y=False,
+            )
+    elif "VP_TIENDA" in daily.columns:
         fig.add_trace(
             go.Bar(
                 x=daily["FECHA"], y=daily["VP_TIENDA"],
@@ -1135,6 +1258,7 @@ def _chart_evolucion(df_tienda, df_cd):
             ),
             secondary_y=False,
         )
+
     if "VP_CD" in daily.columns:
         fig.add_trace(
             go.Bar(
@@ -1375,7 +1499,7 @@ def render_venta_perdida(conn):
         try:
             progress = st.progress(0, text="Consultando Snowflake...")
 
-            df_tienda, df_cd, df_by_store, df_detail = _compute_vp_range(
+            df_tienda, df_cd, df_by_store, df_detail, df_detail_full = _compute_vp_range(
                 conn, fecha_desde, fecha_hasta,
                 mix_values=f_mix or None,
                 perfil_only=f_perfil,
@@ -1430,10 +1554,19 @@ def render_venta_perdida(conn):
             if not df_detail.empty:
                 df_detail = apply_pm_filter(df_detail)
 
+            # Enrich detail_full (unfiltered) for Insights tab
+            df_detail_full = _enrich_with_maestra(df_detail_full, conn)
+            df_detail_full = _enrich_with_new_flag(
+                df_detail_full, df_first_sale, demand_start_flag,
+            )
+            if not df_detail_full.empty:
+                df_detail_full = apply_pm_filter(df_detail_full)
+
             st.session_state["vp_tienda"] = df_tienda
             st.session_state["vp_cd"] = df_cd
             st.session_state["vp_by_store"] = df_by_store
             st.session_state["vp_detail"] = df_detail
+            st.session_state["vp_detail_full"] = df_detail_full
             st.session_state["vp_ready"] = True
             st.session_state["vp_desde"] = fecha_desde
             st.session_state["vp_hasta"] = fecha_hasta
@@ -1488,12 +1621,34 @@ def render_venta_perdida(conn):
     )
     skus_all = skus_t | skus_c
 
+    # Compute TIPO_VP split from unfiltered detail
+    df_detail_full = st.session_state.get(
+        "vp_detail_full", pd.DataFrame()
+    )
+    vp_quiebre = 0.0
+    vp_reposicion = 0.0
+    if (not df_detail_full.empty
+            and "TIPO_VP" in df_detail_full.columns
+            and "VP_PESOS" in df_detail_full.columns):
+        vp_quiebre = float(
+            df_detail_full.loc[
+                df_detail_full["TIPO_VP"] == "QUIEBRE_PRODUCTO",
+                "VP_PESOS",
+            ].sum()
+        )
+        vp_reposicion = float(
+            df_detail_full.loc[
+                df_detail_full["TIPO_VP"] == "REPOSICION",
+                "VP_PESOS",
+            ].sum()
+        )
+
     st.html(_hdr(
         f"📉 Venta Perdida — {vp_desde.strftime('%d/%m/%Y')} "
         f"al {vp_hasta.strftime('%d/%m/%Y')} ({n_dias_rango} dias)"
     ))
 
-    k1, k2, k3, k4 = st.columns(4)
+    k1, k2, k3, k4, k5 = st.columns(5)
     with k1:
         st.html(simple_kpi_card(
             label="VP TOTAL ACUMULADA",
@@ -1510,17 +1665,24 @@ def render_venta_perdida(conn):
         ))
     with k3:
         st.html(simple_kpi_card(
+            label="QUIEBRE PRODUCTO",
+            value=_fmt_currency(vp_quiebre),
+            accent_color="#8B0000",
+            subtitle="CD sin stock",
+        ))
+    with k4:
+        st.html(simple_kpi_card(
+            label="REPOSICION",
+            value=_fmt_currency(vp_reposicion),
+            accent_color=COLORS["status_at_risk"],
+            subtitle="CD tenia stock, tienda no",
+        ))
+    with k5:
+        st.html(simple_kpi_card(
             label="VP CD (MAYOR + ETAIL)",
             value=_fmt_currency(vp_c),
             accent_color=COLORS["tertiary_teal"],
             subtitle=f"{len(skus_c):,} SKUs afectados",
-        ))
-    with k4:
-        st.html(simple_kpi_card(
-            label="SKUS CON VP",
-            value=f"{len(skus_all):,}",
-            accent_color=COLORS["status_at_risk"],
-            subtitle=f"{n_dias_rango} dias analizados",
         ))
 
     # ── Excluded stores info (hardcoded) ──
@@ -1623,12 +1785,14 @@ def render_venta_perdida(conn):
                     st.caption(f"Columnas: {_dbg['columns']}")
 
     # ── Tabs ──
-    tab_evo, tab_tienda, tab_sucursal, tab_cd, tab_detalle, tab_resumen = (
+    (tab_evo, tab_tienda, tab_sucursal, tab_cd,
+     tab_insights, tab_detalle, tab_resumen) = (
         st.tabs([
             "📈 Evolucion Diaria",
             "🏬 Tiendas (SKU)",
             "🏪 Por Sucursal",
             "📦 CD (Mayor/Etail)",
+            "💡 Insights",
             "📋 Detalle Calculo",
             "📊 Resumen",
         ])
@@ -1636,7 +1800,7 @@ def render_venta_perdida(conn):
 
     # ── Tab Evolucion ──
     with tab_evo:
-        fig_evo = _chart_evolucion(df_tienda, df_cd)
+        fig_evo = _chart_evolucion(df_tienda, df_cd, df_detail_full)
         if fig_evo:
             st.plotly_chart(fig_evo, use_container_width=True)
         else:
@@ -2086,6 +2250,457 @@ def render_venta_perdida(conn):
                 df_sku_c[display_cols], "venta_perdida_cd",
             )
 
+    # ── Tab Insights ──
+    with tab_insights:
+        st.html(_hdr("💡 Insights — Venta Perdida por Canal y Tipo"))
+
+        df_det_full = st.session_state.get(
+            "vp_detail_full", pd.DataFrame()
+        )
+        df_cd_data = st.session_state.get("vp_cd", pd.DataFrame())
+
+        if df_det_full.empty and df_cd_data.empty:
+            st.warning("No hay datos para generar insights.")
+        else:
+            # ── Section A: Composicion VP por Canal y Tipo ──
+            st.html(_hdr("Composicion VP por Canal y Tipo"))
+
+            # VP Tiendas split
+            _vp_qp = 0.0
+            _vp_rep = 0.0
+            if (not df_det_full.empty
+                    and "TIPO_VP" in df_det_full.columns):
+                _vp_qp = float(df_det_full.loc[
+                    df_det_full["TIPO_VP"] == "QUIEBRE_PRODUCTO",
+                    "VP_PESOS",
+                ].sum())
+                _vp_rep = float(df_det_full.loc[
+                    df_det_full["TIPO_VP"] == "REPOSICION",
+                    "VP_PESOS",
+                ].sum())
+
+            # VP CD split by channel
+            _vp_mayor = 0.0
+            _vp_etail = 0.0
+            if (not df_cd_data.empty
+                    and "CANAL" in df_cd_data.columns):
+                _vp_mayor = float(df_cd_data.loc[
+                    df_cd_data["CANAL"].isin(["MAYOR", "MAYORISTA"]),
+                    "VP_PESOS",
+                ].sum())
+                _vp_etail = float(df_cd_data.loc[
+                    df_cd_data["CANAL"] == "ETAIL",
+                    "VP_PESOS",
+                ].sum())
+
+            categories = [
+                "Quiebre Producto", "Reposicion",
+                "CD Mayor", "CD Etail",
+            ]
+            values = [_vp_qp, _vp_rep, _vp_mayor, _vp_etail]
+            bar_colors = [
+                "#8B0000",
+                COLORS.get("status_at_risk", "#F5A623"),
+                COLORS.get("primary", "#065E8B"),
+                COLORS.get("accent", "#23CED3"),
+            ]
+
+            ci1, ci2 = st.columns(2)
+            with ci1:
+                fig_comp = go.Figure(go.Bar(
+                    x=values, y=categories,
+                    orientation="h",
+                    marker_color=bar_colors,
+                    text=[_fmt_currency(v) for v in values],
+                    textposition="outside",
+                ))
+                fig_comp.update_layout(
+                    title="VP por Canal y Tipo ($)",
+                    height=300,
+                    margin=dict(l=20, r=100, t=40, b=20),
+                )
+                st.plotly_chart(fig_comp, use_container_width=True)
+            with ci2:
+                non_zero = [
+                    (c, v) for c, v in zip(categories, values)
+                    if v > 0
+                ]
+                if non_zero:
+                    fig_pie = go.Figure(go.Pie(
+                        labels=[c for c, _ in non_zero],
+                        values=[v for _, v in non_zero],
+                        hole=0.45,
+                        marker_colors=[
+                            bar_colors[categories.index(c)]
+                            for c, _ in non_zero
+                        ],
+                        textinfo="label+percent",
+                    ))
+                    fig_pie.update_layout(
+                        title="Distribucion VP",
+                        height=350,
+                        margin=dict(l=10, r=10, t=40, b=10),
+                    )
+                    st.plotly_chart(fig_pie, use_container_width=True)
+
+            # ── Section B: Top SKUs por Canal ──
+            st.html(_hdr("Top SKUs por Canal"))
+
+            sub_tabs = st.tabs([
+                "🔴 Quiebre Producto",
+                "🟠 Reposicion",
+                "📦 CD Mayor",
+                "🌐 CD Etail",
+            ])
+
+            with sub_tabs[0]:
+                if (not df_det_full.empty
+                        and "TIPO_VP" in df_det_full.columns):
+                    _df_qp = df_det_full[
+                        df_det_full["TIPO_VP"] == "QUIEBRE_PRODUCTO"
+                    ]
+                    if not _df_qp.empty:
+                        _agg = {"VP_PESOS": "sum", "VP_UNIDADES": "sum"}
+                        for _c in ["NOM_PRODUCTO", "AREA", "LINEA",
+                                   "MARCA"]:
+                            if _c in _df_qp.columns:
+                                _agg[_c] = "first"
+                        _top_qp = (
+                            _df_qp.groupby("SKU_PRODUCTO")
+                            .agg(**{k: (k, v) for k, v in _agg.items()})
+                            .reset_index()
+                            .sort_values("VP_PESOS", ascending=False)
+                        )
+                        fig = _chart_top_skus(
+                            _top_qp, n=15,
+                            title="Top 15 SKUs — Quiebre de Producto",
+                        )
+                        if fig:
+                            st.plotly_chart(fig, use_container_width=True)
+                        st.dataframe(
+                            _top_qp.head(100),
+                            column_config={
+                                "SKU_PRODUCTO": st.column_config.TextColumn(
+                                    "SKU",
+                                ),
+                                "NOM_PRODUCTO": st.column_config.TextColumn(
+                                    "Producto", width="large",
+                                ),
+                                "VP_PESOS": st.column_config.NumberColumn(
+                                    "VP ($)", format="$%.0f",
+                                ),
+                                "VP_UNIDADES": st.column_config.NumberColumn(
+                                    "VP (Und)", format="%.0f",
+                                ),
+                            },
+                            use_container_width=True, hide_index=True,
+                        )
+                    else:
+                        st.info("No hay VP por quiebre de producto.")
+                else:
+                    st.info("No hay datos de detalle disponibles.")
+
+            with sub_tabs[1]:
+                if (not df_det_full.empty
+                        and "TIPO_VP" in df_det_full.columns):
+                    _df_rep = df_det_full[
+                        df_det_full["TIPO_VP"] == "REPOSICION"
+                    ]
+                    if not _df_rep.empty:
+                        _agg = {"VP_PESOS": "sum", "VP_UNIDADES": "sum"}
+                        for _c in ["NOM_PRODUCTO", "AREA", "LINEA",
+                                   "MARCA"]:
+                            if _c in _df_rep.columns:
+                                _agg[_c] = "first"
+                        _top_rep = (
+                            _df_rep.groupby("SKU_PRODUCTO")
+                            .agg(**{k: (k, v) for k, v in _agg.items()})
+                            .reset_index()
+                            .sort_values("VP_PESOS", ascending=False)
+                        )
+                        fig = _chart_top_skus(
+                            _top_rep, n=15,
+                            title="Top 15 SKUs — Reposicion",
+                        )
+                        if fig:
+                            st.plotly_chart(fig, use_container_width=True)
+                        st.dataframe(
+                            _top_rep.head(100),
+                            column_config={
+                                "SKU_PRODUCTO": st.column_config.TextColumn(
+                                    "SKU",
+                                ),
+                                "NOM_PRODUCTO": st.column_config.TextColumn(
+                                    "Producto", width="large",
+                                ),
+                                "VP_PESOS": st.column_config.NumberColumn(
+                                    "VP ($)", format="$%.0f",
+                                ),
+                                "VP_UNIDADES": st.column_config.NumberColumn(
+                                    "VP (Und)", format="%.0f",
+                                ),
+                            },
+                            use_container_width=True, hide_index=True,
+                        )
+                    else:
+                        st.info("No hay VP por reposicion.")
+                else:
+                    st.info("No hay datos de detalle disponibles.")
+
+            with sub_tabs[2]:
+                if (not df_cd_data.empty
+                        and "CANAL" in df_cd_data.columns):
+                    _df_may = df_cd_data[
+                        df_cd_data["CANAL"].isin(["MAYOR", "MAYORISTA"])
+                    ]
+                    if not _df_may.empty:
+                        _agg = {"VP_PESOS": "sum", "VP_UNIDADES": "sum"}
+                        for _c in ["NOM_PRODUCTO", "AREA", "LINEA",
+                                   "MARCA"]:
+                            if _c in _df_may.columns:
+                                _agg[_c] = "first"
+                        _top_may = (
+                            _df_may.groupby("SKU_PRODUCTO")
+                            .agg(**{k: (k, v) for k, v in _agg.items()})
+                            .reset_index()
+                            .sort_values("VP_PESOS", ascending=False)
+                        )
+                        fig = _chart_top_skus(
+                            _top_may, n=15,
+                            title="Top 15 SKUs — CD Mayor",
+                        )
+                        if fig:
+                            st.plotly_chart(fig, use_container_width=True)
+                        st.dataframe(
+                            _top_may.head(100),
+                            column_config={
+                                "SKU_PRODUCTO": st.column_config.TextColumn(
+                                    "SKU",
+                                ),
+                                "NOM_PRODUCTO": st.column_config.TextColumn(
+                                    "Producto", width="large",
+                                ),
+                                "VP_PESOS": st.column_config.NumberColumn(
+                                    "VP ($)", format="$%.0f",
+                                ),
+                                "VP_UNIDADES": st.column_config.NumberColumn(
+                                    "VP (Und)", format="%.0f",
+                                ),
+                            },
+                            use_container_width=True, hide_index=True,
+                        )
+                    else:
+                        st.info("No hay VP CD Mayor.")
+                else:
+                    st.info("No hay datos de CD disponibles.")
+
+            with sub_tabs[3]:
+                if (not df_cd_data.empty
+                        and "CANAL" in df_cd_data.columns):
+                    _df_eta = df_cd_data[
+                        df_cd_data["CANAL"] == "ETAIL"
+                    ]
+                    if not _df_eta.empty:
+                        _agg = {"VP_PESOS": "sum", "VP_UNIDADES": "sum"}
+                        for _c in ["NOM_PRODUCTO", "AREA", "LINEA",
+                                   "MARCA"]:
+                            if _c in _df_eta.columns:
+                                _agg[_c] = "first"
+                        _top_et = (
+                            _df_eta.groupby("SKU_PRODUCTO")
+                            .agg(**{k: (k, v) for k, v in _agg.items()})
+                            .reset_index()
+                            .sort_values("VP_PESOS", ascending=False)
+                        )
+                        fig = _chart_top_skus(
+                            _top_et, n=15,
+                            title="Top 15 SKUs — CD Etail",
+                        )
+                        if fig:
+                            st.plotly_chart(fig, use_container_width=True)
+                        st.dataframe(
+                            _top_et.head(100),
+                            column_config={
+                                "SKU_PRODUCTO": st.column_config.TextColumn(
+                                    "SKU",
+                                ),
+                                "NOM_PRODUCTO": st.column_config.TextColumn(
+                                    "Producto", width="large",
+                                ),
+                                "VP_PESOS": st.column_config.NumberColumn(
+                                    "VP ($)", format="$%.0f",
+                                ),
+                                "VP_UNIDADES": st.column_config.NumberColumn(
+                                    "VP (Und)", format="%.0f",
+                                ),
+                            },
+                            use_container_width=True, hide_index=True,
+                        )
+                    else:
+                        st.info("No hay VP CD Etail.")
+                else:
+                    st.info("No hay datos de CD disponibles.")
+
+            # ── Section C: SKUs Quebrados en CD + Proxima ETA ──
+            st.html(_hdr(
+                "SKUs con Quiebre CD — Proxima ETA"
+            ))
+            st.caption(
+                "SKUs que tienen venta perdida por quiebre de producto "
+                "(CD sin stock) y sus proximas ETAs de reposicion "
+                "programadas."
+            )
+
+            if (not df_det_full.empty
+                    and "TIPO_VP" in df_det_full.columns):
+                skus_quiebre = (
+                    df_det_full[
+                        df_det_full["TIPO_VP"] == "QUIEBRE_PRODUCTO"
+                    ]
+                    .groupby("SKU_PRODUCTO")
+                    .agg(
+                        VP_PESOS=("VP_PESOS", "sum"),
+                        VP_UNIDADES=("VP_UNIDADES", "sum"),
+                        DIAS_QUIEBRE=("FECHA", "nunique"),
+                    )
+                    .reset_index()
+                    .sort_values("VP_PESOS", ascending=False)
+                )
+
+                if not skus_quiebre.empty:
+                    # Load ETA data
+                    try:
+                        df_eta_data = _load_eta_pendiente(conn)
+                    except Exception:
+                        df_eta_data = pd.DataFrame()
+
+                    # Merge
+                    skus_eta = skus_quiebre.merge(
+                        df_eta_data, on="SKU_PRODUCTO", how="left",
+                    )
+
+                    # Enrich with maestra
+                    skus_eta = _enrich_with_maestra(skus_eta, conn)
+
+                    # Days until ETA
+                    if "PROXIMA_ETA" in skus_eta.columns:
+                        skus_eta["DIAS_HASTA_ETA"] = (
+                            skus_eta["PROXIMA_ETA"]
+                            - pd.Timestamp.now()
+                        ).dt.days
+                        skus_eta["TIENE_ETA"] = (
+                            skus_eta["PROXIMA_ETA"].notna()
+                        )
+                    else:
+                        skus_eta["DIAS_HASTA_ETA"] = np.nan
+                        skus_eta["TIENE_ETA"] = False
+
+                    # KPIs
+                    n_con_eta = int(skus_eta["TIENE_ETA"].sum())
+                    n_sin_eta = int((~skus_eta["TIENE_ETA"]).sum())
+                    vp_sin_eta = float(
+                        skus_eta.loc[
+                            ~skus_eta["TIENE_ETA"], "VP_PESOS"
+                        ].sum()
+                    )
+
+                    ke1, ke2, ke3 = st.columns(3)
+                    with ke1:
+                        st.html(simple_kpi_card(
+                            label="SKUS QUIEBRE CON ETA",
+                            value=f"{n_con_eta}",
+                            accent_color=COLORS["status_on_track"],
+                            subtitle="Reposicion en camino",
+                        ))
+                    with ke2:
+                        st.html(simple_kpi_card(
+                            label="SKUS QUIEBRE SIN ETA",
+                            value=f"{n_sin_eta}",
+                            accent_color=COLORS["status_critical"],
+                            subtitle=f"VP: {_fmt_currency(vp_sin_eta)}",
+                        ))
+                    with ke3:
+                        _dias_eta_vals = skus_eta.loc[
+                            skus_eta["TIENE_ETA"], "DIAS_HASTA_ETA"
+                        ]
+                        avg_dias = (
+                            _dias_eta_vals.mean()
+                            if len(_dias_eta_vals) > 0
+                            else float("nan")
+                        )
+                        st.html(simple_kpi_card(
+                            label="DIAS PROM HASTA ETA",
+                            value=(
+                                f"{avg_dias:.0f}"
+                                if not np.isnan(avg_dias) else "N/A"
+                            ),
+                            accent_color=COLORS["primary"],
+                        ))
+
+                    # Table
+                    _eta_cols = [c for c in [
+                        "SKU_PRODUCTO", "NOM_PRODUCTO",
+                        "AREA", "LINEA", "MARCA",
+                        "VP_PESOS", "VP_UNIDADES", "DIAS_QUIEBRE",
+                        "TIENE_ETA", "PROXIMA_ETA", "QTY_PENDIENTE",
+                        "N_POS", "PROVEEDOR_ETA", "DIAS_HASTA_ETA",
+                    ] if c in skus_eta.columns]
+
+                    st.dataframe(
+                        skus_eta[_eta_cols].head(500),
+                        column_config={
+                            "SKU_PRODUCTO": st.column_config.TextColumn(
+                                "SKU",
+                            ),
+                            "NOM_PRODUCTO": st.column_config.TextColumn(
+                                "Producto", width="large",
+                            ),
+                            "VP_PESOS": st.column_config.NumberColumn(
+                                "VP Quiebre ($)", format="$%.0f",
+                            ),
+                            "VP_UNIDADES": st.column_config.NumberColumn(
+                                "VP Quiebre (Und)", format="%.0f",
+                            ),
+                            "DIAS_QUIEBRE": st.column_config.NumberColumn(
+                                "Dias Quiebre", format="%d",
+                            ),
+                            "TIENE_ETA": st.column_config.CheckboxColumn(
+                                "Tiene ETA",
+                            ),
+                            "PROXIMA_ETA": st.column_config.DateColumn(
+                                "Proxima ETA",
+                            ),
+                            "QTY_PENDIENTE": st.column_config.NumberColumn(
+                                "Qty Pendiente", format="%.0f",
+                            ),
+                            "N_POS": st.column_config.NumberColumn(
+                                "N POs", format="%d",
+                            ),
+                            "PROVEEDOR_ETA": st.column_config.TextColumn(
+                                "Proveedor",
+                            ),
+                            "DIAS_HASTA_ETA": st.column_config.NumberColumn(
+                                "Dias Hasta ETA", format="%d",
+                            ),
+                        },
+                        use_container_width=True,
+                        height=600,
+                        hide_index=True,
+                    )
+                    download_buttons(
+                        skus_eta[_eta_cols], "vp_quiebre_eta",
+                    )
+                else:
+                    st.info(
+                        "No hay SKUs con quiebre de producto en el "
+                        "rango seleccionado."
+                    )
+            else:
+                st.warning(
+                    "No hay datos de detalle para generar insights "
+                    "de quiebre."
+                )
+
     # ── Tab Detalle Calculo ──
     with tab_detalle:
         if df_detail.empty:
@@ -2232,7 +2847,7 @@ def render_venta_perdida(conn):
                     "SKU_PRODUCTO", "NOM_PRODUCTO",
                     "ID_SUCURSAL", "DESCRIPCION_SUCURSAL",
                     "AREA", "LINEA", "MARCA", "MIX_OFICIAL",
-                    "PRODUCTO_STATUS",
+                    "PRODUCTO_STATUS", "TIPO_VP",
                     "STOCK_UNIDADES", "STOCK_CD",
                     "DAILY_DEMAND_ALL", "INSTOCK_CD",
                     "DEMANDA_POR_TIENDA",
@@ -2345,7 +2960,7 @@ def render_venta_perdida(conn):
                 "FECHA", "SKU_PRODUCTO", "NOM_PRODUCTO",
                 "ID_SUCURSAL", "DESCRIPCION_SUCURSAL",
                 "AREA", "LINEA", "MARCA", "MIX_OFICIAL",
-                "PRODUCTO_STATUS", "FIRST_SALE_DATE",
+                "PRODUCTO_STATUS", "FIRST_SALE_DATE", "TIPO_VP",
                 "STOCK_UNIDADES", "STOCK_CD",
                 "DAILY_DEMAND_ALL", "INSTOCK_CD",
                 "DEMANDA_TOTAL_DIA",

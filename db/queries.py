@@ -373,6 +373,22 @@ WHERE c.fecha_recepcion_en_cd IS NULL
 ORDER BY c.eta ASC
 """
 
+# Proxima ETA pendiente por SKU (para VP insights)
+QUERY_ETA_PENDIENTE_POR_SKU = f"""
+SELECT
+    c.sku_producto,
+    MIN(c.eta)  AS proxima_eta,
+    SUM(GREATEST(0, COALESCE(c.cantidad_final_corregida, 0)
+        - COALESCE(c.cantidad_carpeta_recepcionada, 0))) AS qty_pendiente,
+    COUNT(DISTINCT c.po) AS n_pos,
+    MAX(c.nom_proveedor) AS proveedor_eta
+FROM {_COMPRAS} c
+WHERE c.fecha_recepcion_en_cd IS NULL
+  AND c.cantidad_final_corregida > 0
+  AND c.eta >= CURRENT_DATE()
+GROUP BY c.sku_producto
+"""
+
 # Precio promedio de venta por SKU (ultimos 90 dias)
 QUERY_PRECIO_PROM_SKU = f"""
 SELECT
