@@ -272,6 +272,9 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
             v.sku_producto,
             COALESCE(CAST(b.id_sucursal AS VARCHAR),
                      CAST(v.cod_ccosto AS VARCHAR)) AS id_sucursal,
+            MAX(COALESCE(b.descripcion_sucursal,
+                         CAST(v.cod_ccosto AS VARCHAR)))
+                AS descripcion_sucursal,
             SUM(v.cantidad) / NULLIF({dias_ventana}::FLOAT, 0)
                 AS demand_per_store,
             CASE WHEN SUM(v.cantidad) > 0
@@ -339,6 +342,9 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
         SELECT fecha, sku_producto, COUNT(DISTINCT id_sucursal) AS n_stores
         FROM stock_daily
         GROUP BY 1, 2
+    ),
+    dates AS (
+        SELECT DISTINCT fecha FROM stock_daily
     )""" + (f""",
     cd_instock AS (
         SELECT cd.fecha, cd.sku_producto, cd.stock_unidades AS stock_cd,
@@ -362,28 +368,30 @@ def _sql_vp_tienda(dias_ventana, mix_values=None, perfil_only=True):
                              filter_cd_instock="none")
     return cte + f"""
     SELECT
-        s.fecha,
-        s.sku_producto,
+        dt.fecha,
+        d.sku_producto,
         SUM(GREATEST(0,
-            d.demand_per_store - s.stock_unidades
+            d.demand_per_store - COALESCE(s.stock_unidades, 0)
         )) AS vp_unidades,
         SUM(GREATEST(0,
-            d.demand_per_store - s.stock_unidades
+            d.demand_per_store - COALESCE(s.stock_unidades, 0)
         ) * COALESCE(NULLIF(d.avg_price, 0), pp.ultimo_costo, 0))
             AS vp_pesos,
         COUNT(*) AS n_tiendas_total,
         SUM(CASE
-            WHEN s.stock_unidades >= d.demand_per_store
+            WHEN COALESCE(s.stock_unidades, 0) >= d.demand_per_store
             THEN 1 ELSE 0 END) AS n_tiendas_instock,
         SUM(CASE
-            WHEN s.stock_unidades < d.demand_per_store
+            WHEN COALESCE(s.stock_unidades, 0) < d.demand_per_store
             THEN 1 ELSE 0 END) AS n_tiendas_oos
-    FROM stock_daily s
-    INNER JOIN demand d
-        ON s.sku_producto = d.sku_producto
-        AND s.id_sucursal = d.id_sucursal
+    FROM dates dt
+    CROSS JOIN demand d
+    LEFT JOIN stock_daily s
+        ON dt.fecha = s.fecha
+        AND d.sku_producto = s.sku_producto
+        AND d.id_sucursal = s.id_sucursal
     LEFT JOIN prod_price pp
-        ON s.sku_producto = pp.sku_producto
+        ON d.sku_producto = pp.sku_producto
     GROUP BY 1, 2
     """
 
@@ -397,29 +405,32 @@ def _sql_vp_tienda_by_store(dias_ventana, mix_values=None, perfil_only=True):
                              filter_cd_instock="none")
     return cte + f"""
     SELECT
-        s.fecha,
-        s.id_sucursal,
-        MAX(s.descripcion_sucursal) AS descripcion_sucursal,
+        dt.fecha,
+        d.id_sucursal,
+        MAX(COALESCE(s.descripcion_sucursal,
+                     d.descripcion_sucursal)) AS descripcion_sucursal,
         SUM(GREATEST(0,
-            d.demand_per_store - s.stock_unidades
+            d.demand_per_store - COALESCE(s.stock_unidades, 0)
         )) AS vp_unidades,
         SUM(GREATEST(0,
-            d.demand_per_store - s.stock_unidades
+            d.demand_per_store - COALESCE(s.stock_unidades, 0)
         ) * COALESCE(NULLIF(d.avg_price, 0), pp.ultimo_costo, 0))
             AS vp_pesos,
-        COUNT(DISTINCT s.sku_producto) AS n_skus,
-        SUM(s.stock_unidades) AS stock_total,
+        COUNT(DISTINCT d.sku_producto) AS n_skus,
+        SUM(COALESCE(s.stock_unidades, 0)) AS stock_total,
         SUM(d.demand_per_store) AS demanda_tienda,
         SUM(CASE
-            WHEN s.stock_unidades >= d.demand_per_store
+            WHEN COALESCE(s.stock_unidades, 0) >= d.demand_per_store
             THEN 1 ELSE 0 END) AS skus_instock,
         COUNT(*) AS skus_total
-    FROM stock_daily s
-    INNER JOIN demand d
-        ON s.sku_producto = d.sku_producto
-        AND s.id_sucursal = d.id_sucursal
+    FROM dates dt
+    CROSS JOIN demand d
+    LEFT JOIN stock_daily s
+        ON dt.fecha = s.fecha
+        AND d.sku_producto = s.sku_producto
+        AND d.id_sucursal = s.id_sucursal
     LEFT JOIN prod_price pp
-        ON s.sku_producto = pp.sku_producto
+        ON d.sku_producto = pp.sku_producto
     GROUP BY 1, 2
     """
 
@@ -533,7 +544,7 @@ def _sql_vp_tienda_detail(dias_ventana, mix_values=None, perfil_only=True,
     if include_cd_cols:
         cd_join = """
     LEFT JOIN cd_instock ci
-        ON s.fecha = ci.fecha AND s.sku_producto = ci.sku_producto"""
+        ON dts.fecha = ci.fecha AND d.sku_producto = ci.sku_producto"""
         cd_col = "ci.stock_cd, ci.daily_demand_all, ci.instock_cd"
     else:
         cd_join = ""
@@ -541,38 +552,42 @@ def _sql_vp_tienda_detail(dias_ventana, mix_values=None, perfil_only=True,
                   "NULL::INT AS instock_cd")
     return cte + f"""
     SELECT
-        s.fecha,
-        s.sku_producto,
-        s.id_sucursal,
-        s.descripcion_sucursal,
-        s.stock_unidades,
+        dts.fecha,
+        d.sku_producto,
+        d.id_sucursal,
+        COALESCE(s.descripcion_sucursal,
+                 d.descripcion_sucursal) AS descripcion_sucursal,
+        COALESCE(s.stock_unidades, 0) AS stock_unidades,
         {cd_col},
-        dt.total_daily_demand AS demanda_total_dia,
+        dtot.total_daily_demand AS demanda_total_dia,
         np.n_stores AS n_tiendas_perfil,
         d.demand_per_store AS demanda_por_tienda,
         CASE
-            WHEN s.stock_unidades >= d.demand_per_store
+            WHEN COALESCE(s.stock_unidades, 0) >= d.demand_per_store
             THEN 1 ELSE 0 END AS instock,
         GREATEST(0,
-            d.demand_per_store - s.stock_unidades) AS vp_unidades,
+            d.demand_per_store - COALESCE(s.stock_unidades, 0))
+            AS vp_unidades,
         GREATEST(0,
-            d.demand_per_store - s.stock_unidades)
+            d.demand_per_store - COALESCE(s.stock_unidades, 0))
             * COALESCE(NULLIF(d.avg_price, 0), pp.ultimo_costo, 0)
             AS vp_pesos,
         d.avg_price AS precio_vcm,
         pp.ultimo_costo,
         COALESCE(NULLIF(d.avg_price, 0), pp.ultimo_costo, 0)
             AS precio_usado
-    FROM stock_daily s
-    INNER JOIN demand d
-        ON s.sku_producto = d.sku_producto
-        AND s.id_sucursal = d.id_sucursal
-    LEFT JOIN demand_total dt
-        ON s.sku_producto = dt.sku_producto
+    FROM dates dts
+    CROSS JOIN demand d
+    LEFT JOIN stock_daily s
+        ON dts.fecha = s.fecha
+        AND d.sku_producto = s.sku_producto
+        AND d.id_sucursal = s.id_sucursal
+    LEFT JOIN demand_total dtot
+        ON d.sku_producto = dtot.sku_producto
     LEFT JOIN n_perfil np
-        ON s.fecha = np.fecha AND s.sku_producto = np.sku_producto
+        ON dts.fecha = np.fecha AND d.sku_producto = np.sku_producto
     LEFT JOIN prod_price pp
-        ON s.sku_producto = pp.sku_producto
+        ON d.sku_producto = pp.sku_producto
     {cd_join}
     """
 
