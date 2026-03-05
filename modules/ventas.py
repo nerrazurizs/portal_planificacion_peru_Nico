@@ -137,7 +137,7 @@ def render_ventas(conn):
 
             # ILIKE field (nombre producto "contiene")
             if campo == "nom_producto":
-                frag, p = build_ilike("c.sku_nom_producto", valor)
+                frag, p = build_ilike("c.nom_producto", valor)
                 if frag:
                     query += f" and {frag}"
                     params.extend(p)
