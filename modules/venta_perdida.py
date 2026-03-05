@@ -703,6 +703,54 @@ def _compute_vp_range(conn, stock_start, stock_end,
             except Exception:
                 pass
 
+            # ── CROSS JOIN diagnostic: how many rows, how many with VP ──
+            try:
+                cte_diag = _build_tienda_ctes(
+                    dias_ventana, mix_values, perfil_only,
+                    filter_cd_instock="none",
+                )
+                _xj_sql = cte_diag + f"""
+                SELECT
+                    COUNT(*) AS total_rows,
+                    COUNT(s.stock_unidades) AS rows_with_stock,
+                    COUNT(*) - COUNT(s.stock_unidades) AS rows_no_stock,
+                    SUM(CASE WHEN GREATEST(0,
+                        d.demand_per_store - COALESCE(s.stock_unidades, 0)
+                    ) > 0 THEN 1 ELSE 0 END) AS rows_with_vp,
+                    SUM(d.demand_per_store) AS total_demand,
+                    SUM(COALESCE(s.stock_unidades, 0)) AS total_stock,
+                    SUM(GREATEST(0,
+                        d.demand_per_store - COALESCE(s.stock_unidades, 0)
+                    )) AS total_vp_units,
+                    (SELECT COUNT(*) FROM dates) AS n_dates,
+                    (SELECT COUNT(*) FROM demand) AS n_demand,
+                    (SELECT COUNT(*) FROM stock_daily) AS n_stock_daily
+                FROM dates dt
+                CROSS JOIN demand d
+                LEFT JOIN stock_daily s
+                    ON dt.fecha = s.fecha
+                    AND d.sku_producto = s.sku_producto
+                    AND d.id_sucursal = s.id_sucursal
+                """
+                _xj_df = pd.read_sql(
+                    _xj_sql, conn, params=prm_base,
+                )
+                st.session_state["vp_crossjoin_diag"] = _xj_df
+            except Exception as _xe:
+                st.session_state["vp_crossjoin_diag"] = f"ERROR: {_xe}"
+
+            # ── Debug: aggregate result stats ──
+            st.session_state["_debug_df_t"] = {
+                "rows": len(df_t),
+                "vp_pesos": float(df_t["VP_PESOS"].sum())
+                if not df_t.empty and "VP_PESOS" in df_t.columns
+                else 0,
+                "vp_unidades": float(df_t["VP_UNIDADES"].sum())
+                if not df_t.empty and "VP_UNIDADES" in df_t.columns
+                else 0,
+                "columns": list(df_t.columns) if not df_t.empty else [],
+            }
+
         # ── Tienda VP (store level) — always unfiltered ──
         sql_ts = _sql_vp_tienda_by_store(
             dias_ventana, mix_values, perfil_only,
@@ -1576,6 +1624,28 @@ def render_venta_perdida(conn):
                 "**Tiendas excluidas (cerradas):** Bellavista, Chiclayo 2, "
                 "San Miguel 2, Outlet, Cajamarca, Trujillo 2, 143, 148"
             )
+
+            # CROSS JOIN diagnostic
+            _xj_diag = st.session_state.get("vp_crossjoin_diag")
+            if _xj_diag is not None:
+                st.write("---")
+                st.write("**CROSS JOIN diagnostic:**")
+                if isinstance(_xj_diag, str):
+                    st.error(_xj_diag)
+                else:
+                    st.dataframe(_xj_diag, hide_index=True)
+
+            # Aggregate result debug
+            _dbg = st.session_state.get("_debug_df_t")
+            if _dbg:
+                st.write("---")
+                st.write(
+                    f"**df_tienda resultado:** {_dbg['rows']} filas, "
+                    f"VP_UNIDADES={_dbg['vp_unidades']:,.2f}, "
+                    f"VP_PESOS=${_dbg['vp_pesos']:,.0f}"
+                )
+                if _dbg.get("columns"):
+                    st.caption(f"Columnas: {_dbg['columns']}")
 
     # ── Tabs ──
     tab_evo, tab_tienda, tab_sucursal, tab_cd, tab_detalle, tab_resumen = (
