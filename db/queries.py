@@ -120,6 +120,8 @@ _COMPRAS = f"""(
         p.marca,
         p.modelo,
         p.factor_importacion,
+        p.mix_oficial,
+        p.procedencia,
         f.codigo_sucursal,
         f.procedencia_oc,
         f.almacen_ingreso_cd
@@ -267,9 +269,7 @@ where c.fecha_recepcion_en_cd is null
 """
 
 QUERY_COMEX_BASE = f"""
-SELECT *,
-    c.etd AS ETD_CALC,
-    c.eta AS ETA_CALC
+SELECT *
 FROM {_COMPRAS} c
 WHERE 1=1
 """

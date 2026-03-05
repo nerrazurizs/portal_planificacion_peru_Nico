@@ -109,16 +109,16 @@ def render_comex(conn):
 
                 # Date filters
                 if f_anio_etd:
-                    conditions.append("YEAR(ETD_CALC) = %s")
+                    conditions.append("YEAR(ETD) = %s")
                     params_list.append([f_anio_etd])
                 if f_mes_etd:
-                    conditions.append("MONTH(ETD_CALC) = %s")
+                    conditions.append("MONTH(ETD) = %s")
                     params_list.append([f_mes_etd])
                 if f_anio_eta:
-                    conditions.append("YEAR(ETA_CALC) = %s")
+                    conditions.append("YEAR(ETA) = %s")
                     params_list.append([f_anio_eta])
                 if f_mes_eta:
-                    conditions.append("MONTH(ETA_CALC) = %s")
+                    conditions.append("MONTH(ETA) = %s")
                     params_list.append([f_mes_eta])
 
                 # Build final query
@@ -131,6 +131,8 @@ def render_comex(conn):
 
                 df = pd.read_sql(final_query, conn, params=flat_params if flat_params else None)
                 df.columns = [c.upper() for c in df.columns]
+                # Deduplicate columns (safety: SELECT * may produce overlaps)
+                df = df.loc[:, ~df.columns.duplicated()]
                 df = apply_pm_filter(df)
 
                 # Timeline Chart — ETA Puerto → Disponibilidad en CD
@@ -144,8 +146,8 @@ def render_comex(conn):
                     )
                     df_chart = df[mask_pendiente].copy()
 
-                    if not df_chart.empty and "ETA_CALC" in df_chart.columns:
-                        df_chart["ETA_CALC"] = pd.to_datetime(df_chart["ETA_CALC"])
+                    if not df_chart.empty and "ETA" in df_chart.columns:
+                        df_chart["ETA"] = pd.to_datetime(df_chart["ETA"])
                         df_chart["MONTOMN"] = pd.to_numeric(
                             df_chart.get("MONTOMN", 0), errors="coerce"
                         ).fillna(0)
@@ -155,31 +157,31 @@ def render_comex(conn):
                             p = str(proc).upper() if proc else ""
                             return 7 if "NACIONAL" in p else 14
 
-                        if "PROCEDENCIA" in df_chart.columns:
-                            df_chart["_LAG"] = df_chart["PROCEDENCIA"].apply(_get_lag).astype(int)
+                        if "PROCEDENCIA_OC" in df_chart.columns:
+                            df_chart["_LAG"] = df_chart["PROCEDENCIA_OC"].apply(_get_lag).astype(int)
                         else:
                             df_chart["_LAG"] = 14
 
-                        df_chart["DISP_CD"] = df_chart["ETA_CALC"] + df_chart["_LAG"].apply(
+                        df_chart["DISP_CD"] = df_chart["ETA"] + df_chart["_LAG"].apply(
                             lambda d: pd.Timedelta(days=int(d))
                         )
 
                         # Aggregate by PO + Product
                         _agg_dict = {
-                            "ETA_CALC": ("ETA_CALC", "min"),
+                            "ETA": ("ETA", "min"),
                             "DISP_CD": ("DISP_CD", "max"),
                             "UNIDADES": ("CANTIDAD_FINAL_CORREGIDA", "sum"),
                             "MONTOMN": ("MONTOMN", "sum"),
                             "_LAG": ("_LAG", "first"),
                         }
-                        if "PROCEDENCIA" in df_chart.columns:
-                            _agg_dict["PROCEDENCIA"] = ("PROCEDENCIA", "first")
+                        if "PROCEDENCIA_OC" in df_chart.columns:
+                            _agg_dict["PROCEDENCIA_OC"] = ("PROCEDENCIA_OC", "first")
 
                         _tl = (
                             df_chart.groupby(["PO", "NOM_PRODUCTO"])
                             .agg(**_agg_dict)
                             .reset_index()
-                            .sort_values("ETA_CALC")
+                            .sort_values("ETA")
                         )
 
                         # ── KPI summary ──
@@ -187,7 +189,7 @@ def render_comex(conn):
                         _k1, _k2, _k3 = st.columns(3)
                         _k1.metric("Unidades en Transito", f"{_tl['UNIDADES'].sum():,.0f}")
                         _k2.metric("Costo en Transito (CLP)", f"${human_format(_tl['MONTOMN'].sum())}")
-                        _prox = _tl["ETA_CALC"].min()
+                        _prox = _tl["ETA"].min()
                         _k3.metric("Proximo Arribo", _prox.strftime("%d-%b-%Y") if pd.notna(_prox) else "—")
 
                         st.caption(
@@ -220,8 +222,8 @@ def render_comex(conn):
                         _tl["_LABEL"] = _tl["PO"] + " | " + _tl["NOM_PRODUCTO"].str[:35]
 
                         # Color by procedencia
-                        if "PROCEDENCIA" in _tl.columns:
-                            _tl["_COLOR"] = _tl["PROCEDENCIA"].apply(
+                        if "PROCEDENCIA_OC" in _tl.columns:
+                            _tl["_COLOR"] = _tl["PROCEDENCIA_OC"].apply(
                                 lambda p: COLORS["status_on_track"]
                                 if "NACIONAL" in str(p).upper()
                                 else COLORS["primary"]
@@ -243,7 +245,7 @@ def render_comex(conn):
                             lambda r: (
                                 f"<b>{r['PO']}</b><br>"
                                 f"Producto: {str(r['NOM_PRODUCTO'])[:45]}<br>"
-                                f"ETA Puerto: {r['ETA_CALC'].strftime('%d-%b-%Y')}<br>"
+                                f"ETA Puerto: {r['ETA'].strftime('%d-%b-%Y')}<br>"
                                 f"Disp. CD: {r['DISP_CD'].strftime('%d-%b-%Y')}<br>"
                                 f"Lag: {r['_LAG']} dias<br>"
                                 f"Unidades: {r['UNIDADES']:,.0f}<br>"
@@ -281,7 +283,7 @@ def render_comex(conn):
                         _x_lines, _y_lines = [], []
                         for _, row in _tl.iterrows():
                             _x_lines.extend([
-                                row["ETA_CALC"].strftime("%Y-%m-%d"),
+                                row["ETA"].strftime("%Y-%m-%d"),
                                 row["DISP_CD"].strftime("%Y-%m-%d"),
                                 None,
                             ])
@@ -294,7 +296,7 @@ def render_comex(conn):
                         ))
 
                         # ── Trace 2: ETA markers (diamonds) ──
-                        _eta_x = _tl["ETA_CALC"].dt.strftime("%Y-%m-%d").tolist()
+                        _eta_x = _tl["ETA"].dt.strftime("%Y-%m-%d").tolist()
                         _cd_x = _tl["DISP_CD"].dt.strftime("%Y-%m-%d").tolist()
                         _labels = _tl["_LABEL"].tolist()
                         _hovers = _tl["_HOVER"].tolist()
@@ -322,14 +324,14 @@ def render_comex(conn):
 
                         # ── Annotations per PO ──
                         for _, row in _tl.iterrows():
-                            _eta_s = row["ETA_CALC"].strftime("%Y-%m-%d")
+                            _eta_s = row["ETA"].strftime("%Y-%m-%d")
                             _disp_s = row["DISP_CD"].strftime("%Y-%m-%d")
                             _lbl = row["_LABEL"]
 
                             # Date label at ETA
                             fig_tl.add_annotation(
                                 x=_eta_s, y=_lbl,
-                                text=f"<b>Puerto</b>: {row['ETA_CALC'].strftime('%d-%b')}",
+                                text=f"<b>Puerto</b>: {row['ETA'].strftime('%d-%b')}",
                                 showarrow=False, yshift=18,
                                 font=dict(size=9, color=_clr_eta),
                                 bgcolor="rgba(255,255,255,0.8)",
@@ -345,7 +347,7 @@ def render_comex(conn):
                                 borderpad=2,
                             )
                             # Units + cost at midpoint
-                            _eta_dt = row["ETA_CALC"].to_pydatetime()
+                            _eta_dt = row["ETA"].to_pydatetime()
                             _disp_dt = row["DISP_CD"].to_pydatetime()
                             _mid = (_eta_dt + (_disp_dt - _eta_dt) / 2).strftime("%Y-%m-%d")
                             fig_tl.add_annotation(
