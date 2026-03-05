@@ -1669,7 +1669,8 @@ def render_venta_perdida(conn):
         f"al {vp_hasta.strftime('%d/%m/%Y')} ({n_dias_rango} dias)"
     ))
 
-    k1, k2, k3, k4, k5 = st.columns(5)
+    # ── Row 1: Main KPIs (Total, Tiendas, CD) ──
+    k1, k2, k3 = st.columns(3)
     with k1:
         st.html(simple_kpi_card(
             label="VP TOTAL ACUMULADA",
@@ -1686,25 +1687,66 @@ def render_venta_perdida(conn):
         ))
     with k3:
         st.html(simple_kpi_card(
-            label="QUIEBRE PRODUCTO",
-            value=_fmt_currency(vp_quiebre),
-            accent_color="#8B0000",
-            subtitle="CD sin stock",
-        ))
-    with k4:
-        st.html(simple_kpi_card(
-            label="REPOSICION",
-            value=_fmt_currency(vp_reposicion),
-            accent_color=COLORS["status_at_risk"],
-            subtitle="CD tenia stock, tienda no",
-        ))
-    with k5:
-        st.html(simple_kpi_card(
             label="VP CD (MAYOR + ETAIL)",
             value=_fmt_currency(vp_c),
             accent_color=COLORS["tertiary_teal"],
             subtitle=f"{len(skus_c):,} SKUs afectados",
         ))
+
+    # ── Row 2: Breakdown VP Tiendas → Quiebre + Reposición ──
+    pct_qp = vp_quiebre / vp_t * 100 if vp_t > 0 else 0
+    pct_rp = vp_reposicion / vp_t * 100 if vp_t > 0 else 0
+    bar_qp = max(pct_qp, 2)  # min width for visibility
+    bar_rp = max(pct_rp, 2)
+    st.html(f"""
+    <div style="margin:-0.4rem 0 0.8rem 0; padding:0.9rem 1.2rem;
+                background:#f8fafc; border-radius:10px;
+                border-left:4px solid {COLORS["primary"]};">
+        <div style="font-size:0.7rem; color:#94a3b8; text-transform:uppercase;
+                    letter-spacing:0.5px; margin-bottom:0.5rem;">
+            Descomposicion VP Tiendas
+        </div>
+        <div style="display:flex; gap:1.5rem; align-items:center;
+                    flex-wrap:wrap;">
+            <div style="display:flex; align-items:center; gap:0.5rem;">
+                <div style="width:12px; height:12px; border-radius:3px;
+                            background:#8B0000;"></div>
+                <span style="font-size:0.82rem; color:#475569; font-weight:600;">
+                    Quiebre Producto
+                </span>
+                <span style="font-size:1.1rem; font-weight:700; color:#8B0000;">
+                    {_fmt_currency(vp_quiebre)}
+                </span>
+                <span style="font-size:0.75rem; color:#94a3b8;">
+                    ({pct_qp:.0f}%) — CD sin stock
+                </span>
+            </div>
+            <div style="display:flex; align-items:center; gap:0.5rem;">
+                <div style="width:12px; height:12px; border-radius:3px;
+                            background:{COLORS["status_at_risk"]};"></div>
+                <span style="font-size:0.82rem; color:#475569; font-weight:600;">
+                    Reposicion
+                </span>
+                <span style="font-size:1.1rem; font-weight:700;
+                            color:{COLORS["status_at_risk"]};">
+                    {_fmt_currency(vp_reposicion)}
+                </span>
+                <span style="font-size:0.75rem; color:#94a3b8;">
+                    ({pct_rp:.0f}%) — CD tenia stock, tienda no
+                </span>
+            </div>
+        </div>
+        <div style="display:flex; height:8px; border-radius:4px;
+                    overflow:hidden; margin-top:0.6rem;
+                    background:#e2e8f0;">
+            <div style="width:{bar_qp:.1f}%; background:#8B0000;
+                        border-radius:4px 0 0 4px;"></div>
+            <div style="width:{bar_rp:.1f}%;
+                        background:{COLORS["status_at_risk"]};
+                        border-radius:0 4px 4px 0;"></div>
+        </div>
+    </div>
+    """)
 
     # ── Excluded stores info (hardcoded) ──
     st.info(
@@ -2280,19 +2322,15 @@ def render_venta_perdida(conn):
     with tab_insights:
         st.html(_hdr("💡 Insights — Venta Perdida por Canal y Tipo"))
 
-        # Use unfiltered detail for full VP composition, but apply
-        # user dimension filters for consistency
-        df_det_full = st.session_state.get(
-            "vp_detail_full", pd.DataFrame()
-        )
-        if not df_det_full.empty:
-            df_det_full = _apply_filters(
-                df_det_full, f_sku, f_area, f_linea,
-                f_sublinea, f_marca, f_proveedor, f_status,
-            )
+        # Use FILTERED detail (same as KPIs: grace + CD filter applied)
+        # so Quiebre/Repo numbers match the top summary exactly.
+        df_det_ins = _apply_filters(
+            df_detail, f_sku, f_area, f_linea,
+            f_sublinea, f_marca, f_proveedor, f_status,
+        ) if not df_detail.empty else pd.DataFrame()
         df_cd_data = df_cd  # already dimension-filtered
 
-        if df_det_full.empty and df_cd_data.empty:
+        if df_det_ins.empty and df_cd_data.empty:
             st.warning("No hay datos para generar insights.")
         else:
             # ── Section A: Composicion VP por Canal y Tipo ──
@@ -2301,14 +2339,14 @@ def render_venta_perdida(conn):
             # VP Tiendas split
             _vp_qp = 0.0
             _vp_rep = 0.0
-            if (not df_det_full.empty
-                    and "TIPO_VP" in df_det_full.columns):
-                _vp_qp = float(df_det_full.loc[
-                    df_det_full["TIPO_VP"] == "QUIEBRE_PRODUCTO",
+            if (not df_det_ins.empty
+                    and "TIPO_VP" in df_det_ins.columns):
+                _vp_qp = float(df_det_ins.loc[
+                    df_det_ins["TIPO_VP"] == "QUIEBRE_PRODUCTO",
                     "VP_PESOS",
                 ].sum())
-                _vp_rep = float(df_det_full.loc[
-                    df_det_full["TIPO_VP"] == "REPOSICION",
+                _vp_rep = float(df_det_ins.loc[
+                    df_det_ins["TIPO_VP"] == "REPOSICION",
                     "VP_PESOS",
                 ].sum())
 
@@ -2387,10 +2425,10 @@ def render_venta_perdida(conn):
             ])
 
             with sub_tabs[0]:
-                if (not df_det_full.empty
-                        and "TIPO_VP" in df_det_full.columns):
-                    _df_qp = df_det_full[
-                        df_det_full["TIPO_VP"] == "QUIEBRE_PRODUCTO"
+                if (not df_det_ins.empty
+                        and "TIPO_VP" in df_det_ins.columns):
+                    _df_qp = df_det_ins[
+                        df_det_ins["TIPO_VP"] == "QUIEBRE_PRODUCTO"
                     ]
                     if not _df_qp.empty:
                         _agg = {"VP_PESOS": "sum", "VP_UNIDADES": "sum"}
@@ -2434,10 +2472,10 @@ def render_venta_perdida(conn):
                     st.info("No hay datos de detalle disponibles.")
 
             with sub_tabs[1]:
-                if (not df_det_full.empty
-                        and "TIPO_VP" in df_det_full.columns):
-                    _df_rep = df_det_full[
-                        df_det_full["TIPO_VP"] == "REPOSICION"
+                if (not df_det_ins.empty
+                        and "TIPO_VP" in df_det_ins.columns):
+                    _df_rep = df_det_ins[
+                        df_det_ins["TIPO_VP"] == "REPOSICION"
                     ]
                     if not _df_rep.empty:
                         _agg = {"VP_PESOS": "sum", "VP_UNIDADES": "sum"}
@@ -2584,11 +2622,11 @@ def render_venta_perdida(conn):
                 "programadas."
             )
 
-            if (not df_det_full.empty
-                    and "TIPO_VP" in df_det_full.columns):
+            if (not df_det_ins.empty
+                    and "TIPO_VP" in df_det_ins.columns):
                 skus_quiebre = (
-                    df_det_full[
-                        df_det_full["TIPO_VP"] == "QUIEBRE_PRODUCTO"
+                    df_det_ins[
+                        df_det_ins["TIPO_VP"] == "QUIEBRE_PRODUCTO"
                     ]
                     .groupby("SKU_PRODUCTO")
                     .agg(
