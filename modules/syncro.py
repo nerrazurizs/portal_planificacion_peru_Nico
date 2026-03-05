@@ -149,7 +149,12 @@ def render_syncro(conn):
         if query:
             try:
                 with lottie_spinner("snowflake"):
-                    df = pd.read_sql(query, conn, params=params if params else None)
+                    # Use cursor.fetch_pandas_all() instead of pd.read_sql()
+                    # to avoid hex-float parsing errors ('0x1.0p0') in
+                    # Snowflake FLOAT columns — Arrow handles them correctly.
+                    cur = conn.cursor()
+                    cur.execute(query, params if params else None)
+                    df = cur.fetch_pandas_all()
                     df.columns = [c.upper() for c in df.columns]
                 df = apply_pm_filter(df)
                 st.success(f"{len(df):,} filas")

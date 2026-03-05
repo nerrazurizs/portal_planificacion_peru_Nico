@@ -243,7 +243,10 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
         f"INNER JOIN eligible_skus e ON p.sku_producto = e.sku_producto"
         if has_mix else ""
     )
-    perfil_sql = "AND a.perfil = 'SI'" if perfil_only else ""
+    # Perfil filter: only for n_perfil (store count for demand allocation),
+    # NOT for stock_daily.  Stock must reflect REAL inventory regardless
+    # of whether the store currently has perfil for the SKU.
+    n_perfil_where = "WHERE perfil = 'SI'" if perfil_only else ""
 
     eligible_cte = ""
     if has_mix:
@@ -335,18 +338,19 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
             a.sku_producto,
             CAST(vs.cod_ccosto AS VARCHAR) AS id_sucursal,
             MAX(vs.nom_almacen) AS descripcion_sucursal,
-            SUM(a.stock_unidades) AS stock_unidades
+            SUM(a.stock_unidades) AS stock_unidades,
+            MAX(a.perfil) AS perfil
         FROM {_INSTOCK} a
         INNER JOIN valid_stores vs
             ON a.cod_bodega = vs.cod_almacen
         {mix_join_a}
         WHERE a.fecha >= %s AND a.fecha <= %s
-          {perfil_sql}
         GROUP BY 1, 2, 3
     ),
     n_perfil AS (
         SELECT fecha, sku_producto, COUNT(DISTINCT id_sucursal) AS n_stores
         FROM stock_daily
+        {n_perfil_where}
         GROUP BY 1, 2
     ),
     dates AS (
@@ -374,6 +378,9 @@ def _sql_vp_tienda(dias_ventana, mix_values=None, perfil_only=True):
     """
     cte = _build_tienda_ctes(dias_ventana, mix_values, perfil_only,
                              filter_cd_instock="none")
+    # Exclude store×day combos without active perfil to avoid phantom VP
+    pf_where = ("\n    WHERE COALESCE(s.perfil, 'NO') = 'SI'"
+                if perfil_only else "")
     return cte + f"""
     SELECT
         dt.fecha,
@@ -400,6 +407,7 @@ def _sql_vp_tienda(dias_ventana, mix_values=None, perfil_only=True):
         AND d.id_sucursal = s.id_sucursal
     LEFT JOIN prod_price pp
         ON d.sku_producto = pp.sku_producto
+    {pf_where}
     GROUP BY 1, 2
     """
 
@@ -411,6 +419,9 @@ def _sql_vp_tienda_by_store(dias_ventana, mix_values=None, perfil_only=True):
     """
     cte = _build_tienda_ctes(dias_ventana, mix_values, perfil_only,
                              filter_cd_instock="none")
+    # Exclude store×day combos without active perfil to avoid phantom VP
+    pf_where = ("\n    WHERE COALESCE(s.perfil, 'NO') = 'SI'"
+                if perfil_only else "")
     return cte + f"""
     SELECT
         dt.fecha,
@@ -439,6 +450,7 @@ def _sql_vp_tienda_by_store(dias_ventana, mix_values=None, perfil_only=True):
         AND d.id_sucursal = s.id_sucursal
     LEFT JOIN prod_price pp
         ON d.sku_producto = pp.sku_producto
+    {pf_where}
     GROUP BY 1, 2
     """
 
@@ -551,6 +563,9 @@ def _sql_vp_tienda_detail(dias_ventana, mix_values=None, perfil_only=True,
     LEFT JOIN cd_instock ci
         ON dts.fecha = ci.fecha AND d.sku_producto = ci.sku_producto"""
     cd_col = "ci.stock_cd, ci.daily_demand_all, ci.instock_cd"
+    # Exclude store×day combos without active perfil to avoid phantom VP
+    pf_where = ("\n    WHERE COALESCE(s.perfil, 'NO') = 'SI'"
+                if perfil_only else "")
     return cte + f"""
     SELECT
         dts.fecha,
@@ -590,6 +605,7 @@ def _sql_vp_tienda_detail(dias_ventana, mix_values=None, perfil_only=True,
     LEFT JOIN prod_price pp
         ON d.sku_producto = pp.sku_producto
     {cd_join}
+    {pf_where}
     """
 
 
@@ -2793,203 +2809,114 @@ def render_venta_perdida(conn):
                     accent_color=COLORS["status_at_risk"],
                 ))
 
-            # Aggregated view: SKU × Store
-            st.html(_hdr("📊 Vista Agregada — SKU × Sucursal"))
-
-            agg_det_cols = {
-                "DESCRIPCION_SUCURSAL": "first",
-                "STOCK_UNIDADES": "mean",
-                "STOCK_CD": "mean",
-                "DAILY_DEMAND_ALL": "mean",
-                "INSTOCK_CD": "mean",
-                "DEMANDA_TOTAL_DIA": "mean",
-                "N_TIENDAS_PERFIL": "max",
-                "DEMANDA_POR_TIENDA": "mean",
-                "INSTOCK": "sum",
-                "VP_UNIDADES": "sum",
-                "VP_PESOS": "sum",
-                "VP_UNIDADES_ORIG": "sum",
-                "VP_PESOS_ORIG": "sum",
-                "PRECIO_VCM": "last",
-                "ULTIMO_COSTO": "last",
-                "PRECIO_USADO": "last",
-            }
-            # Only include columns that exist
-            agg_det_cols = {
-                k: v for k, v in agg_det_cols.items()
-                if k in df_det.columns
-            }
-            # Add dimension columns
-            for c in ["NOM_PRODUCTO", "AREA", "LINEA", "SUBLINEA",
-                       "MARCA", "MIX_OFICIAL", "PRODUCTO_STATUS",
-                       "FIRST_SALE_DATE"]:
-                if c in df_det.columns:
-                    agg_det_cols[c] = "first"
-
-            group_cols = ["SKU_PRODUCTO", "ID_SUCURSAL"]
-            group_cols = [c for c in group_cols if c in df_det.columns]
-
-            if group_cols:
-                df_det_agg = (
-                    df_det.groupby(group_cols)
-                    .agg(**{k: (k, v) for k, v in agg_det_cols.items()})
-                    .reset_index()
-                )
-                # Add days and InStock %
-                dias_per_combo = (
-                    df_det.groupby(group_cols).size().reset_index(
-                        name="DIAS_TOTAL"
-                    )
-                )
-                df_det_agg = df_det_agg.merge(
-                    dias_per_combo, on=group_cols, how="left",
-                )
-                if "INSTOCK" in df_det_agg.columns:
-                    df_det_agg.rename(
-                        columns={"INSTOCK": "DIAS_INSTOCK"}, inplace=True,
-                    )
-                    df_det_agg["INSTOCK_PCT"] = np.where(
-                        df_det_agg["DIAS_TOTAL"] > 0,
-                        df_det_agg["DIAS_INSTOCK"]
-                        / df_det_agg["DIAS_TOTAL"] * 100,
-                        100,
-                    )
-
-                df_det_agg = df_det_agg.sort_values(
-                    "VP_PESOS", ascending=False,
-                )
-
-                # Display columns
-                det_display = [c for c in [
-                    "SKU_PRODUCTO", "NOM_PRODUCTO",
-                    "ID_SUCURSAL", "DESCRIPCION_SUCURSAL",
-                    "AREA", "LINEA", "MARCA", "MIX_OFICIAL",
-                    "PRODUCTO_STATUS", "TIPO_VP",
-                    "STOCK_UNIDADES", "STOCK_CD",
-                    "DAILY_DEMAND_ALL", "INSTOCK_CD",
-                    "DEMANDA_POR_TIENDA",
-                    "N_TIENDAS_PERFIL",
-                    "DIAS_INSTOCK", "DIAS_TOTAL", "INSTOCK_PCT",
-                    "VP_UNIDADES", "VP_PESOS",
-                    "VP_UNIDADES_ORIG", "VP_PESOS_ORIG",
-                    "PRECIO_VCM", "ULTIMO_COSTO", "PRECIO_USADO",
-                ] if c in df_det_agg.columns]
-
-                st.dataframe(
-                    df_det_agg[det_display].head(2000),
-                    column_config={
-                        "SKU_PRODUCTO": st.column_config.TextColumn("SKU"),
-                        "NOM_PRODUCTO": st.column_config.TextColumn(
-                            "Producto", width="medium",
-                        ),
-                        "ID_SUCURSAL": st.column_config.TextColumn(
-                            "Sucursal",
-                        ),
-                        "DESCRIPCION_SUCURSAL": st.column_config.TextColumn(
-                            "Nombre Suc.",
-                        ),
-                        "PRODUCTO_STATUS": st.column_config.TextColumn(
-                            "Status",
-                            help="ESTABLECIDO / NUEVO / SIN VENTAS",
-                        ),
-                        "STOCK_UNIDADES": st.column_config.NumberColumn(
-                            "Stock Prom", format="%.1f",
-                            help="Stock promedio diario en esa tienda",
-                        ),
-                        "STOCK_CD": st.column_config.NumberColumn(
-                            "Stock CD Prom", format="%.1f",
-                            help="Stock promedio diario en CD para este SKU",
-                        ),
-                        "DAILY_DEMAND_ALL": st.column_config.NumberColumn(
-                            "Dda Diaria Cia", format="%.2f",
-                            help="Demanda diaria promedio todos los canales "
-                                 "(VCM, ventana 2 meses). Umbral InStock CD.",
-                        ),
-                        "INSTOCK_CD": st.column_config.NumberColumn(
-                            "IS CD", format="%d",
-                            help="1 = stock CD >= demanda prom 90d cia, 0 = no",
-                        ),
-                        "DEMANDA_POR_TIENDA": st.column_config.NumberColumn(
-                            "Dda/Tienda/Dia", format="%.2f",
-                            help="Demanda VCM total / n_tiendas_perfil",
-                        ),
-                        "N_TIENDAS_PERFIL": st.column_config.NumberColumn(
-                            "N Tiendas", format="%d",
-                            help="Tiendas con perfil para este SKU",
-                        ),
-                        "DIAS_INSTOCK": st.column_config.NumberColumn(
-                            "Dias IS", format="%d",
-                            help="Dias donde stock >= demanda por tienda",
-                        ),
-                        "DIAS_TOTAL": st.column_config.NumberColumn(
-                            "Dias Total", format="%d",
-                        ),
-                        "INSTOCK_PCT": st.column_config.ProgressColumn(
-                            "IS %",
-                            format="%.1f%%",
-                            min_value=0,
-                            max_value=100,
-                        ),
-                        "VP_UNIDADES": st.column_config.NumberColumn(
-                            "VP (Und)", format="%.1f",
-                        ),
-                        "VP_PESOS": st.column_config.NumberColumn(
-                            "VP ($)", format="$%.0f",
-                        ),
-                        "VP_UNIDADES_ORIG": st.column_config.NumberColumn(
-                            "VP Orig (Und)", format="%.1f",
-                            help="VP antes de aplicar periodo de gracia",
-                        ),
-                        "VP_PESOS_ORIG": st.column_config.NumberColumn(
-                            "VP Orig ($)", format="$%.0f",
-                            help="VP ($) antes de aplicar periodo de gracia",
-                        ),
-                        "PRECIO_VCM": st.column_config.NumberColumn(
-                            "Precio VCM", format="$%.0f",
-                            help="Precio promedio VCM (neto/cantidad)",
-                        ),
-                        "ULTIMO_COSTO": st.column_config.NumberColumn(
-                            "Ult. Costo", format="$%.0f",
-                            help="Ultimo costo de vw_producto (fallback)",
-                        ),
-                        "PRECIO_USADO": st.column_config.NumberColumn(
-                            "Precio Usado", format="$%.0f",
-                            help="Precio usado: VCM si >0, sino ultimo_costo",
-                        ),
-                    },
-                    use_container_width=True, height=600, hide_index=True,
-                )
-
-                download_buttons(
-                    df_det_agg[det_display],
-                    "vp_detalle_sku_sucursal",
-                )
-
-            # Raw detail (daily) — download only
-            st.html(_hdr("📥 Detalle Diario Completo (descarga)"))
+            # ── Daily detail table — SKU × Sucursal × Dia ──
+            st.html(_hdr("📋 Detalle Diario — SKU × Sucursal × Dia"))
             st.caption(
-                f"Detalle a nivel SKU × Sucursal × Dia: "
-                f"{len(df_det):,} registros. "
-                f"Descargue para analisis en Excel."
+                f"Cada fila es un dia especifico × SKU × tienda. "
+                f"Total: **{len(df_det):,}** registros. "
+                f"Mostrando hasta 5,000 filas ordenadas por VP ($) desc."
             )
 
             raw_display = [c for c in [
                 "FECHA", "SKU_PRODUCTO", "NOM_PRODUCTO",
                 "ID_SUCURSAL", "DESCRIPCION_SUCURSAL",
                 "AREA", "LINEA", "MARCA", "MIX_OFICIAL",
-                "PRODUCTO_STATUS", "FIRST_SALE_DATE", "TIPO_VP",
+                "PRODUCTO_STATUS", "TIPO_VP",
                 "STOCK_UNIDADES", "STOCK_CD",
                 "DAILY_DEMAND_ALL", "INSTOCK_CD",
                 "DEMANDA_TOTAL_DIA",
                 "N_TIENDAS_PERFIL", "DEMANDA_POR_TIENDA",
                 "INSTOCK", "VP_UNIDADES", "VP_PESOS",
-                "VP_UNIDADES_ORIG", "VP_PESOS_ORIG",
-                "RECOVERY_DATE", "DIAS_DESDE_RECOVERY",
-                "LEAD_DAYS", "EN_GRACIA",
                 "PRECIO_VCM", "ULTIMO_COSTO", "PRECIO_USADO",
             ] if c in df_det.columns]
 
-            download_buttons(df_det[raw_display], "vp_detalle_diario")
+            df_det_sorted = df_det.sort_values(
+                "VP_PESOS", ascending=False,
+            )
+
+            st.dataframe(
+                df_det_sorted[raw_display].head(5000),
+                column_config={
+                    "FECHA": st.column_config.DateColumn(
+                        "Fecha", format="YYYY-MM-DD",
+                    ),
+                    "SKU_PRODUCTO": st.column_config.TextColumn("SKU"),
+                    "NOM_PRODUCTO": st.column_config.TextColumn(
+                        "Producto", width="medium",
+                    ),
+                    "ID_SUCURSAL": st.column_config.TextColumn("Sucursal"),
+                    "DESCRIPCION_SUCURSAL": st.column_config.TextColumn(
+                        "Nombre Suc.",
+                    ),
+                    "PRODUCTO_STATUS": st.column_config.TextColumn(
+                        "Status",
+                        help="ESTABLECIDO / NUEVO / SIN VENTAS",
+                    ),
+                    "TIPO_VP": st.column_config.TextColumn(
+                        "Tipo VP",
+                        help="QUIEBRE_PRODUCTO = CD sin stock; "
+                             "REPOSICION = CD tenia stock; "
+                             "SIN_VP = sin venta perdida",
+                    ),
+                    "STOCK_UNIDADES": st.column_config.NumberColumn(
+                        "Stock Tienda", format="%.0f",
+                        help="Stock en esa tienda ese dia",
+                    ),
+                    "STOCK_CD": st.column_config.NumberColumn(
+                        "Stock CD", format="%.0f",
+                        help="Stock en CD ese dia para este SKU",
+                    ),
+                    "DAILY_DEMAND_ALL": st.column_config.NumberColumn(
+                        "Dda Diaria Cia", format="%.2f",
+                        help="Demanda diaria promedio todos canales "
+                             "(VCM, ventana 2 meses)",
+                    ),
+                    "INSTOCK_CD": st.column_config.NumberColumn(
+                        "IS CD", format="%d",
+                        help="1 = stock CD >= demanda diaria cia, 0 = no",
+                    ),
+                    "DEMANDA_TOTAL_DIA": st.column_config.NumberColumn(
+                        "Dda Total Dia", format="%.2f",
+                        help="Demanda total dia (VCM canal tienda)",
+                    ),
+                    "N_TIENDAS_PERFIL": st.column_config.NumberColumn(
+                        "N Tiendas", format="%d",
+                        help="Tiendas con perfil para este SKU",
+                    ),
+                    "DEMANDA_POR_TIENDA": st.column_config.NumberColumn(
+                        "Dda/Tienda/Dia", format="%.4f",
+                        help="Demanda VCM total / n_tiendas_perfil",
+                    ),
+                    "INSTOCK": st.column_config.NumberColumn(
+                        "InStock", format="%d",
+                        help="1 = stock tienda >= demanda por tienda, "
+                             "0 = quiebre",
+                    ),
+                    "VP_UNIDADES": st.column_config.NumberColumn(
+                        "VP Und", format="%.4f",
+                    ),
+                    "VP_PESOS": st.column_config.NumberColumn(
+                        "VP ($)", format="$%.0f",
+                    ),
+                    "PRECIO_VCM": st.column_config.NumberColumn(
+                        "Precio VCM", format="$%.0f",
+                        help="Precio promedio VCM (neto/cantidad)",
+                    ),
+                    "ULTIMO_COSTO": st.column_config.NumberColumn(
+                        "Ult. Costo", format="$%.0f",
+                        help="Ultimo costo de vw_producto (fallback)",
+                    ),
+                    "PRECIO_USADO": st.column_config.NumberColumn(
+                        "Precio Usado", format="$%.0f",
+                        help="Precio usado: VCM si >0, sino ultimo_costo",
+                    ),
+                },
+                use_container_width=True, height=700, hide_index=True,
+            )
+
+            download_buttons(
+                df_det_sorted[raw_display], "vp_detalle_diario",
+            )
 
     # ── Tab Resumen ──
     with tab_resumen:

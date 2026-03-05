@@ -107,6 +107,10 @@ def lottie_spinner(theme: str = "general", height: int = 200):
     _, message = LOADER_THEMES.get(theme, LOADER_THEMES["general"])
     icon = _THEME_ICONS.get(theme, _THEME_ICONS["general"])
 
+    # Decide overlay vs fallback BEFORE the single yield to avoid
+    # the "generator didn't stop after throw()" double-yield bug.
+    use_overlay = True
+    placeholder = None
     try:
         overlay_id = f"_dorel_ov_{theme}_{id(message)}"
         placeholder = st.empty()
@@ -181,17 +185,18 @@ def lottie_spinner(theme: str = "general", height: int = 200):
                 """,
                 unsafe_allow_html=True,
             )
+    except Exception:
+        use_overlay = False
+
+    if use_overlay:
         try:
             yield
         finally:
-            placeholder.empty()
-        return
-    except Exception:
-        pass
-
-    # Fallback to standard spinner
-    with st.spinner(message):
-        yield
+            if placeholder is not None:
+                placeholder.empty()
+    else:
+        with st.spinner(message):
+            yield
 
 
 def show_success(message: str = "Listo", height: int = 120):
