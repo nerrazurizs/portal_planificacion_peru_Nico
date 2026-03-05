@@ -615,7 +615,14 @@ select
   a.fecha,
   a.sku_producto,
   case
-    when b.canal_de_distribucion = 'CD' then 'CD'
+    when COALESCE(b.canal_de_distribucion,
+         CASE TRIM(d.cod_canal)
+           WHEN '03' THEN 'TIENDA'
+           WHEN '02' THEN 'MAYORISTA'
+           WHEN '06' THEN 'ETAIL'
+         END
+    ) = 'CD' then 'CD'
+    when a.cod_bodega in ('1100001', '1100002') then 'CD'
     else 'TIENDA'
   end as canal_std,
   SUM(a.stock_unidades) as stock_unidades,
@@ -623,12 +630,13 @@ select
 from db_supply.hst.ht_in_stock a
 left join db_syncros.public.coo_maestro_sucursal b
   on a.cod_bodega = b.id_sucursal
+left join db_dimensiones.dim.dt_ccosto d
+  on TRIM(a.cod_bodega) = TRIM(d.cod_ccosto)
 where a.fecha = (
     select max(fecha)
     from db_supply.hst.ht_in_stock
     where fecha < current_date()
 )
-and b.canal_de_distribucion in ('TIENDA', 'CD')
 group by 1,2,3
 """
 
@@ -970,19 +978,38 @@ group by 1, 2, 3
 # Stock on hand actual por SKU
 QUERY_STOCK_ONHAND = """
 select
-    a.sku_producto,
-    sum(case when b.canal_de_distribucion = 'CD'    then a.stock_unidades else 0 end) as STOCK_CD,
-    sum(case when b.canal_de_distribucion = 'TIENDA' then a.stock_unidades else 0 end) as STOCK_TIENDA,
-    sum(a.stock_unidades)                                                              as STOCK_TOTAL,
-    sum(a.stock_costo)                                                                 as STOCK_COSTO_TOTAL
-from db_supply.hst.ht_in_stock a
-left join db_syncros.public.coo_maestro_sucursal b
-    on a.cod_bodega = b.id_sucursal
-where a.fecha = (
-    select max(fecha)
-    from db_supply.hst.ht_in_stock
-    where fecha < current_date()
-)
+    sub.sku_producto,
+    sum(case when sub.canal_std = 'CD' then sub.stock_unidades else 0 end) as STOCK_CD,
+    sum(case when sub.canal_std = 'TIENDA' then sub.stock_unidades else 0 end) as STOCK_TIENDA,
+    sum(sub.stock_unidades) as STOCK_TOTAL,
+    sum(sub.stock_costo) as STOCK_COSTO_TOTAL
+from (
+    select
+        a.sku_producto,
+        a.stock_unidades,
+        a.stock_costo,
+        case
+            when COALESCE(b.canal_de_distribucion,
+                 CASE TRIM(d.cod_canal)
+                   WHEN '03' THEN 'TIENDA'
+                   WHEN '02' THEN 'MAYORISTA'
+                   WHEN '06' THEN 'ETAIL'
+                 END
+            ) = 'CD' then 'CD'
+            when a.cod_bodega in ('1100001', '1100002') then 'CD'
+            else 'TIENDA'
+        end as canal_std
+    from db_supply.hst.ht_in_stock a
+    left join db_syncros.public.coo_maestro_sucursal b
+        on a.cod_bodega = b.id_sucursal
+    left join db_dimensiones.dim.dt_ccosto d
+        on TRIM(a.cod_bodega) = TRIM(d.cod_ccosto)
+    where a.fecha = (
+        select max(fecha)
+        from db_supply.hst.ht_in_stock
+        where fecha < current_date()
+    )
+) sub
 group by 1
 """
 
