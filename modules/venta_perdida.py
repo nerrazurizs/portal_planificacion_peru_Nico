@@ -234,34 +234,40 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
     ),
     """
 
-    # Hardcoded closed-store exclusion
-    # Double %% to escape Python %-formatting used by Snowflake connector
-    closed_stores_sql = (
-        "AND UPPER(COALESCE(b.descripcion_sucursal, '')) "
-        "NOT LIKE '%%BELLAVISTA%%' "
-        "AND UPPER(COALESCE(b.descripcion_sucursal, '')) "
-        "NOT LIKE '%%CHICLAYO 2%%' "
-        "AND UPPER(COALESCE(b.descripcion_sucursal, '')) "
-        "NOT LIKE '%%CHICLAYO2%%' "
-        "AND UPPER(COALESCE(b.descripcion_sucursal, '')) "
-        "NOT LIKE '%%SAN MIGUEL 2%%' "
-        "AND UPPER(COALESCE(b.descripcion_sucursal, '')) "
-        "NOT LIKE '%%SANMIGUEL2%%' "
-        "AND UPPER(COALESCE(b.descripcion_sucursal, '')) "
-        "NOT LIKE '%%OUTLET%%' "
-        "AND UPPER(COALESCE(b.descripcion_sucursal, '')) "
-        "NOT LIKE '%%CAJAMARCA%%' "
-        "AND UPPER(COALESCE(b.descripcion_sucursal, '')) "
-        "NOT LIKE '%%TRUJILLO 2%%' "
-        "AND UPPER(COALESCE(b.descripcion_sucursal, '')) "
-        "NOT LIKE '%%TRUJILLO2%%' "
-        "AND COALESCE(CAST(b.id_sucursal AS VARCHAR), '') "
-        "NOT IN ('143', '148')"
-    )
+    # ── valid_stores CTE: tiendas fisicas (tipoalmacen=9) minus cerradas ──
+    # Double %% to escape %-formatting used by Snowflake connector
+    valid_stores_cte = f"""valid_stores AS (
+        SELECT cod_almacen,
+               cod_ccosto,
+               nom_almacen
+        FROM db_dimensiones.dim.dt_almacen
+        WHERE cod_tipoalmacen = '9'
+          AND cod_ccosto IS NOT NULL
+          AND UPPER(COALESCE(nom_almacen, ''))
+              NOT LIKE '%%BELLAVISTA%%'
+          AND UPPER(COALESCE(nom_almacen, ''))
+              NOT LIKE '%%CHICLAYO 2%%'
+          AND UPPER(COALESCE(nom_almacen, ''))
+              NOT LIKE '%%CHICLAYO2%%'
+          AND UPPER(COALESCE(nom_almacen, ''))
+              NOT LIKE '%%SAN MIGUEL 2%%'
+          AND UPPER(COALESCE(nom_almacen, ''))
+              NOT LIKE '%%SANMIGUEL2%%'
+          AND UPPER(COALESCE(nom_almacen, ''))
+              NOT LIKE '%%OUTLET%%'
+          AND UPPER(COALESCE(nom_almacen, ''))
+              NOT LIKE '%%CAJAMARCA%%'
+          AND UPPER(COALESCE(nom_almacen, ''))
+              NOT LIKE '%%TRUJILLO 2%%'
+          AND UPPER(COALESCE(nom_almacen, ''))
+              NOT LIKE '%%TRUJILLO2%%'
+    ),
+    """
 
     return f"""
     WITH
     {eligible_cte}
+    {valid_stores_cte}
     prod_price AS (
         SELECT p.sku_producto, MAX(p.ultimo_costo) AS ultimo_costo
         FROM {_PROD} p
@@ -271,25 +277,19 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
     demand AS (
         SELECT
             v.sku_producto,
-            COALESCE(CAST(b.id_sucursal AS VARCHAR),
-                     CAST(v.cod_ccosto AS VARCHAR)) AS id_sucursal,
-            MAX(COALESCE(b.descripcion_sucursal,
-                         CAST(v.cod_ccosto AS VARCHAR)))
-                AS descripcion_sucursal,
+            CAST(vs.cod_ccosto AS VARCHAR) AS id_sucursal,
+            MAX(vs.nom_almacen) AS descripcion_sucursal,
             SUM(v.cantidad) / NULLIF({dias_ventana}::FLOAT, 0)
                 AS demand_per_store,
             CASE WHEN SUM(v.cantidad) > 0
                  THEN SUM(v.neto) / SUM(v.cantidad)
                  ELSE 0 END AS avg_price
         FROM {_VCM} v
-        LEFT JOIN db_syncros.public.coo_maestro_sucursal b
-            ON v.cod_ccosto = b.id_sucursal
+        INNER JOIN valid_stores vs
+            ON v.cod_ccosto = vs.cod_ccosto
         {mix_join_v}
         WHERE v.fecha >= %s AND v.fecha <= %s
           AND v.cantidad > 0
-          AND COALESCE(b.canal_de_distribucion, 'TIENDA')
-              NOT IN ('CD', 'MAYOR', 'ETAIL', 'MAYORISTA')
-          {closed_stores_sql}
         GROUP BY 1, 2
     ),
     demand_total AS (
@@ -313,29 +313,14 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
         SELECT
             a.fecha,
             a.sku_producto,
-            COALESCE(CAST(b.id_sucursal AS VARCHAR),
-                     CAST(al.cod_ccosto AS VARCHAR),
-                     CAST(a.cod_bodega AS VARCHAR)) AS id_sucursal,
-            MAX(COALESCE(b.descripcion_sucursal,
-                         al.nom_almacen,
-                         CAST(a.cod_bodega AS VARCHAR)))
-                AS descripcion_sucursal,
+            CAST(vs.cod_ccosto AS VARCHAR) AS id_sucursal,
+            MAX(vs.nom_almacen) AS descripcion_sucursal,
             SUM(a.stock_unidades) AS stock_unidades
         FROM {_INSTOCK} a
-        LEFT JOIN (
-            SELECT cod_almacen,
-                   MAX(cod_ccosto) AS cod_ccosto,
-                   MAX(nom_almacen) AS nom_almacen
-            FROM db_dimensiones.dim.dt_almacen
-            GROUP BY cod_almacen
-        ) al ON a.cod_bodega = al.cod_almacen
-        LEFT JOIN db_syncros.public.coo_maestro_sucursal b
-            ON COALESCE(al.cod_ccosto, a.cod_bodega) = b.id_sucursal
+        INNER JOIN valid_stores vs
+            ON a.cod_bodega = vs.cod_almacen
         {mix_join_a}
         WHERE a.fecha >= %s AND a.fecha <= %s
-          AND COALESCE(b.canal_de_distribucion, 'TIENDA')
-              NOT IN ('CD', 'MAYOR', 'ETAIL', 'MAYORISTA')
-          {closed_stores_sql}
           {perfil_sql}
         GROUP BY 1, 2, 3
     ),
@@ -652,50 +637,38 @@ def _compute_vp_range(conn, stock_start, stock_end,
         if not df_t.empty:
             all_tienda.append(df_t)
 
-        # ── Diagnostic: check store ID overlap (first month only) ──
+        # ── Diagnostic: check valid_stores + demand/stock overlap ──
         if i == 0:
             try:
                 _diag_sql = f"""
-                SELECT
-                    'demand' AS src,
-                    COUNT(*) AS n_rows,
-                    COUNT(DISTINCT id_sucursal) AS n_stores,
-                    LISTAGG(DISTINCT id_sucursal, ', ')
-                        WITHIN GROUP (ORDER BY id_sucursal) AS sample_ids
-                FROM (
-                    SELECT COALESCE(CAST(b.id_sucursal AS VARCHAR),
-                                    CAST(v.cod_ccosto AS VARCHAR)) AS id_sucursal
-                    FROM {_VCM} v
-                    LEFT JOIN db_syncros.public.coo_maestro_sucursal b
-                        ON v.cod_ccosto = b.id_sucursal
-                    WHERE v.fecha >= %s AND v.fecha <= %s
-                      AND v.cantidad > 0
-                      AND COALESCE(b.canal_de_distribucion, 'TIENDA')
-                          NOT IN ('CD', 'MAYOR', 'ETAIL', 'MAYORISTA')
+                WITH vs AS (
+                    SELECT cod_almacen, cod_ccosto, nom_almacen
+                    FROM db_dimensiones.dim.dt_almacen
+                    WHERE cod_tipoalmacen = '9'
+                      AND cod_ccosto IS NOT NULL
                 )
+                SELECT
+                    'demand (tipo=9)' AS src,
+                    COUNT(*) AS n_rows,
+                    COUNT(DISTINCT CAST(vs.cod_ccosto AS VARCHAR)) AS n_stores,
+                    LISTAGG(DISTINCT CAST(vs.cod_ccosto AS VARCHAR), ', ')
+                        WITHIN GROUP (ORDER BY CAST(vs.cod_ccosto AS VARCHAR))
+                        AS sample_ids
+                FROM {_VCM} v
+                INNER JOIN vs ON v.cod_ccosto = vs.cod_ccosto
+                WHERE v.fecha >= %s AND v.fecha <= %s
+                  AND v.cantidad > 0
                 UNION ALL
                 SELECT
-                    'stock (via dt_almacen)' AS src,
+                    'stock (tipo=9)' AS src,
                     COUNT(*) AS n_rows,
-                    COUNT(DISTINCT id_sucursal) AS n_stores,
-                    LISTAGG(DISTINCT id_sucursal, ', ')
-                        WITHIN GROUP (ORDER BY id_sucursal) AS sample_ids
-                FROM (
-                    SELECT COALESCE(CAST(b.id_sucursal AS VARCHAR),
-                                    CAST(al.cod_ccosto AS VARCHAR),
-                                    CAST(a.cod_bodega AS VARCHAR)) AS id_sucursal
-                    FROM {_INSTOCK} a
-                    LEFT JOIN (
-                        SELECT cod_almacen, MAX(cod_ccosto) AS cod_ccosto
-                        FROM db_dimensiones.dim.dt_almacen
-                        GROUP BY cod_almacen
-                    ) al ON a.cod_bodega = al.cod_almacen
-                    LEFT JOIN db_syncros.public.coo_maestro_sucursal b
-                        ON COALESCE(al.cod_ccosto, a.cod_bodega) = b.id_sucursal
-                    WHERE a.fecha >= %s AND a.fecha <= %s
-                      AND COALESCE(b.canal_de_distribucion, 'TIENDA')
-                          NOT IN ('CD', 'MAYOR', 'ETAIL', 'MAYORISTA')
-                )
+                    COUNT(DISTINCT CAST(vs.cod_ccosto AS VARCHAR)) AS n_stores,
+                    LISTAGG(DISTINCT CAST(vs.cod_ccosto AS VARCHAR), ', ')
+                        WITHIN GROUP (ORDER BY CAST(vs.cod_ccosto AS VARCHAR))
+                        AS sample_ids
+                FROM {_INSTOCK} a
+                INNER JOIN vs ON a.cod_bodega = vs.cod_almacen
+                WHERE a.fecha >= %s AND a.fecha <= %s
                 """
                 _diag_prm = [str(f_ini), str(f_fin), str(ms), str(me)]
                 _df_diag = pd.read_sql(_diag_sql, conn, params=_diag_prm)
@@ -966,45 +939,46 @@ def _run_diagnostics(conn, stock_start, stock_end, demand_start, demand_end):
     """Run quick diagnostic queries to identify VP data issues."""
     results = {}
 
-    # 1. Canal values in coo_maestro_sucursal
+    # 1. valid_stores: tiendas fisicas (tipoalmacen=9)
     try:
-        df_canal = pd.read_sql(
-            "SELECT canal_de_distribucion, COUNT(*) AS n "
-            "FROM db_syncros.public.coo_maestro_sucursal "
+        df_stores = pd.read_sql(
+            "SELECT cod_tipoalmacen AS tipo, COUNT(*) AS n, "
+            "       COUNT(DISTINCT cod_ccosto) AS n_ccosto "
+            "FROM db_dimensiones.dim.dt_almacen "
             "GROUP BY 1 ORDER BY 2 DESC",
             conn,
         )
-        results["canales"] = df_canal
+        results["tipos_almacen"] = df_stores
     except Exception:
-        results["canales"] = None
+        results["tipos_almacen"] = None
 
-    # 2. Stock rows by canal (for the date range)
+    # 2. Stock rows by tipo almacen (for the date range)
     try:
         df_stock = pd.read_sql(
-            f"SELECT COALESCE(b.canal_de_distribucion, 'NULL/SIN_MATCH') AS canal, "
+            f"SELECT COALESCE(CAST(al.cod_tipoalmacen AS VARCHAR), "
+            f"       'SIN_MATCH') AS tipo, "
             f"       COUNT(*) AS filas, "
             f"       COUNT(DISTINCT a.sku_producto) AS skus "
             f"FROM {_INSTOCK} a "
-            f"LEFT JOIN db_syncros.public.coo_maestro_sucursal b "
-            f"    ON a.cod_bodega = b.id_sucursal "
+            f"LEFT JOIN db_dimensiones.dim.dt_almacen al "
+            f"    ON a.cod_bodega = al.cod_almacen "
             f"WHERE a.fecha >= %s AND a.fecha <= %s "
             f"GROUP BY 1 ORDER BY 2 DESC",
             conn, params=[str(stock_start), str(stock_end)],
         )
-        results["stock_por_canal"] = df_stock
+        results["stock_por_tipo"] = df_stock
     except Exception:
-        results["stock_por_canal"] = None
+        results["stock_por_tipo"] = None
 
-    # 3. Perfil distribution
+    # 3. Perfil distribution (tiendas tipo=9)
     try:
         df_perfil = pd.read_sql(
             f"SELECT COALESCE(a.perfil, 'NULL') AS perfil, COUNT(*) AS filas "
             f"FROM {_INSTOCK} a "
-            f"LEFT JOIN db_syncros.public.coo_maestro_sucursal b "
-            f"    ON a.cod_bodega = b.id_sucursal "
+            f"INNER JOIN db_dimensiones.dim.dt_almacen al "
+            f"    ON a.cod_bodega = al.cod_almacen "
             f"WHERE a.fecha >= %s AND a.fecha <= %s "
-            f"  AND COALESCE(b.canal_de_distribucion, 'TIENDA') "
-            f"      NOT IN ('CD', 'MAYOR', 'ETAIL', 'MAYORISTA') "
+            f"  AND al.cod_tipoalmacen = '9' "
             f"GROUP BY 1",
             conn, params=[str(stock_start), str(stock_end)],
         )
@@ -1012,19 +986,18 @@ def _run_diagnostics(conn, stock_start, stock_end, demand_start, demand_end):
     except Exception:
         results["perfil"] = None
 
-    # 4. VCM demand rows for tienda
+    # 4. VCM demand rows for tiendas tipo=9
     try:
         df_demand = pd.read_sql(
             f"SELECT COUNT(*) AS filas, "
             f"       COUNT(DISTINCT v.sku_producto) AS skus, "
             f"       SUM(v.cantidad) AS total_qty "
             f"FROM {_VCM} v "
-            f"LEFT JOIN db_syncros.public.coo_maestro_sucursal b "
-            f"    ON v.cod_ccosto = b.id_sucursal "
+            f"INNER JOIN db_dimensiones.dim.dt_almacen al "
+            f"    ON v.cod_ccosto = al.cod_ccosto "
             f"WHERE v.fecha >= %s AND v.fecha <= %s "
             f"  AND v.cantidad > 0 "
-            f"  AND COALESCE(b.canal_de_distribucion, 'TIENDA') "
-            f"      NOT IN ('CD', 'MAYOR', 'ETAIL', 'MAYORISTA')",
+            f"  AND al.cod_tipoalmacen = '9'",
             conn, params=[str(demand_start), str(demand_end)],
         )
         results["demanda_tienda"] = df_demand
@@ -1552,8 +1525,9 @@ def render_venta_perdida(conn):
 
     # ── Excluded stores info (hardcoded) ──
     st.info(
-        "**Tiendas excluidas** (cerradas): Bellavista, Chiclayo 2, "
-        "San Miguel 2, Outlet, Cajamarca, Trujillo 2, 143, 148",
+        "🏬 Solo **tiendas fisicas** (cod_tipoalmacen=9). "
+        "**Excluidas** (cerradas): Bellavista, Chiclayo 2, "
+        "San Miguel 2, Outlet, Cajamarca, Trujillo 2",
         icon="🏪",
     )
 
@@ -1608,21 +1582,22 @@ def render_venta_perdida(conn):
                 st.write("**Overlap tiendas demand vs stock:**")
                 st.dataframe(_store_diag, hide_index=True)
             if diag:
-                if diag.get("canales") is not None:
-                    st.write("**Canales en coo_maestro_sucursal:**")
-                    st.dataframe(diag["canales"], hide_index=True)
-                if diag.get("stock_por_canal") is not None:
-                    st.write("**Stock (INSTOCK) por canal:**")
-                    st.dataframe(diag["stock_por_canal"], hide_index=True)
+                if diag.get("tipos_almacen") is not None:
+                    st.write("**Tipos almacen en dt_almacen:**")
+                    st.dataframe(diag["tipos_almacen"], hide_index=True)
+                if diag.get("stock_por_tipo") is not None:
+                    st.write("**Stock (INSTOCK) por tipo almacen:**")
+                    st.dataframe(diag["stock_por_tipo"], hide_index=True)
                 if diag.get("perfil") is not None:
-                    st.write("**Distribucion PERFIL (tiendas):**")
+                    st.write("**Distribucion PERFIL (tiendas tipo=9):**")
                     st.dataframe(diag["perfil"], hide_index=True)
                 if diag.get("demanda_tienda") is not None:
-                    st.write("**Demanda VCM tiendas:**")
+                    st.write("**Demanda VCM tiendas (tipo=9):**")
                     st.dataframe(diag["demanda_tienda"], hide_index=True)
             st.write(
-                "**Tiendas excluidas (cerradas):** Bellavista, Chiclayo 2, "
-                "San Miguel 2, Outlet, Cajamarca, Trujillo 2, 143, 148"
+                "**Filtro:** Solo tiendas fisicas (cod_tipoalmacen=9). "
+                "**Excluidas:** Bellavista, Chiclayo 2, "
+                "San Miguel 2, Outlet, Cajamarca, Trujillo 2"
             )
 
             # CROSS JOIN diagnostic
