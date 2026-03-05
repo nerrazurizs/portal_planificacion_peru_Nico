@@ -22,12 +22,21 @@ def _load_distinct(_conn, col: str) -> list[str]:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _load_canales(_conn) -> list[str]:
-    """Load distinct canal_de_distribucion values from maestro sucursal."""
+    """Load distinct canal values from maestro sucursal + dt_ccosto fallback."""
     df = pd.read_sql(
-        "SELECT DISTINCT canal_de_distribucion "
-        "FROM db_syncros.public.coo_maestro_sucursal "
-        "WHERE canal_de_distribucion IS NOT NULL "
-        "ORDER BY canal_de_distribucion",
+        "SELECT DISTINCT canal FROM ("
+        "  SELECT canal_de_distribucion AS canal "
+        "  FROM db_syncros.public.coo_maestro_sucursal "
+        "  WHERE canal_de_distribucion IS NOT NULL "
+        "  UNION "
+        "  SELECT CASE TRIM(cod_canal) "
+        "    WHEN '03' THEN 'TIENDA' "
+        "    WHEN '02' THEN 'MAYORISTA' "
+        "    WHEN '06' THEN 'ETAIL' "
+        "  END AS canal "
+        "  FROM db_dimensiones.dim.dt_ccosto "
+        "  WHERE TRIM(cod_canal) IN ('02','03','06') "
+        ") sub WHERE canal IS NOT NULL ORDER BY canal",
         _conn,
     )
     return df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
@@ -104,12 +113,31 @@ def render_ventas(conn):
             st.error("Seleccione agrupacion")
             return
 
-        # Build SELECT fields from dimension map
+        # Build SELECT fields from dimension map.
+        # Override expressions that need COALESCE with dt_ccosto fallback
+        # so records without a match in coo_maestro_sucursal still show
+        # their cost-center name and channel (from dt_ccosto).
+        _sql_overrides = {
+            "b.id_sucursal": (
+                "COALESCE(b.id_sucursal, TRIM(d.cod_ccosto))"
+            ),
+            "b.canal_de_distribucion": (
+                "COALESCE(b.canal_de_distribucion, "
+                "CASE TRIM(d.cod_canal) "
+                "  WHEN '03' THEN 'TIENDA' "
+                "  WHEN '02' THEN 'MAYORISTA' "
+                "  WHEN '06' THEN 'ETAIL' "
+                "  ELSE TRIM(d.nom_ccosto) "
+                "END)"
+            ),
+        }
         select_fields = []
         for nombre in dims_seleccionadas:
             for info in DIMENSIONES_VENTA.values():
                 if info["nombre"] == nombre:
-                    select_fields.append(info["sql"])
+                    sql_expr = info["sql"]
+                    sql_expr = _sql_overrides.get(sql_expr, sql_expr)
+                    select_fields.append(sql_expr)
                     break
 
         metricas = [
@@ -122,26 +150,37 @@ def render_ventas(conn):
 
         # Base query with parameterized dates
         # Peru: use _VCM and _PROD wrappers for column normalization
+        # dt_ccosto provides fallback for ccostos not in coo_maestro_sucursal
         query = (
             f"select {','.join(select_fields + metricas)} "
             f"from {_VCM} a "
             "left join db_syncros.public.coo_maestro_sucursal b on a.cod_ccosto = b.id_sucursal "
+            "left join db_dimensiones.dim.dt_ccosto d on TRIM(a.cod_ccosto) = TRIM(d.cod_ccosto) "
             f"left join {_PROD} c on a.sku_producto = c.sku_producto "
             "where a.fecha between %s and %s"
         )
         params = [str(fecha_inicio), str(fecha_fin)]
 
         # Dynamic filters — field_key → SQL column (all use IN clause)
+        # Use COALESCE expressions for fields that fall back to dt_ccosto
         field_map_in = {
             "sku_producto": "a.sku_producto",
-            "id_sucursal": "b.id_sucursal",
+            "id_sucursal": "COALESCE(b.id_sucursal, TRIM(d.cod_ccosto))",
             "area": "c.area",
             "linea": "c.linea",
             "sublinea": "c.sublinea",
             "marca": "c.marca",
             "modelo": "c.modelo",
             "proveedor": "c.proveedor",
-            "canal_de_distribucion": "b.canal_de_distribucion",
+            "canal_de_distribucion": (
+                "COALESCE(b.canal_de_distribucion, "
+                "CASE TRIM(d.cod_canal) "
+                "  WHEN '03' THEN 'TIENDA' "
+                "  WHEN '02' THEN 'MAYORISTA' "
+                "  WHEN '06' THEN 'ETAIL' "
+                "  ELSE TRIM(d.nom_ccosto) "
+                "END)"
+            ),
             "mix_oficial": "c.mix_oficial",
         }
 

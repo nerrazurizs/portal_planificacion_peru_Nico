@@ -22,12 +22,22 @@ def _load_distinct(_conn, col: str) -> list[str]:
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _load_canales(_conn) -> list[str]:
-    """Load distinct canal_de_distribucion values from maestro sucursal."""
+    """Load distinct canal values from maestro sucursal + dt_ccosto fallback."""
     df = pd.read_sql(
-        "SELECT DISTINCT canal_de_distribucion "
-        "FROM db_syncros.public.coo_maestro_sucursal "
-        "WHERE canal_de_distribucion IS NOT NULL "
-        "ORDER BY canal_de_distribucion",
+        "SELECT DISTINCT canal FROM ("
+        "  SELECT canal_de_distribucion AS canal "
+        "  FROM db_syncros.public.coo_maestro_sucursal "
+        "  WHERE canal_de_distribucion IS NOT NULL "
+        "  UNION "
+        "  SELECT CASE TRIM(cod_canal) "
+        "    WHEN '03' THEN 'TIENDA' "
+        "    WHEN '02' THEN 'MAYORISTA' "
+        "    WHEN '06' THEN 'ETAIL' "
+        "  END AS canal "
+        "  FROM db_dimensiones.dim.dt_ccosto "
+        "  WHERE TRIM(cod_canal) IN ('02','03','06') "
+        "  UNION SELECT 'CD' "
+        ") sub WHERE canal IS NOT NULL ORDER BY canal",
         _conn,
     )
     return df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
