@@ -20,6 +20,19 @@ def _load_distinct(_conn, col: str) -> list[str]:
     return df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_canales(_conn) -> list[str]:
+    """Load distinct canal_de_distribucion values from maestro sucursal."""
+    df = pd.read_sql(
+        "SELECT DISTINCT canal_de_distribucion "
+        "FROM db_syncros.public.coo_maestro_sucursal "
+        "WHERE canal_de_distribucion IS NOT NULL "
+        "ORDER BY canal_de_distribucion",
+        _conn,
+    )
+    return df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
+
+
 def render_ventas(conn):
     st.html("<h2 class='sub-header'>Consulta de Ventas</h2>")
 
@@ -55,6 +68,7 @@ def render_ventas(conn):
         opts_marca = _load_distinct(conn, "MARCA")
         opts_modelo = _load_distinct(conn, "MODELO")
         opts_proveedor = _load_distinct(conn, "PROVEEDOR")
+        opts_canales = _load_canales(conn)
 
     filtros = {}
     with col_filt:
@@ -77,7 +91,7 @@ def render_ventas(conn):
             filtros["modelo"] = c3.multiselect("Modelo", opts_modelo)
             filtros["proveedor"] = c3.multiselect("Proveedor", opts_proveedor)
             filtros["canal_de_distribucion"] = c3.multiselect(
-                "Canal", ["TIENDA", "CD", "ETAIL", "MAYOR"]
+                "Canal", opts_canales
             )
             filtros["mix_oficial"] = c3.multiselect(
                 "Mix Oficial",
@@ -160,6 +174,17 @@ def render_ventas(conn):
                 df = pd.read_sql(query, conn, params=params)
                 df.columns = [c.upper() for c in df.columns]
                 df = apply_pm_filter(df)
+
+                # Replace None/NaN in dimension columns with readable label
+                _dim_cols = [
+                    "ID_SUCURSAL", "CANAL_DE_DISTRIBUCION",
+                    "AREA", "LINEA", "SUBLINEA", "MARCA", "MODELO",
+                    "NOM_PRODUCTO", "PROCEDENCIA", "PROVEEDOR",
+                    "MIX_OFICIAL", "COD_PROVEEDOR",
+                ]
+                for _dc in _dim_cols:
+                    if _dc in df.columns:
+                        df[_dc] = df[_dc].fillna("SIN ASIGNAR")
 
                 st.toast(f"Ventas consultadas: {len(df):,} filas")
 
