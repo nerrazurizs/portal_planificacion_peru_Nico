@@ -1621,24 +1621,29 @@ def render_venta_perdida(conn):
     )
     skus_all = skus_t | skus_c
 
-    # Compute TIPO_VP split from unfiltered detail
+    # Compute TIPO_VP split from FILTERED detail (must match VP Tiendas)
     df_detail_full = st.session_state.get(
         "vp_detail_full", pd.DataFrame()
     )
     vp_quiebre = 0.0
     vp_reposicion = 0.0
-    if (not df_detail_full.empty
-            and "TIPO_VP" in df_detail_full.columns
-            and "VP_PESOS" in df_detail_full.columns):
+    if (not df_detail.empty
+            and "TIPO_VP" in df_detail.columns
+            and "VP_PESOS" in df_detail.columns):
+        # Apply same dimension filters as df_tienda
+        _df_det_filt = _apply_filters(
+            df_detail, f_sku, f_area, f_linea,
+            f_sublinea, f_marca, f_proveedor, f_status,
+        )
         vp_quiebre = float(
-            df_detail_full.loc[
-                df_detail_full["TIPO_VP"] == "QUIEBRE_PRODUCTO",
+            _df_det_filt.loc[
+                _df_det_filt["TIPO_VP"] == "QUIEBRE_PRODUCTO",
                 "VP_PESOS",
             ].sum()
         )
         vp_reposicion = float(
-            df_detail_full.loc[
-                df_detail_full["TIPO_VP"] == "REPOSICION",
+            _df_det_filt.loc[
+                _df_det_filt["TIPO_VP"] == "REPOSICION",
                 "VP_PESOS",
             ].sum()
         )
@@ -1800,7 +1805,12 @@ def render_venta_perdida(conn):
 
     # ── Tab Evolucion ──
     with tab_evo:
-        fig_evo = _chart_evolucion(df_tienda, df_cd, df_detail_full)
+        # Use filtered detail for stacked bars (matches KPIs)
+        _df_det_evo = _apply_filters(
+            df_detail, f_sku, f_area, f_linea,
+            f_sublinea, f_marca, f_proveedor, f_status,
+        ) if not df_detail.empty else pd.DataFrame()
+        fig_evo = _chart_evolucion(df_tienda, df_cd, _df_det_evo)
         if fig_evo:
             st.plotly_chart(fig_evo, use_container_width=True)
         else:
@@ -2254,10 +2264,17 @@ def render_venta_perdida(conn):
     with tab_insights:
         st.html(_hdr("💡 Insights — Venta Perdida por Canal y Tipo"))
 
+        # Use unfiltered detail for full VP composition, but apply
+        # user dimension filters for consistency
         df_det_full = st.session_state.get(
             "vp_detail_full", pd.DataFrame()
         )
-        df_cd_data = st.session_state.get("vp_cd", pd.DataFrame())
+        if not df_det_full.empty:
+            df_det_full = _apply_filters(
+                df_det_full, f_sku, f_area, f_linea,
+                f_sublinea, f_marca, f_proveedor, f_status,
+            )
+        df_cd_data = df_cd  # already dimension-filtered
 
         if df_det_full.empty and df_cd_data.empty:
             st.warning("No hay datos para generar insights.")
