@@ -199,11 +199,12 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
             "instock_cd"  – only VP where InStock CD = 1
                             (stock >= cantidad_prom_90_cia)
 
-    Params (positional %s, 4 or 8 total):
+    Params (positional %s, 6 or 12 total):
         demand_start, demand_end        (demand CTE — per store)
       [if filter_cd_instock != "none"]:
         demand_start, demand_end        (demand_all CTE)
         stock_start, stock_end          (stock_daily CTE)
+        stock_start, stock_end          (dates CTE — independent)
       [if filter_cd_instock != "none"]:
         stock_start, stock_end          (cd_instock CTE)
     """
@@ -344,7 +345,9 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
         GROUP BY 1, 2
     ),
     dates AS (
-        SELECT DISTINCT fecha FROM stock_daily
+        SELECT DISTINCT fecha
+        FROM {_INSTOCK}
+        WHERE fecha >= %s AND fecha <= %s
     )""" + (f""",
     cd_instock AS (
         SELECT cd.fecha, cd.sku_producto, cd.stock_unidades AS stock_cd,
@@ -627,14 +630,16 @@ def _compute_vp_range(conn, stock_start, stock_end,
         f_ini, f_fin = _get_demand_window(date(ms.year, ms.month, 15))
         dias_ventana = (f_fin - f_ini).days + 1
 
-        # Base params (aggregate queries): demand + stock_daily = 4
-        prm_base = [str(f_ini), str(f_fin), str(ms), str(me)]
+        # Base params (aggregate queries): demand + stock_daily + dates = 6
+        prm_base = [str(f_ini), str(f_fin), str(ms), str(me),
+                    str(ms), str(me)]  # dates CTE (independent)
 
-        # Detail params: demand, [demand_all], stock_daily, [cd_instock]
+        # Detail params: demand, [demand_all], stock_daily, dates, [cd_instock]
         prm_detail = [str(f_ini), str(f_fin)]
         if include_cd:
             prm_detail.extend([str(f_ini), str(f_fin)])  # demand_all
         prm_detail.extend([str(ms), str(me)])  # stock_daily
+        prm_detail.extend([str(ms), str(me)])  # dates CTE (independent)
         if include_cd:
             prm_detail.extend([str(ms), str(me)])  # cd_instock
 
