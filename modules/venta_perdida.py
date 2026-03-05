@@ -255,7 +255,7 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
         "NOT LIKE '%%TRUJILLO 2%%' "
         "AND UPPER(COALESCE(b.descripcion_sucursal, '')) "
         "NOT LIKE '%%TRUJILLO2%%' "
-        "AND CAST(b.id_sucursal AS VARCHAR) "
+        "AND COALESCE(CAST(b.id_sucursal AS VARCHAR), '') "
         "NOT IN ('143', '148')"
     )
 
