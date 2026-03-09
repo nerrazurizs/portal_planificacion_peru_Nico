@@ -32,3 +32,10 @@ frontend/node_modules/
 data/inputs/*.parquet
 # Excepción: proy_result.parquet se necesita en GitHub Actions para alertas email
 !data/inputs/proy_result.parquet
+
+# Forecast accuracy snapshots (user-uploaded data, persisted locally)
+data/forecast_snapshots/*.parquet
+data/forecast_snapshots/metadata.json
+
+# Backend virtualenv
+backend/.venv/

@@ -55,6 +55,7 @@ PLANNER_MODULES = [
     "Analisis Transitos",
     "Operaciones Supply",
     "Venta Perdida",
+    "Ventas Forecast 2+10",
 ]
 
 # Modules that only jefe+ can access (everything else is also available)

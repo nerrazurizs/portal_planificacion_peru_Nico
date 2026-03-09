@@ -43,6 +43,7 @@ from modules.analisis_transitos import render_analisis_transitos
 from modules.capacidad_volumetrica import render_capacidad_volumetrica
 from modules.operaciones_supply import render_operaciones_supply
 from modules.venta_perdida import render_venta_perdida
+from modules.ventas_forecast_210 import render_ventas_forecast_210
 from modules.diagnostico import render_diagnostico
 from db.cache import cached_query as cq, clear_all as clear_query_cache, last_refresh_label, auto_refresh_if_new_day
 from utils.ui_animations import lottie_spinner, show_lottie, animated_kpi_row
@@ -275,6 +276,7 @@ def main_app():
             ("💡", "Simulador Rentab."),
             ("📅", "Forecast Diario"),
             ("🔄", "Redistribucion Stock"),
+            ("📊", "Ventas Forecast 2+10"),
         ],
         "ANALISIS": [
             ("📊", "Dashboard Stock"),
@@ -490,6 +492,7 @@ def main_app():
         # Operaciones Supply: tablas ft_pedidotransferencia y ft_picking no existen en Peru
         "Operaciones Supply": None,
         "Venta Perdida": render_venta_perdida,
+        "Ventas Forecast 2+10": render_ventas_forecast_210,
         "Diagnostico Tablas": render_diagnostico,
     }
 

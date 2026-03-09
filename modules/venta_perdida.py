@@ -299,6 +299,7 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
         SELECT p.sku_producto, MAX(p.ultimo_costo) AS ultimo_costo
         FROM {_PROD} p
         {mix_join_p}
+        WHERE p.sku_producto NOT LIKE '%%-PV'
         GROUP BY 1
     ),
     demand AS (
@@ -317,6 +318,7 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
         {mix_join_v}
         WHERE v.fecha >= %s AND v.fecha <= %s
           AND v.cantidad > 0
+          AND v.sku_producto NOT LIKE '%%-PV'
         GROUP BY 1, 2
     ),
     demand_total AS (
@@ -334,6 +336,7 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
         {mix_join_v}
         WHERE v.fecha >= %s AND v.fecha <= %s
           AND v.cantidad > 0
+          AND v.sku_producto NOT LIKE '%%-PV'
         GROUP BY 1
     ),""" if filter_cd_instock != "none" or always_include_cd_ctes else "") + f"""
     stock_daily AS (
@@ -349,6 +352,7 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
             ON a.cod_bodega = vs.cod_almacen
         {mix_join_a}
         WHERE a.fecha >= %s AND a.fecha <= %s
+          AND a.sku_producto NOT LIKE '%%-PV'
         GROUP BY 1, 2, 3
     ),
     n_perfil AS (
@@ -497,6 +501,7 @@ def _sql_vp_cd(dias_ventana, mix_values=None):
         SELECT p.sku_producto, MAX(p.ultimo_costo) AS ultimo_costo
         FROM {_PROD} p
         {mix_join_p}
+        WHERE p.sku_producto NOT LIKE '%%-PV'
         GROUP BY 1
     ),
     demand AS (
@@ -514,6 +519,7 @@ def _sql_vp_cd(dias_ventana, mix_values=None):
         {mix_join_v}
         WHERE v.fecha >= %s AND v.fecha <= %s
           AND v.cantidad > 0
+          AND v.sku_producto NOT LIKE '%%-PV'
           AND b.canal_de_distribucion IN ('MAYOR', 'MAYORISTA', 'ETAIL')
         GROUP BY 1, 2
     ),
@@ -543,6 +549,7 @@ def _sql_vp_cd(dias_ventana, mix_values=None):
         FROM {_INSTOCK_CD} a
         {mix_join_a}
         WHERE a.fecha >= %s AND a.fecha <= %s
+          AND a.sku_producto NOT LIKE '%%-PV'
     ) s
     INNER JOIN demand d ON s.sku_producto = d.sku_producto
     INNER JOIN demand_total dt ON s.sku_producto = dt.sku_producto
@@ -1402,6 +1409,278 @@ def _chart_canal_donut(df):
         margin=dict(l=20, r=20, t=40, b=20),
     )
     return fig
+
+
+# ── Summary tables (channel × month) ─────────────────────────────────────────
+
+_MES_CORTO = ["", "Ene", "Feb", "Mar", "Abr", "May",
+              "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+
+# Channel colours for the summary tables
+_CH_COLORS = {
+    "Etail":       ("#0D9488", "#F0FDFA"),   # teal accent + light bg
+    "Mayoristas":  ("#065E8B", "#EFF6FF"),   # blue accent + light bg
+    "Tienda":      ("#7C3AED", "#F5F3FF"),   # purple accent + light bg
+}
+_CH_TIPO = {
+    "Quiebre Producto": ("#8B0000", "#FEF2F2"),
+    "Reposicion":       ("#D97706", "#FFFBEB"),
+}
+
+
+def _fmt_m(val: float) -> str:
+    """Format large currency values: S/ 1.2M  or  S/ 345K."""
+    if abs(val) >= 1_000_000:
+        return f"S/ {val / 1_000_000:,.1f}M"
+    if abs(val) >= 1_000:
+        return f"S/ {val / 1_000:,.0f}K"
+    return f"S/ {val:,.0f}"
+
+
+def _html_summary_table(title, subtitle, col_headers, rows, accent_color,
+                        row_meta=None):
+    """Build a styled HTML summary table.
+
+    Parameters
+    ----------
+    title : str          Section title
+    subtitle : str       Small description
+    col_headers : list   Column header labels (first = row label, rest = months + total)
+    rows : list[list]    Each row: [label, val1, val2, ..., total]
+    accent_color : str   CSS colour for the title bar
+    row_meta : list      Optional list of (accent, bg) per data row (excl totals)
+    """
+    n_cols = len(col_headers)
+
+    # ── CSS ──
+    html = f"""
+    <div style="margin-bottom:1.5rem;border-radius:12px;overflow:hidden;
+                border:1px solid #e2e8f0;box-shadow:0 1px 3px rgba(0,0,0,0.06);">
+      <!-- Title bar -->
+      <div style="background:{accent_color};padding:0.7rem 1.2rem;
+                  display:flex;align-items:center;justify-content:space-between;">
+        <span style="font-weight:700;font-size:0.95rem;color:#fff;">
+          {title}
+        </span>
+        <span style="font-size:0.72rem;color:rgba(255,255,255,0.75);">
+          {subtitle}
+        </span>
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:0.82rem;
+                     font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',
+                     Roboto,sans-serif;">
+        <thead>
+          <tr style="background:#f8fafc;">
+    """
+    # Column headers
+    for i, h in enumerate(col_headers):
+        align = "left" if i == 0 else "right"
+        fw = "700" if h == "TOTAL" else "600"
+        bg = "#f1f5f9" if h == "TOTAL" else "#f8fafc"
+        html += (
+            f'<th style="padding:0.55rem 0.9rem;text-align:{align};'
+            f'font-weight:{fw};color:#64748b;font-size:0.72rem;'
+            f'text-transform:uppercase;letter-spacing:0.5px;'
+            f'border-bottom:2px solid #e2e8f0;background:{bg};">'
+            f'{h}</th>'
+        )
+    html += "</tr></thead><tbody>"
+
+    # Data rows
+    for r_idx, row in enumerate(rows):
+        is_total = (r_idx == len(rows) - 1)
+        bg = "#f8fafc" if is_total else ("#fff" if r_idx % 2 == 0 else "#fafbfc")
+        border_top = "border-top:2px solid #cbd5e1;" if is_total else ""
+
+        # Determine row accent colour
+        row_accent = "#334155"
+        row_bg = bg
+        if row_meta and r_idx < len(row_meta):
+            row_accent, row_bg = row_meta[r_idx]
+            if not is_total:
+                bg = row_bg
+
+        html += f'<tr style="background:{bg};{border_top}">'
+        for i, val in enumerate(row):
+            if i == 0:
+                # Label cell with coloured dot
+                dot = ""
+                if not is_total and row_meta and r_idx < len(row_meta):
+                    dot = (
+                        f'<span style="display:inline-block;width:8px;height:8px;'
+                        f'border-radius:50%;background:{row_accent};'
+                        f'margin-right:6px;vertical-align:middle;"></span>'
+                    )
+                fw = "700" if is_total else "600"
+                html += (
+                    f'<td style="padding:0.6rem 0.9rem;font-weight:{fw};'
+                    f'color:{row_accent};white-space:nowrap;">'
+                    f'{dot}{val}</td>'
+                )
+            else:
+                is_total_col = (i == n_cols - 1)
+                fw = "700" if is_total or is_total_col else "400"
+                color = "#1e293b" if is_total or is_total_col else "#475569"
+                bg_cell = "#f1f5f9" if is_total_col and not is_total else ""
+                bg_style = f"background:{bg_cell};" if bg_cell else ""
+                formatted = _fmt_m(val) if isinstance(val, (int, float)) else str(val)
+                html += (
+                    f'<td style="padding:0.6rem 0.9rem;text-align:right;'
+                    f'font-weight:{fw};color:{color};{bg_style}'
+                    f'font-variant-numeric:tabular-nums;">'
+                    f'{formatted}</td>'
+                )
+        html += "</tr>"
+
+    html += "</tbody></table></div>"
+    return html
+
+
+def _render_channel_month_summary(df_tienda, df_cd, df_detail):
+    """Render two styled summary tables: Channel×Month and Tienda breakdown."""
+
+    # ── Collect all dates ──
+    all_dates = pd.Series(dtype="datetime64[ns]")
+    if not df_tienda.empty and "FECHA" in df_tienda.columns:
+        all_dates = pd.concat([
+            all_dates, pd.to_datetime(df_tienda["FECHA"])
+        ])
+    if not df_cd.empty and "FECHA" in df_cd.columns:
+        all_dates = pd.concat([
+            all_dates, pd.to_datetime(df_cd["FECHA"])
+        ])
+    if all_dates.empty:
+        st.info("No hay datos para generar el resumen mensual.")
+        return
+
+    # Sorted unique year-month periods
+    ym_periods = sorted(all_dates.dt.to_period("M").unique())
+    month_labels = [
+        f"{_MES_CORTO[p.month]} {p.year}" for p in ym_periods
+    ]
+
+    # ── Table 1: VP by Channel × Month ──
+    # Tienda
+    if not df_tienda.empty:
+        df_t = df_tienda.copy()
+        df_t["_YM"] = pd.to_datetime(df_t["FECHA"]).dt.to_period("M")
+        tienda_agg = df_t.groupby("_YM")["VP_PESOS"].sum()
+    else:
+        tienda_agg = pd.Series(dtype=float)
+
+    # CD split by canal
+    if not df_cd.empty:
+        df_c = df_cd.copy()
+        df_c["_YM"] = pd.to_datetime(df_c["FECHA"]).dt.to_period("M")
+        etail_agg = (
+            df_c[df_c["CANAL"] == "ETAIL"]
+            .groupby("_YM")["VP_PESOS"].sum()
+        )
+        mayor_agg = (
+            df_c[df_c["CANAL"].isin(["MAYOR", "MAYORISTA"])]
+            .groupby("_YM")["VP_PESOS"].sum()
+        )
+    else:
+        etail_agg = pd.Series(dtype=float)
+        mayor_agg = pd.Series(dtype=float)
+
+    channels_data = [
+        ("Etail", etail_agg),
+        ("Mayoristas", mayor_agg),
+        ("Tienda", tienda_agg),
+    ]
+
+    table1_rows = []
+    table1_meta = []
+    for ch_name, series in channels_data:
+        row = [ch_name]
+        total = 0.0
+        for p in ym_periods:
+            val = float(series.get(p, 0))
+            row.append(val)
+            total += val
+        row.append(total)
+        table1_rows.append(row)
+        table1_meta.append(_CH_COLORS.get(ch_name, ("#334155", "#fff")))
+
+    # Total row
+    total_row = ["TOTAL"]
+    for i in range(len(ym_periods)):
+        total_row.append(sum(r[i + 1] for r in table1_rows))
+    total_row.append(sum(r[-1] for r in table1_rows))
+    table1_rows.append(total_row)
+
+    col_headers_1 = ["Canal"] + month_labels + ["TOTAL"]
+    html1 = _html_summary_table(
+        title="Venta Perdida por Canal",
+        subtitle=f"{len(ym_periods)} meses",
+        col_headers=col_headers_1,
+        rows=table1_rows,
+        accent_color="#1e293b",
+        row_meta=table1_meta,
+    )
+    st.html(html1)
+
+    # ── Table 2: Tienda breakdown — Quiebre vs Reposicion ──
+    qp_agg = pd.Series(dtype=float)
+    rep_agg = pd.Series(dtype=float)
+
+    if not df_tienda.empty:
+        df_t2 = df_tienda.copy()
+        df_t2["_YM"] = pd.to_datetime(df_t2["FECHA"]).dt.to_period("M")
+        if "VP_PESOS_QP" in df_t2.columns:
+            qp_agg = df_t2.groupby("_YM")["VP_PESOS_QP"].sum()
+        if "VP_PESOS_REP" in df_t2.columns:
+            rep_agg = df_t2.groupby("_YM")["VP_PESOS_REP"].sum()
+
+    # If columns not in df_tienda, try df_detail
+    if qp_agg.sum() == 0 and not df_detail.empty and "TIPO_VP" in df_detail.columns:
+        df_d = df_detail.copy()
+        df_d["_YM"] = pd.to_datetime(df_d["FECHA"]).dt.to_period("M")
+        qp_agg = (
+            df_d[df_d["TIPO_VP"] == "QUIEBRE_PRODUCTO"]
+            .groupby("_YM")["VP_PESOS"].sum()
+        )
+        rep_agg = (
+            df_d[df_d["TIPO_VP"] == "REPOSICION"]
+            .groupby("_YM")["VP_PESOS"].sum()
+        )
+
+    tipos_data = [
+        ("Quiebre Producto", qp_agg),
+        ("Reposicion", rep_agg),
+    ]
+
+    table2_rows = []
+    table2_meta = []
+    for tipo_name, series in tipos_data:
+        row = [tipo_name]
+        total = 0.0
+        for p in ym_periods:
+            val = float(series.get(p, 0))
+            row.append(val)
+            total += val
+        row.append(total)
+        table2_rows.append(row)
+        table2_meta.append(_CH_TIPO.get(tipo_name, ("#334155", "#fff")))
+
+    # Total row
+    total_row2 = ["TOTAL"]
+    for i in range(len(ym_periods)):
+        total_row2.append(sum(r[i + 1] for r in table2_rows))
+    total_row2.append(sum(r[-1] for r in table2_rows))
+    table2_rows.append(total_row2)
+
+    col_headers_2 = ["Tipo VP"] + month_labels + ["TOTAL"]
+    html2 = _html_summary_table(
+        title="VP Tiendas — Quiebre Producto vs Reposicion",
+        subtitle="Apertura por tipo de venta perdida",
+        col_headers=col_headers_2,
+        rows=table2_rows,
+        accent_color="#7C3AED",
+        row_meta=table2_meta,
+    )
+    st.html(html2)
 
 
 # ── Main render ───────────────────────────────────────────────────────────────
@@ -2967,6 +3246,9 @@ def render_venta_perdida(conn):
 
     # ── Tab Resumen ──
     with tab_resumen:
+        # ── Cuadro Resumen: Canal × Mes + Tienda breakdown ──
+        _render_channel_month_summary(df_tienda, df_cd, df_detail)
+
         df_all = pd.concat(
             [
                 df_tienda.assign(ORIGEN="TIENDA")

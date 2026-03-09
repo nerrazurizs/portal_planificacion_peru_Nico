@@ -40,6 +40,7 @@ _PROD = """(
     SELECT
         cod_producto            AS sku_producto,
         descripcion_producto    AS nom_producto,
+        descripcion_producto    AS sku_nom_producto,
         grupo                   AS area,
         linea,
         familia                 AS sublinea,
@@ -1780,4 +1781,44 @@ select
     df.alto
 from db_supply.fct.ft_despacho_fedex df
 where df.date_time >= dateadd('day', -90, current_date())
+"""
+
+# ============================================================
+# VENTAS FORECAST 2+10
+# ============================================================
+
+# VCM real agrupado por centro de costo y mes (año actual, meses completos)
+QUERY_VCM_CCOSTO_MONTHLY = f"""
+SELECT
+    a.cod_ccosto,
+    DATE_TRUNC('month', a.fecha)  AS periodo,
+    a.cod_canal,
+    SUM(a.neto)                   AS neto,
+    SUM(a.aporte)                 AS aporte,
+    SUM(a.costo)                  AS costo,
+    SUM(a.cantidad)               AS unidades
+FROM {_VCM} a
+WHERE a.fecha >= DATE_TRUNC('year', CURRENT_DATE())
+  AND a.fecha <  DATE_TRUNC('month', CURRENT_DATE())
+  AND a.cantidad > 0
+GROUP BY 1, 2, 3
+"""
+
+# ============================================================
+# FORECAST ACCURACY — VCM mensual por SKU (ultimos 24 meses)
+# ============================================================
+
+QUERY_VCM_MONTHLY_24M = f"""
+SELECT
+    a.sku_producto,
+    a.cod_canal,
+    DATE_TRUNC('month', a.fecha)  AS periodo,
+    SUM(a.cantidad)               AS unidades,
+    SUM(a.neto)                   AS neto,
+    SUM(a.aporte)                 AS aporte
+FROM {_VCM} a
+WHERE a.fecha >= DATEADD('month', -24, DATE_TRUNC('month', CURRENT_DATE()))
+  AND a.fecha <  DATE_TRUNC('month', CURRENT_DATE())
+  AND a.cantidad > 0
+GROUP BY 1, 2, 3
 """
