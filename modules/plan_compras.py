@@ -1440,6 +1440,89 @@ def render_plan_compras(conn):
                 total_vc = df_inv["VENTA_COSTO_CLP"].sum()
                 st.write(f"- **Total Venta Costo en tabla:** `${total_vc:,.0f}`")
 
+        # ── Breakdown En Agua FC por Área/Línea ──────────────────────────
+        _fc_aguas_df = _inv_debug.get("fc_aguas_df")
+        if _fc_aguas_df is not None and not _fc_aguas_df.empty:
+            with st.expander("🚢 Desglose En Agua FC por Área / Línea / Mes", expanded=False):
+                st.caption(
+                    "Muestra las compras proyectadas (Forecast Compra × Costo Unitario) "
+                    "que estarían **en tránsito** por mes de arribo. Solo incluye meses FC "
+                    "posteriores a la última ETA COMEX de cada Área/Línea."
+                )
+                _fca = _fc_aguas_df.copy()
+                _fca["MES_ARRIBO"] = _fca["PERIODO_MES"].apply(_periodo_label)
+                _fca["ETD_EST"] = _fca["_ETD_FC"].apply(
+                    lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else ""
+                )
+
+                # ── Tabla pivot: Área/Línea × Mes Arribo ─────────────
+                _piv = _fca.pivot_table(
+                    index=["AREA", "LINEA"],
+                    columns="MES_ARRIBO",
+                    values="FC_CLP",
+                    aggfunc="sum",
+                    fill_value=0,
+                )
+                # Ordenar columnas cronológicamente
+                _sorted_months = (
+                    _fca.sort_values("PERIODO_MES")["MES_ARRIBO"]
+                    .drop_duplicates().tolist()
+                )
+                _piv = _piv[[c for c in _sorted_months if c in _piv.columns]]
+                _piv["TOTAL"] = _piv.sum(axis=1)
+                _piv = _piv.sort_values("TOTAL", ascending=False)
+
+                # Formatear como M$
+                _piv_fmt = _piv.copy()
+                for _c in _piv_fmt.columns:
+                    _piv_fmt[_c] = _piv_fmt[_c].apply(_fmt_mm)
+                st.dataframe(_piv_fmt, use_container_width=True,
+                             height=min(len(_piv_fmt) * 38 + 60, 500))
+
+                # ── Top 10 Área/Línea por monto total FC ─────────────
+                _top = _piv.nlargest(10, "TOTAL").drop(columns=["TOTAL"])
+                if not _top.empty:
+                    st.markdown("**Top 10 Área/Línea — Mayor FC en tránsito**")
+                    _top_melt = _top.reset_index().melt(
+                        id_vars=["AREA", "LINEA"],
+                        var_name="Mes", value_name="FC_CLP",
+                    )
+                    _top_melt["AREA_LINEA"] = _top_melt["AREA"] + " / " + _top_melt["LINEA"]
+                    fig_fc = go.Figure()
+                    for al in _top_melt["AREA_LINEA"].unique():
+                        sub = _top_melt[_top_melt["AREA_LINEA"] == al]
+                        fig_fc.add_trace(go.Bar(
+                            x=sub["Mes"], y=sub["FC_CLP"],
+                            name=al,
+                            hovertemplate="%{x}<br>%{fullData.name}<br>$%{y:,.0f}<extra></extra>",
+                        ))
+                    fig_fc.update_layout(**dorel_layout(
+                        barmode="stack",
+                        yaxis=dict(title="FC En Agua (CLP)", tickformat="$~s"),
+                        xaxis=dict(title="Mes de Arribo"),
+                        legend=dict(title_text="Área / Línea", font_size=9),
+                        height=400,
+                    ))
+                    st.plotly_chart(fig_fc, use_container_width=True)
+
+                # ── Detalle granular ─────────────────────────────────
+                st.markdown("**Detalle completo FC en tránsito**")
+                _det = _fca[["AREA", "LINEA", "MES_ARRIBO", "FC_UND", "FC_CLP", "ETD_EST"]].copy()
+                _det = _det.sort_values(["FC_CLP"], ascending=False)
+                _det["FC_CLP_FMT"] = _det["FC_CLP"].apply(_fmt_mm)
+                _det["FC_UND_FMT"] = _det["FC_UND"].apply(lambda x: f"{x:,.0f}")
+                _det_show = _det.rename(columns={
+                    "MES_ARRIBO": "Mes Arribo",
+                    "FC_UND_FMT": "Unidades FC",
+                    "FC_CLP_FMT": "Monto CLP",
+                    "ETD_EST": "ETD Estimado",
+                })
+                st.dataframe(
+                    _det_show[["AREA", "LINEA", "Mes Arribo", "Unidades FC", "Monto CLP", "ETD Estimado"]],
+                    use_container_width=True,
+                    height=min(len(_det_show) * 38 + 60, 500),
+                )
+
     with tab2:
         _render_otb_tab(df_inv)
 
