@@ -511,6 +511,8 @@ def _build_inv_projection(df_pos, df_stock, maestra, df_proy=None, df_vcosto_his
 
             stock_cierre_prev = stock_cierre
 
+    debug["fc_aguas_df"] = _fc_aguas if not _fc_aguas.empty else pd.DataFrame()
+
     return pd.DataFrame(rows), debug
 
 
