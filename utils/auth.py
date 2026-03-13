@@ -56,11 +56,11 @@ PLANNER_MODULES = [
     "Operaciones Supply",
     "Venta Perdida",
     "Ventas Forecast 2+10",
+    "ABC-XYZ",
 ]
 
 # Modules that only jefe+ can access (everything else is also available)
 JEFE_EXTRA_MODULES = [
-    "ABC-XYZ",
     "Elasticidad",
     "Sell-Through",
     "Tendencia",
