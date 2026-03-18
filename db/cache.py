@@ -79,6 +79,8 @@ from db.queries import (
     QUERY_SUPPLY_STOCK_ACTUAL,
     QUERY_SUPPLY_BULTOS,
     QUERY_SUPPLY_DESPACHOS_FEDEX,
+    QUERY_INSTOCK_RANGO_TIENDA,
+    QUERY_INSTOCK_RANGO_CD,
 )
 from utils.filters import norm_cols
 
@@ -95,6 +97,12 @@ TTL_COMEX = 3_600        # 1 hour   -- comex (updated during the workday)
 def _run(query: str, conn) -> pd.DataFrame:
     """Execute query and normalize column names."""
     df = pd.read_sql(query, conn)
+    return norm_cols(df)
+
+
+def _run_params(query: str, conn, params: tuple) -> pd.DataFrame:
+    """Execute parameterized query (%s placeholders) and normalize."""
+    df = pd.read_sql(query, conn, params=params)
     return norm_cols(df)
 
 
@@ -284,6 +292,22 @@ def instock_daily_tienda(_conn_id, _conn=None) -> pd.DataFrame:
 def instock_daily_cd(_conn_id, _conn=None) -> pd.DataFrame:
     """InStock CD daily (all days, last 30d). PowerBI-style view."""
     return _run(QUERY_INSTOCK_DAILY_CD, _conn)
+
+
+# ---------------------------------------------------------------------------
+# InStock por Rango (parametrizado) — dato diario completo para rango libre
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def instock_rango_tienda(_conn_id, _fecha_ini: str, _fecha_fin: str, _conn=None) -> pd.DataFrame:
+    """InStock tienda daily for a custom date range. All days, no Monday sampling."""
+    return _run_params(QUERY_INSTOCK_RANGO_TIENDA, _conn, (_fecha_ini, _fecha_fin))
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def instock_rango_cd(_conn_id, _fecha_ini: str, _fecha_fin: str, _conn=None) -> pd.DataFrame:
+    """InStock CD daily for a custom date range. All days."""
+    return _run_params(QUERY_INSTOCK_RANGO_CD, _conn, (_fecha_ini, _fecha_fin))
 
 
 # ---------------------------------------------------------------------------
@@ -853,6 +877,15 @@ class cached_query:
     @staticmethod
     def instock_daily_cd(conn):
         return instock_daily_cd(cached_query._cid(conn), _conn=conn)
+
+    # -- InStock Rango (parametrizado, 24h) --
+    @staticmethod
+    def instock_rango_tienda(conn, fecha_ini: str, fecha_fin: str):
+        return instock_rango_tienda(cached_query._cid(conn), fecha_ini, fecha_fin, _conn=conn)
+
+    @staticmethod
+    def instock_rango_cd(conn, fecha_ini: str, fecha_fin: str):
+        return instock_rango_cd(cached_query._cid(conn), fecha_ini, fecha_fin, _conn=conn)
 
     # -- ABC-XYZ-FSN (24h) --
     @staticmethod

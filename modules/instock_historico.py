@@ -1679,41 +1679,46 @@ def render_instock_historico(conn):
     st.caption(
         "Evolucion del InStock **calculado**: stock >= venta promedio diaria "
         "(IS=1 si la tienda/CD puede cubrir al menos 1 dia de demanda). "
-        "Datos diarios (ultimos 30 dias) + semanales (desde 2023, muestreado cada lunes)."
+        "Datos diarios completos desde mayo 2024."
     )
 
-    # ── Load data — merge daily (30d) + weekly (2023+) ─────────────────
+    # ── Date range + aggregation (top-level, before data load) ───────────
+    _rc1, _rc2, _rc3 = st.columns([1, 1, 1])
+    with _rc1:
+        _min_date = date(2024, 5, 7)
+        _max_date = date.today()
+        _default_start = _max_date - timedelta(days=90)
+        fecha_inicio = st.date_input(
+            "Fecha Desde", value=_default_start,
+            min_value=_min_date, max_value=_max_date,
+            key="is_fecha_ini",
+        )
+    with _rc2:
+        fecha_fin = st.date_input(
+            "Fecha Hasta", value=_max_date,
+            min_value=_min_date, max_value=_max_date,
+            key="is_fecha_fin",
+        )
+    with _rc3:
+        _AGG_OPTIONS = {"Diario": "D", "Semanal": "W", "Mensual": "M", "Trimestral": "Q"}
+        sel_agg_label = st.selectbox(
+            "Nivel de Agregacion",
+            list(_AGG_OPTIONS.keys()), index=0, key="is_agg_level",
+        )
+        sel_agg_period = _AGG_OPTIONS[sel_agg_label]
+
+    # ── Load data for selected date range ─────────────────────────────────
+    _fi = str(fecha_inicio)
+    _ff = str(fecha_fin)
     with lottie_spinner("snowflake"):
-        _df_daily_t = cq.instock_daily_tienda(conn).copy()
-        _df_daily_cd = cq.instock_daily_cd(conn).copy()
-        _df_hist_t = cq.instock_hist_tienda(conn).copy()
-        _df_hist_cd = cq.instock_hist_cd(conn).copy()
-
-    # Combine: weekly history + daily recent (daily takes precedence for overlapping dates)
-    def _merge_daily_hist(df_daily, df_hist):
-        if df_daily.empty:
-            return df_hist
-        if df_hist.empty:
-            return df_daily
-        daily_dates = set(df_daily["FECHA"].dropna().unique()) if "FECHA" in df_daily.columns else set()
-        hist_no_overlap = df_hist[~df_hist["FECHA"].isin(daily_dates)] if "FECHA" in df_hist.columns else df_hist
-        return pd.concat([hist_no_overlap, df_daily], ignore_index=True)
-
-    df_tienda_raw = _merge_daily_hist(_df_daily_t, _df_hist_t)
-    df_cd_raw = _merge_daily_hist(_df_daily_cd, _df_hist_cd)
+        df_tienda_raw = cq.instock_rango_tienda(conn, _fi, _ff)
+        df_cd_raw = cq.instock_rango_cd(conn, _fi, _ff)
 
     if df_tienda_raw.empty and df_cd_raw.empty:
-        st.warning("No se encontraron datos de InStock. Verifique la conexion a Snowflake.")
+        st.warning("No se encontraron datos de InStock para el rango seleccionado.")
         return
 
-    # Hint if new columns are missing (stale cache)
-    if not df_tienda_raw.empty and "N_TIENDAS_IS90" not in df_tienda_raw.columns:
-        st.info(
-            "⚠️ Cache desactualizado — Haz clic en **Refrescar Datos** en el sidebar "
-            "para cargar las columnas actualizadas (denominadores por ventana)."
-        )
-
-    # ── Coerce numerics ───────────────────────────────────────────────────
+    # ── Coerce numerics ───────────────────────────────────────────────
     _num_cols_tienda = [
         "N_TIENDAS",
         "N_TIENDAS_IS90", "N_TIENDAS_IS180", "N_TIENDAS_IS365",
@@ -1737,167 +1742,91 @@ def render_instock_historico(conn):
         if c in df_cd_raw.columns:
             df_cd_raw[c] = pd.to_numeric(df_cd_raw[c], errors="coerce").fillna(0)
 
-    # Parse dates
-    for df in [df_tienda_raw, df_cd_raw]:
-        if "FECHA" in df.columns:
-            df["FECHA"] = pd.to_datetime(df["FECHA"], errors="coerce")
+    for _df in [df_tienda_raw, df_cd_raw]:
+        if "FECHA" in _df.columns:
+            _df["FECHA"] = pd.to_datetime(_df["FECHA"], errors="coerce")
 
-    # ── Enrich with ABC-XYZ-FSN classification ────────────────────────────
+    # ── Enrich with ABC-XYZ-FSN ───────────────────────────────────────
     try:
         _abc_lookup = cq.abc_xyz_fsn(conn)
         if not _abc_lookup.empty:
             _abc_cols = ["SKU_PRODUCTO", "CLASE_ABC", "CLASE_XYZ", "CLASE_FSN"]
             _abc_cols = [c for c in _abc_cols if c in _abc_lookup.columns]
             _abc_dedup = _abc_lookup[_abc_cols].drop_duplicates("SKU_PRODUCTO")
-            if "SKU_PRODUCTO" in df_tienda_raw.columns:
-                for _c in _abc_cols[1:]:
-                    if _c in df_tienda_raw.columns:
-                        df_tienda_raw = df_tienda_raw.drop(columns=[_c])
-                df_tienda_raw = df_tienda_raw.merge(_abc_dedup, on="SKU_PRODUCTO", how="left")
-            if "SKU_PRODUCTO" in df_cd_raw.columns:
-                for _c in _abc_cols[1:]:
-                    if _c in df_cd_raw.columns:
-                        df_cd_raw = df_cd_raw.drop(columns=[_c])
-                df_cd_raw = df_cd_raw.merge(_abc_dedup, on="SKU_PRODUCTO", how="left")
+            for _df in [df_tienda_raw, df_cd_raw]:
+                if "SKU_PRODUCTO" in _df.columns:
+                    for _c in _abc_cols[1:]:
+                        if _c in _df.columns:
+                            _df.drop(columns=[_c], inplace=True)
+                    _df_merged = _df.merge(_abc_dedup, on="SKU_PRODUCTO", how="left")
+                    _df.drop(_df.index, inplace=True)
+                    for col in _df_merged.columns:
+                        _df[col] = _df_merged[col].values
     except Exception:
-        pass  # gracefully skip if ABC-XYZ-FSN not available
+        pass
 
+    # ── PM filter ─────────────────────────────────────────────────────
     df_tienda_raw = apply_pm_filter(df_tienda_raw)
     df_cd_raw = apply_pm_filter(df_cd_raw)
 
-    # ── Dimension options for filters ─────────────────────────────────────
+    # ── Dimension + toggle filters ────────────────────────────────────
     combined_areas = sorted(
-        set(df_tienda_raw["AREA"].dropna().unique())
-        | set(df_cd_raw["AREA"].dropna().unique())
+        set(df_tienda_raw["AREA"].dropna().unique() if "AREA" in df_tienda_raw.columns else [])
+        | set(df_cd_raw["AREA"].dropna().unique() if "AREA" in df_cd_raw.columns else [])
     )
     combined_lineas = sorted(
-        set(df_tienda_raw["LINEA"].dropna().unique())
-        | set(df_cd_raw["LINEA"].dropna().unique())
+        set(df_tienda_raw["LINEA"].dropna().unique() if "LINEA" in df_tienda_raw.columns else [])
+        | set(df_cd_raw["LINEA"].dropna().unique() if "LINEA" in df_cd_raw.columns else [])
     )
     combined_marcas = sorted(
-        set(df_tienda_raw["MARCA"].dropna().unique())
-        | set(df_cd_raw["MARCA"].dropna().unique())
+        set(df_tienda_raw["MARCA"].dropna().unique() if "MARCA" in df_tienda_raw.columns else [])
+        | set(df_cd_raw["MARCA"].dropna().unique() if "MARCA" in df_cd_raw.columns else [])
     )
 
-    # ── Filters ───────────────────────────────────────────────────────────
     with st.expander("Filtros", expanded=True):
-        fc1, fc2, fc3 = st.columns(3)
-
-        with fc1:
+        _fc1, _fc2 = st.columns(2)
+        with _fc1:
             sel_window_label = st.radio(
                 "Ventana de Venta Promedio",
-                list(_WINDOW_OPTIONS.keys()),
-                index=0,
-                horizontal=True,
+                list(_WINDOW_OPTIONS.keys()), index=0, horizontal=True,
             )
             sel_window = _WINDOW_OPTIONS[sel_window_label]
-
-        with fc2:
-            # Determine available date range from loaded data
-            _all_fechas = pd.concat([
-                df_tienda_raw["FECHA"].dropna() if not df_tienda_raw.empty else pd.Series(dtype="datetime64[ns]"),
-                df_cd_raw["FECHA"].dropna() if not df_cd_raw.empty else pd.Series(dtype="datetime64[ns]"),
-            ])
-            if _all_fechas.empty:
-                _min_date = date.today() - timedelta(days=30)
-                _max_date = date.today()
-            else:
-                _min_date = _all_fechas.min().date()
-                _max_date = _all_fechas.max().date()
-
-            _default_start = _max_date - timedelta(days=90)
-            if _default_start < _min_date:
-                _default_start = _min_date
-
-            st.markdown("**Rango de Fechas**")
-            _dc1, _dc2 = st.columns(2)
-            with _dc1:
-                fecha_inicio = st.date_input(
-                    "Desde", value=_default_start,
-                    min_value=_min_date, max_value=_max_date,
-                    key="is_fecha_ini",
-                )
-            with _dc2:
-                fecha_fin = st.date_input(
-                    "Hasta", value=_max_date,
-                    min_value=_min_date, max_value=_max_date,
-                    key="is_fecha_fin",
-                )
-
-            _AGG_OPTIONS = {
-                "Diario": "D", "Semanal": "W",
-                "Mensual": "M", "Trimestral": "Q",
-            }
-            sel_agg_label = st.selectbox(
-                "Nivel de Agregacion",
-                list(_AGG_OPTIONS.keys()),
-                index=0,
-                key="is_agg_level",
-            )
-            sel_agg_period = _AGG_OPTIONS[sel_agg_label]
-
-        with fc3:
+        with _fc2:
             filter_cd_toggle = st.toggle(
-                "Solo SKUs con InStock CD 90 = 1",
-                value=True,
+                "Solo SKUs con InStock CD 90 = 1", value=True,
                 help="Filtra solo SKUs donde el CD tenia stock suficiente "
-                     "para cubrir 1 dia de venta promedio (ventana 90 dias). "
-                     "Siempre usa ventana 90d independiente del display.",
+                     "para cubrir 1 dia de venta promedio (ventana 90 dias).",
             )
             solo_perfil_toggle = st.toggle(
-                "Solo con Perfil de Reposicion",
-                value=True,
-                help="Solo cuenta combinaciones SKU-tienda que tienen "
-                     "PERFIL configurado (reposicion activa). Excluye "
-                     "tiendas donde el SKU no estaba asignado.",
+                "Solo con Perfil de Reposicion", value=True,
+                help="Solo cuenta combinaciones SKU-tienda con PERFIL configurado.",
             )
 
-        fc4, fc5, fc6, fc7 = st.columns(4)
-        with fc4:
+        _fc3, _fc4, _fc5, _fc6 = st.columns(4)
+        with _fc3:
             sel_areas = st.multiselect("Area", combined_areas, default=[])
-        with fc5:
+        with _fc4:
             sel_lineas = st.multiselect("Linea", combined_lineas, default=[])
-        with fc6:
+        with _fc5:
             sel_marcas = st.multiselect("Marca", combined_marcas, default=[])
-        with fc7:
-            mix_options = ["MIX", "IN & OUT", "FUERA MIX"]
-            sel_mix = st.multiselect("Mix Oficial", mix_options, default=["MIX"], key="is_mix_filt")
+        with _fc6:
+            sel_mix = st.multiselect("Mix Oficial", ["MIX", "IN & OUT", "FUERA MIX"],
+                                     default=["MIX"], key="is_mix_filt")
 
-        # ABC-XYZ-FSN classification filters
         _has_abc = "CLASE_ABC" in df_tienda_raw.columns or "CLASE_ABC" in df_cd_raw.columns
         if _has_abc:
-            fc8, fc9, fc10 = st.columns(3)
-            with fc8:
+            _fc7, _fc8, _fc9 = st.columns(3)
+            with _fc7:
                 sel_abc = st.multiselect("ABC", ["A", "B", "C"], default=[], key="is_abc_filt")
-            with fc9:
+            with _fc8:
                 sel_xyz = st.multiselect("XYZ", ["X", "Y", "Z"], default=[], key="is_xyz_filt")
-            with fc10:
+            with _fc9:
                 sel_fsn = st.multiselect("FSN", ["F", "S", "N"], default=[], key="is_fsn_filt")
         else:
             sel_abc, sel_xyz, sel_fsn = [], [], []
 
-    # ── Apply filters ─────────────────────────────────────────────────────
-    _ts_inicio = pd.Timestamp(fecha_inicio)
-    _ts_fin = pd.Timestamp(fecha_fin)
-
-    # Warn if daily aggregation requested but range exceeds daily data coverage
-    if sel_agg_period == "D":
-        _daily_min = None
-        if not _df_daily_t.empty and "FECHA" in _df_daily_t.columns:
-            _daily_min = _df_daily_t["FECHA"].min()
-        elif not _df_daily_cd.empty and "FECHA" in _df_daily_cd.columns:
-            _daily_min = _df_daily_cd["FECHA"].min()
-        if _daily_min is not None and _ts_inicio < pd.Timestamp(_daily_min):
-            st.warning(
-                f"⚠️ Los datos diarios cubren desde **{_daily_min.strftime('%d/%m/%Y')}**. "
-                f"Para fechas anteriores, los datos son semanales (solo lunes). "
-                f"Considera usar agregacion **Semanal** o **Mensual** para rangos mas largos."
-            )
-
     def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()
-        if "FECHA" in out.columns:
-            out = out[(out["FECHA"] >= _ts_inicio) & (out["FECHA"] <= _ts_fin)]
         if sel_areas:
             out = out[out["AREA"].isin(sel_areas)]
         if sel_lineas:

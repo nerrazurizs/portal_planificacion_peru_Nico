@@ -1353,6 +1353,106 @@ left join {_PROD} c
 where a.fecha >= dateadd('day', -30, current_date())
 """
 
+# InStock diario por rango de fechas — tienda (parametrizado: %s fecha_inicio, %s fecha_fin)
+QUERY_INSTOCK_RANGO_TIENDA = f"""
+select
+    a.fecha,
+    a.sku_producto,
+    c.area,
+    c.linea,
+    c.sublinea,
+    c.marca,
+    c.mix_oficial,
+    count(*)                                                as n_tiendas,
+    count(*)                                                as n_tiendas_is90,
+    count(*)                                                as n_tiendas_is180,
+    count(*)                                                as n_tiendas_is365,
+    sum(case when a.stock_unidades > 0
+             and a.stock_unidades >= coalesce(a.cantidad_prom_90, 0)
+             then 1 else 0 end)                             as tiendas_is90,
+    sum(case when a.stock_unidades > 0
+             and a.stock_unidades >= coalesce(a.cantidad_prom_180, 0)
+             then 1 else 0 end)                             as tiendas_is180,
+    sum(case when a.stock_unidades > 0
+             and a.stock_unidades >= coalesce(a.cantidad_prom_365, 0)
+             then 1 else 0 end)                             as tiendas_is365,
+    sum(case when a.stock_unidades > 0
+             and a.stock_unidades >= coalesce(a.cantidad_prom_90b, 0)
+             then 1 else 0 end)                             as tiendas_is90b,
+    sum(case when a.stock_unidades > 0
+             and a.stock_unidades >= coalesce(a.cantidad_prom_180b, 0)
+             then 1 else 0 end)                             as tiendas_is180b,
+    sum(case when a.stock_unidades > 0
+             and a.stock_unidades >= coalesce(a.cantidad_prom_365b, 0)
+             then 1 else 0 end)                             as tiendas_is365b,
+    sum(coalesce(a.in_stock_presentacion, 0))               as tiendas_is_pres,
+    sum(coalesce(a.stock_unidades, 0))                      as stock_und_tienda,
+    sum(coalesce(a.stock_costo, 0))                         as stock_costo_tienda,
+    sum(case when a.perfil = 'SI' then 1 else 0 end)        as n_tiendas_is90_perfil,
+    sum(case when a.perfil = 'SI' then 1 else 0 end)        as n_tiendas_is180_perfil,
+    sum(case when a.perfil = 'SI' then 1 else 0 end)        as n_tiendas_is365_perfil,
+    sum(case when a.perfil = 'SI' and a.stock_unidades > 0
+             and a.stock_unidades >= coalesce(a.cantidad_prom_90, 0)
+             then 1 else 0 end)                             as tiendas_is90_perfil,
+    sum(case when a.perfil = 'SI' and a.stock_unidades > 0
+             and a.stock_unidades >= coalesce(a.cantidad_prom_180, 0)
+             then 1 else 0 end)                             as tiendas_is180_perfil,
+    sum(case when a.perfil = 'SI' and a.stock_unidades > 0
+             and a.stock_unidades >= coalesce(a.cantidad_prom_365, 0)
+             then 1 else 0 end)                             as tiendas_is365_perfil,
+    coalesce(max(case when d.stock_unidades > 0
+                      and d.stock_unidades >= coalesce(d.cantidad_prom_90_cia, 0)
+                      then 1 else 0 end), 0)                as instock_cd_90,
+    coalesce(max(case when d.stock_unidades > 0
+                      and d.stock_unidades >= coalesce(d.cantidad_prom_180_cia, 0)
+                      then 1 else 0 end), 0)                as instock_cd_180,
+    coalesce(max(case when d.stock_unidades > 0
+                      and d.stock_unidades >= coalesce(d.cantidad_prom_365_cia, 0)
+                      then 1 else 0 end), 0)                as instock_cd_365
+from {_INSTOCK} a
+join {_SUCURSAL} b
+    on a.cod_bodega = b.id_sucursal
+left join {_PROD} c
+    on a.sku_producto = c.sku_producto
+left join {_INSTOCK_CD} d
+    on a.fecha = d.fecha
+   and a.sku_producto = d.sku_producto
+where b.canal_de_distribucion = 'TIENDA'
+  and a.fecha >= %s
+  and a.fecha <= %s
+group by 1, 2, 3, 4, 5, 6, 7
+"""
+
+# InStock diario por rango de fechas — CD (parametrizado: %s fecha_inicio, %s fecha_fin)
+QUERY_INSTOCK_RANGO_CD = f"""
+select
+    a.fecha,
+    a.sku_producto,
+    c.area,
+    c.linea,
+    c.sublinea,
+    c.marca,
+    c.mix_oficial,
+    a.stock_unidades                   as stock_und_cd,
+    a.stock_costo                      as stock_costo_cd,
+    case when a.stock_unidades > 0
+         and a.stock_unidades >= coalesce(a.cantidad_prom_90_cia, 0)
+         then 1 else 0 end            as instock_cd_90,
+    case when a.stock_unidades > 0
+         and a.stock_unidades >= coalesce(a.cantidad_prom_180_cia, 0)
+         then 1 else 0 end            as instock_cd_180,
+    case when a.stock_unidades > 0
+         and a.stock_unidades >= coalesce(a.cantidad_prom_365_cia, 0)
+         then 1 else 0 end            as instock_cd_365,
+    a.cantidad_prom_90_cia,
+    a.costo_prom_90_cia
+from {_INSTOCK_CD} a
+left join {_PROD} c
+    on a.sku_producto = c.sku_producto
+where a.fecha >= %s
+  and a.fecha <= %s
+"""
+
 # Ventas diarias por SKU (ultimo ano, patrones)
 QUERY_VENTAS_DIARIAS_PATRON = f"""
 select
