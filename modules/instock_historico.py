@@ -1676,36 +1676,31 @@ def render_instock_historico(conn):
         "<h2 class='sub-header'>InStock Historico — Tiendas & CD</h2>"
     )
 
-    # ── Granularity toggle ────────────────────────────────────────────────
-    gran_col1, gran_col2 = st.columns([2, 4])
-    with gran_col1:
-        granularidad = st.radio(
-            "Granularidad",
-            ["Diario (30d)", "Semanal (desde 2023)"],
-            index=0,
-            horizontal=True,
-            help="Diario: ultimos 30 dias, todos los dias. "
-                 "Semanal: desde 2023, muestreado cada lunes.",
-        )
-    is_daily = granularidad.startswith("Diario")
-
     st.caption(
-        "Evolucion {} del InStock **calculado**: stock >= venta promedio diaria "
-        "(IS=1 si la tienda/CD puede cubrir al menos 1 dia de demanda). {}".format(
-            "diaria" if is_daily else "semanal",
-            "Datos de los ultimos 30 dias." if is_daily
-            else "Datos semanales desde 2023 (muestreado cada lunes + ultima fecha).",
-        )
+        "Evolucion del InStock **calculado**: stock >= venta promedio diaria "
+        "(IS=1 si la tienda/CD puede cubrir al menos 1 dia de demanda). "
+        "Datos diarios (ultimos 30 dias) + semanales (desde 2023, muestreado cada lunes)."
     )
 
-    # ── Load data ─────────────────────────────────────────────────────────
+    # ── Load data — merge daily (30d) + weekly (2023+) ─────────────────
     with lottie_spinner("snowflake"):
-        if is_daily:
-            df_tienda_raw = cq.instock_daily_tienda(conn).copy()
-            df_cd_raw = cq.instock_daily_cd(conn).copy()
-        else:
-            df_tienda_raw = cq.instock_hist_tienda(conn).copy()
-            df_cd_raw = cq.instock_hist_cd(conn).copy()
+        _df_daily_t = cq.instock_daily_tienda(conn).copy()
+        _df_daily_cd = cq.instock_daily_cd(conn).copy()
+        _df_hist_t = cq.instock_hist_tienda(conn).copy()
+        _df_hist_cd = cq.instock_hist_cd(conn).copy()
+
+    # Combine: weekly history + daily recent (daily takes precedence for overlapping dates)
+    def _merge_daily_hist(df_daily, df_hist):
+        if df_daily.empty:
+            return df_hist
+        if df_hist.empty:
+            return df_daily
+        daily_dates = set(df_daily["FECHA"].dropna().unique()) if "FECHA" in df_daily.columns else set()
+        hist_no_overlap = df_hist[~df_hist["FECHA"].isin(daily_dates)] if "FECHA" in df_hist.columns else df_hist
+        return pd.concat([hist_no_overlap, df_daily], ignore_index=True)
+
+    df_tienda_raw = _merge_daily_hist(_df_daily_t, _df_hist_t)
+    df_cd_raw = _merge_daily_hist(_df_daily_cd, _df_hist_cd)
 
     if df_tienda_raw.empty and df_cd_raw.empty:
         st.warning("No se encontraron datos de InStock. Verifique la conexion a Snowflake.")
@@ -1810,7 +1805,7 @@ def render_instock_historico(conn):
                 _min_date = _all_fechas.min().date()
                 _max_date = _all_fechas.max().date()
 
-            _default_start = _max_date - timedelta(days=30 if is_daily else 90)
+            _default_start = _max_date - timedelta(days=90)
             if _default_start < _min_date:
                 _default_start = _min_date
 
@@ -1836,7 +1831,7 @@ def render_instock_historico(conn):
             sel_agg_label = st.selectbox(
                 "Nivel de Agregacion",
                 list(_AGG_OPTIONS.keys()),
-                index=0 if is_daily else 1,
+                index=0,
                 key="is_agg_level",
             )
             sel_agg_period = _AGG_OPTIONS[sel_agg_label]
@@ -1865,8 +1860,8 @@ def render_instock_historico(conn):
         with fc6:
             sel_marcas = st.multiselect("Marca", combined_marcas, default=[])
         with fc7:
-            mix_options = ["Todos", "MIX", "IN & OUT", "FUERA DE MIX"]
-            sel_mix = st.selectbox("Mix Oficial", mix_options, index=1)
+            mix_options = ["MIX", "IN & OUT", "FUERA MIX"]
+            sel_mix = st.multiselect("Mix Oficial", mix_options, default=["MIX"], key="is_mix_filt")
 
         # ABC-XYZ-FSN classification filters
         _has_abc = "CLASE_ABC" in df_tienda_raw.columns or "CLASE_ABC" in df_cd_raw.columns
@@ -1895,8 +1890,8 @@ def render_instock_historico(conn):
             out = out[out["LINEA"].isin(sel_lineas)]
         if sel_marcas:
             out = out[out["MARCA"].isin(sel_marcas)]
-        if sel_mix != "Todos" and "MIX_OFICIAL" in out.columns:
-            out = out[out["MIX_OFICIAL"] == sel_mix]
+        if sel_mix and "MIX_OFICIAL" in out.columns:
+            out = out[out["MIX_OFICIAL"].isin(sel_mix)]
         # ABC-XYZ-FSN filters
         if sel_abc and "CLASE_ABC" in out.columns:
             out = out[out["CLASE_ABC"].isin(sel_abc)]
@@ -2308,95 +2303,114 @@ def render_instock_historico(conn):
     else:
         st.info("Sin datos de tiendas para grafico de evolucion.")
 
-    # ── Detail table: SKU drill-down (latest date, tienda+CD merged) ─────
+    # ── Detail table: SKU × Periodo (aggregated, with download) ─────────
     st.markdown("---")
-    st.markdown("### Detalle por SKU — Ultima Fecha")
+    st.markdown(f"### Detalle por SKU — Agregacion {sel_agg_label}")
 
-    with st.expander("Ver tabla detalle SKU", expanded=False):
+    with st.expander("Ver tabla detalle SKU (con descarga)", expanded=False):
         _cols_map = _COL_MAP_TIENDA[sel_window]
 
-        # ── Tienda detail ─────────────────────────────────────────────
+        # Determine IS cols
+        if (solo_perfil_toggle
+                and _cols_map["is_perfil"] in df_tienda.columns
+                and _cols_map["n_perfil"] in df_tienda.columns):
+            _is_col, _n_col = _cols_map["is_perfil"], _cols_map["n_perfil"]
+        elif _cols_map["n"] in df_tienda.columns:
+            _is_col, _n_col = _cols_map["is"], _cols_map["n"]
+        else:
+            _is_col, _n_col = _cols_map["is"], "N_TIENDAS"
+
+        # ── Build detail per SKU × Periodo (tienda) ───────────────────
         if not df_tienda.empty:
-            _latest_t = df_tienda["FECHA"].max()
-            _det_t = df_tienda[df_tienda["FECHA"] == _latest_t].copy()
+            _det_t = df_tienda.copy()
             if filter_cd_toggle:
                 _det_t = _det_t[_det_t[_CD_FILTER_COL] >= 1]
 
-            if (solo_perfil_toggle
-                    and _cols_map["is_perfil"] in _det_t.columns
-                    and _cols_map["n_perfil"] in _det_t.columns):
-                _is_col, _n_col = _cols_map["is_perfil"], _cols_map["n_perfil"]
-            elif _cols_map["n"] in _det_t.columns:
-                _is_col, _n_col = _cols_map["is"], _cols_map["n"]
+            # Bucket dates
+            if sel_agg_period == "D":
+                _det_t["PERIODO"] = _det_t["FECHA"]
             else:
-                _is_col, _n_col = _cols_map["is"], "N_TIENDAS"
+                _det_t["PERIODO"] = _det_t["FECHA"].dt.to_period(sel_agg_period).dt.start_time
 
-            _det_t["IS_PCT_TIENDA"] = np.where(
-                _det_t[_n_col] > 0, _det_t[_is_col] / _det_t[_n_col], 0.0,
-            )
+            _dim_cols = ["SKU_PRODUCTO", "AREA", "LINEA", "SUBLINEA", "MARCA", "MIX_OFICIAL"]
+            _dim_cols = [c for c in _dim_cols if c in _det_t.columns]
+            _grp_cols = ["PERIODO"] + _dim_cols
 
-            # Build column list
-            _base = ["SKU_PRODUCTO", "AREA", "LINEA", "SUBLINEA", "MARCA", "MIX_OFICIAL"]
-            _metrics = [_n_col, _is_col, "IS_PCT_TIENDA",
-                        "STOCK_UND_TIENDA", "STOCK_COSTO_TIENDA", _cols_map["cd"]]
-            # Add perfil cols if available and not already the main cols
-            if not solo_perfil_toggle:
-                for _pc in [_cols_map.get("n_perfil"), _cols_map.get("is_perfil")]:
-                    if _pc and _pc in _det_t.columns and _pc not in _metrics:
-                        _metrics.append(_pc)
-            # ABC-XYZ
+            _agg_dict = {
+                "IS_NUMERADOR": (_is_col, "sum"),
+                "IS_DENOMINADOR": (_n_col, "sum"),
+            }
+            for _sc in ["STOCK_UND_TIENDA", "STOCK_COSTO_TIENDA"]:
+                if _sc in _det_t.columns:
+                    _agg_dict[_sc] = (_sc, "mean")
+            for _pc in [_cols_map.get("n_perfil"), _cols_map.get("is_perfil")]:
+                if _pc and _pc in _det_t.columns:
+                    _agg_dict[f"{_pc}_SUM"] = (_pc, "sum")
+            if _cols_map["cd"] in _det_t.columns:
+                _agg_dict["INSTOCK_CD"] = (_cols_map["cd"], "max")
+            # ABC-XYZ (take first, they're static per SKU)
             for _ac in ["CLASE_ABC", "CLASE_XYZ", "CLASE_FSN"]:
                 if _ac in _det_t.columns:
-                    _metrics.append(_ac)
+                    _agg_dict[_ac] = (_ac, "first")
 
-            _all_cols = [c for c in (_base + _metrics) if c in _det_t.columns]
-            _detail_merged = _det_t[_all_cols].copy()
+            _det_agg = _det_t.groupby(_grp_cols, dropna=False).agg(**_agg_dict).reset_index()
+            _det_agg["IS_PCT_TIENDA"] = np.where(
+                _det_agg["IS_DENOMINADOR"] > 0,
+                _det_agg["IS_NUMERADOR"] / _det_agg["IS_DENOMINADOR"],
+                0.0,
+            )
+            _det_agg = _det_agg.rename(columns={"PERIODO": "FECHA"})
         else:
-            _detail_merged = pd.DataFrame()
+            _det_agg = pd.DataFrame()
 
-        # ── CD detail ─────────────────────────────────────────────────
+        # ── CD detail per SKU × Periodo ───────────────────────────────
         if not df_cd.empty:
-            _latest_cd = df_cd["FECHA"].max()
-            _det_cd = df_cd[df_cd["FECHA"] == _latest_cd].copy()
-            _cd_keep = ["SKU_PRODUCTO"]
-            for _cc in ["STOCK_UND_CD", "STOCK_COSTO_CD", "INSTOCK_CD_90",
-                         "CANTIDAD_PROM_90_CIA"]:
+            _det_cd = df_cd.copy()
+            if sel_agg_period == "D":
+                _det_cd["PERIODO"] = _det_cd["FECHA"]
+            else:
+                _det_cd["PERIODO"] = _det_cd["FECHA"].dt.to_period(sel_agg_period).dt.start_time
+
+            _cd_agg_dict = {}
+            for _cc in ["STOCK_UND_CD", "STOCK_COSTO_CD"]:
                 if _cc in _det_cd.columns:
-                    _cd_keep.append(_cc)
-            _det_cd = _det_cd[_cd_keep].groupby("SKU_PRODUCTO", as_index=False).first()
+                    _cd_agg_dict[_cc] = (_cc, "mean")
+            if "INSTOCK_CD_90" in _det_cd.columns:
+                _cd_agg_dict["INSTOCK_CD_90"] = ("INSTOCK_CD_90", "mean")
+            if "CANTIDAD_PROM_90_CIA" in _det_cd.columns:
+                _cd_agg_dict["CANTIDAD_PROM_90_CIA"] = ("CANTIDAD_PROM_90_CIA", "mean")
+
+            if _cd_agg_dict:
+                _det_cd_agg = _det_cd.groupby(["PERIODO", "SKU_PRODUCTO"], dropna=False).agg(
+                    **_cd_agg_dict
+                ).reset_index().rename(columns={"PERIODO": "FECHA"})
+            else:
+                _det_cd_agg = pd.DataFrame()
         else:
-            _det_cd = pd.DataFrame()
+            _det_cd_agg = pd.DataFrame()
 
         # ── Merge tienda + CD ─────────────────────────────────────────
-        if not _detail_merged.empty:
-            if not _det_cd.empty:
-                # Avoid duplicate columns
-                _cd_new = [c for c in _det_cd.columns if c not in _detail_merged.columns or c == "SKU_PRODUCTO"]
-                _detail_merged = _detail_merged.merge(
-                    _det_cd[_cd_new], on="SKU_PRODUCTO", how="left",
+        if not _det_agg.empty:
+            if not _det_cd_agg.empty:
+                _cd_new = [c for c in _det_cd_agg.columns
+                           if c not in _det_agg.columns or c in ("SKU_PRODUCTO", "FECHA")]
+                _det_agg = _det_agg.merge(
+                    _det_cd_agg[_cd_new], on=["FECHA", "SKU_PRODUCTO"], how="left",
                 )
+            _det_agg = _det_agg.sort_values(["FECHA", "IS_PCT_TIENDA"], ascending=[True, True])
 
-            _sort_col = "IS_PCT_TIENDA" if "IS_PCT_TIENDA" in _detail_merged.columns else None
-            if _sort_col:
-                _detail_merged = _detail_merged.sort_values(_sort_col, ascending=True)
+            st.caption(
+                f"{len(_det_agg):,} filas — {_det_agg['SKU_PRODUCTO'].nunique():,} SKUs "
+                f"x {_det_agg['FECHA'].nunique()} periodos"
+            )
+            st.dataframe(_det_agg, use_container_width=True, height=500)
+            download_buttons(_det_agg, prefix="instock_detalle_sku")
 
-            # Display with formatted IS%
-            _detail_display = _detail_merged.copy()
-            if "IS_PCT_TIENDA" in _detail_display.columns:
-                _detail_display["IS_PCT_TIENDA"] = _detail_display["IS_PCT_TIENDA"].apply(
-                    lambda v: f"{v*100:.1f}%"
-                )
-
-            st.dataframe(_detail_display, use_container_width=True, height=500)
-            # Download with numeric values (not formatted strings)
-            download_buttons(_detail_merged, prefix="instock_detalle_sku")
-
-        elif not _det_cd.empty:
-            # Only CD data available
-            st.dataframe(_det_cd, use_container_width=True, height=500)
-            download_buttons(_det_cd, prefix="instock_detalle_sku")
+        elif not _det_cd_agg.empty:
+            st.dataframe(_det_cd_agg, use_container_width=True, height=500)
+            download_buttons(_det_cd_agg, prefix="instock_detalle_sku")
         else:
-            st.info("Sin datos para la fecha mas reciente.")
+            st.info("Sin datos para el rango seleccionado.")
 
     # ── InStock Proyectado + Venta Perdida (tabs) ─────────────────────────
     st.markdown("---")
@@ -2410,8 +2424,8 @@ def render_instock_historico(conn):
             out = out[out["LINEA"].isin(sel_lineas)]
         if sel_marcas and "MARCA" in out.columns:
             out = out[out["MARCA"].isin(sel_marcas)]
-        if sel_mix != "Todos" and "MIX_OFICIAL" in out.columns:
-            out = out[out["MIX_OFICIAL"] == sel_mix]
+        if sel_mix and "MIX_OFICIAL" in out.columns:
+            out = out[out["MIX_OFICIAL"].isin(sel_mix)]
         if sel_abc and "CLASE_ABC" in out.columns:
             out = out[out["CLASE_ABC"].isin(sel_abc)]
         if sel_xyz and "CLASE_XYZ" in out.columns:
