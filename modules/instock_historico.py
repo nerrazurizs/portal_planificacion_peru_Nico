@@ -1880,6 +1880,20 @@ def render_instock_historico(conn):
     _ts_inicio = pd.Timestamp(fecha_inicio)
     _ts_fin = pd.Timestamp(fecha_fin)
 
+    # Warn if daily aggregation requested but range exceeds daily data coverage
+    if sel_agg_period == "D":
+        _daily_min = None
+        if not _df_daily_t.empty and "FECHA" in _df_daily_t.columns:
+            _daily_min = _df_daily_t["FECHA"].min()
+        elif not _df_daily_cd.empty and "FECHA" in _df_daily_cd.columns:
+            _daily_min = _df_daily_cd["FECHA"].min()
+        if _daily_min is not None and _ts_inicio < _daily_min:
+            st.warning(
+                f"⚠️ Los datos diarios cubren desde **{_daily_min.strftime('%d/%m/%Y')}**. "
+                f"Para fechas anteriores, los datos son semanales (solo lunes). "
+                f"Considera usar agregacion **Semanal** o **Mensual** para rangos mas largos."
+            )
+
     def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()
         if "FECHA" in out.columns:
@@ -2347,7 +2361,7 @@ def render_instock_historico(conn):
                 if _pc and _pc in _det_t.columns:
                     _agg_dict[f"{_pc}_SUM"] = (_pc, "sum")
             if _cols_map["cd"] in _det_t.columns:
-                _agg_dict["INSTOCK_CD"] = (_cols_map["cd"], "max")
+                _agg_dict["INSTOCK_CD"] = (_cols_map["cd"], "mean")
             # ABC-XYZ (take first, they're static per SKU)
             for _ac in ["CLASE_ABC", "CLASE_XYZ", "CLASE_FSN"]:
                 if _ac in _det_t.columns:
