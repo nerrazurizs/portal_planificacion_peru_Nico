@@ -2251,22 +2251,6 @@ def render_instock_historico(conn):
     st.markdown(f"### Detalle por SKU — Agregacion {sel_agg_label}")
 
     with st.expander("Ver tabla detalle SKU (con descarga)", expanded=False):
-        # Context about data coverage
-        _daily_dates = set()
-        if not _df_daily_t.empty and "FECHA" in _df_daily_t.columns:
-            _daily_dates = set(_df_daily_t["FECHA"].dropna().dt.date.unique())
-        _n_dates_in_range = 0
-        if not df_tienda.empty and "FECHA" in df_tienda.columns:
-            _n_dates_in_range = df_tienda["FECHA"].nunique()
-        if sel_agg_period == "D" and _n_dates_in_range > 0:
-            _pct_daily = sum(1 for d in df_tienda["FECHA"].dropna().dt.date.unique() if d in _daily_dates) / max(_n_dates_in_range, 1) * 100
-            if _pct_daily < 100:
-                st.caption(
-                    f"📌 **{_pct_daily:.0f}%** de las fechas en el rango tienen dato diario. "
-                    f"El resto son muestreos semanales (lunes). "
-                    f"Para IS% proporcional, usa agregacion **Semanal** o **Mensual**."
-                )
-
         _cols_map = _COL_MAP_TIENDA[sel_window]
 
         # Determine IS cols
