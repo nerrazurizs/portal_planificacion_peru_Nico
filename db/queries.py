@@ -46,7 +46,12 @@ _PROD = """(
         familia                 AS sublinea,
         marca,
         modelo,
-        mix_oficial,
+        CASE UPPER(TRIM(mix_oficial))
+            WHEN 'MIX' THEN 'MIX'
+            WHEN 'IO'  THEN 'IN & OUT'
+            WHEN 'FM'  THEN 'FUERA MIX'
+            ELSE UPPER(TRIM(mix_oficial))
+        END                         AS mix_oficial,
         mix,
         procedencia,
         cod_proveedor,
@@ -147,6 +152,15 @@ _COMPRAS = f"""(
 #   ht_in_stock_cd : cantidad_prom_365_cia
 # ============================================================
 
+# Sucursal wrapper: normaliza canal RETAIL→TIENDA (Peru usa RETAIL, Chile usa TIENDA)
+_SUCURSAL = """(
+    SELECT * EXCLUDE (canal_de_distribucion),
+        CASE WHEN canal_de_distribucion = 'RETAIL' THEN 'TIENDA'
+             ELSE canal_de_distribucion
+        END AS canal_de_distribucion
+    FROM db_syncros.public.coo_maestro_sucursal
+)"""
+
 _INSTOCK = """(
     SELECT
         fecha,
@@ -157,7 +171,12 @@ _INSTOCK = """(
         min_exhibicion,
         perfil,
         ultimo_costo,
-        mix_oficial,
+        CASE UPPER(TRIM(mix_oficial))
+            WHEN 'MIX' THEN 'MIX'
+            WHEN 'IO'  THEN 'IN & OUT'
+            WHEN 'FM'  THEN 'FUERA MIX'
+            ELSE UPPER(TRIM(mix_oficial))
+        END AS mix_oficial,
         cantidad_prom_90,
         cantidad_prom_180,
         NULL::FLOAT  AS cantidad_prom_365,
@@ -232,7 +251,7 @@ select
     else '< 3 meses'
   end as rango_antiguedad
 from db_supply.hst.ht_in_stock a
-left join db_syncros.public.coo_maestro_sucursal b
+left join {_SUCURSAL} b
   on a.cod_bodega = b.id_sucursal
 left join db_dimensiones.dim.dt_ccosto cc
   on TRIM(a.cod_bodega) = TRIM(cc.cod_ccosto)
@@ -462,7 +481,7 @@ WHERE estado = 'Pagado'
 QUERY_SYNCRO_CONFIG = "select * from db_syncros.public.coo_config_sku_sucursal"
 QUERY_SYNCRO_SUCURSAL = "select * from db_syncros.public.coo_maestro_sucursal"
 
-QUERY_DT_TIENDA = """
+QUERY_DT_TIENDA = f"""
 SELECT
     b.id_sucursal,
     b.descripcion_sucursal,
@@ -481,7 +500,7 @@ SELECT
     'Sin Zona'           AS zona,
     'Sin Operador'       AS operador,
     TRUE                 AS activa
-FROM db_syncros.public.coo_maestro_sucursal b
+FROM {_SUCURSAL} b
 """
 
 # Perfil resumen
@@ -582,7 +601,7 @@ select
   sum(a.aporte) as APORTE_TOTAL,
   sum(a.aporte) / nullif(sum(a.neto),0) as MARGEN
 from {_VCM} a
-left join db_syncros.public.coo_maestro_sucursal b
+left join {_SUCURSAL} b
   on a.cod_ccosto = b.id_sucursal
 where a.fecha >= date_trunc('year', dateadd('year', -1, current_date()))
   and a.fecha < date_trunc('month', current_date())
@@ -598,7 +617,7 @@ select
   sum(a.aporte)                                     as APORTE_TOTAL,
   sum(a.aporte) / nullif(sum(a.neto), 0)            as MARGEN
 from {_VCM} a
-left join db_syncros.public.coo_maestro_sucursal b
+left join {_SUCURSAL} b
   on a.cod_ccosto = b.id_sucursal
 where a.fecha >= date_trunc('year', current_date())
   and a.fecha <= current_date()
@@ -616,7 +635,7 @@ where a.fecha >= dateadd('year', -1, date_trunc('year', current_date()))
 """
 
 # Stock Proyeccion
-QUERY_STOCK_PROYECCION = """
+QUERY_STOCK_PROYECCION = f"""
 select
   a.fecha,
   a.sku_producto,
@@ -633,7 +652,7 @@ select
   SUM(a.stock_unidades) as stock_unidades,
   sum(a.min_exhibicion) as perfil_tiendas
 from db_supply.hst.ht_in_stock a
-left join db_syncros.public.coo_maestro_sucursal b
+left join {_SUCURSAL} b
   on a.cod_bodega = b.id_sucursal
 left join db_dimensiones.dim.dt_ccosto d
   on TRIM(a.cod_bodega) = TRIM(d.cod_ccosto)
@@ -722,7 +741,7 @@ left join (
            max(descripcion_sucursal) as descripcion_sucursal,
            max(canal_de_distribucion) as canal_de_distribucion,
            max(cast(cd as varchar)) as cd
-    from db_syncros.public.coo_maestro_sucursal
+    from {_SUCURSAL}
     group by id_sucursal
   ) b on a.cod_bodega = b.id_sucursal
 left join (
@@ -757,7 +776,7 @@ select
   sum(a.aporte) as aporte_total,
   sum(a.aporte) / nullif(sum(a.neto),0) as margen
 from {_VCM} a
-left join db_syncros.public.coo_maestro_sucursal b
+left join {_SUCURSAL} b
   on a.cod_ccosto = b.id_sucursal
 where a.fecha >= dateadd('month', -12, date_trunc('month', current_date()))
 group by 1,2,3,4
@@ -835,7 +854,7 @@ SELECT
     a.fecha,
     SUM(a.cantidad) as venta_qty
 FROM {_VCM} a
-LEFT JOIN db_syncros.public.coo_maestro_sucursal b ON a.cod_ccosto = b.id_sucursal
+LEFT JOIN {_SUCURSAL} b ON a.cod_ccosto = b.id_sucursal
 WHERE a.sku_producto IN ({{placeholders}})
   AND a.fecha BETWEEN %s AND %s
   AND b.canal_de_distribucion = 'TIENDA'
@@ -843,9 +862,9 @@ WHERE a.sku_producto IN ({{placeholders}})
 GROUP BY 1, 2, 3
 """
 
-QUERY_MIRROR_SUCURSAL = """
+QUERY_MIRROR_SUCURSAL = f"""
 SELECT id_sucursal, descripcion_sucursal, canal_de_distribucion as canal
-FROM db_syncros.public.coo_maestro_sucursal
+FROM {_SUCURSAL}
 """
 
 # Mirror monthly sales by sucursal + canal
@@ -858,7 +877,7 @@ SELECT
     DATE_TRUNC('month', a.fecha) as periodo,
     SUM(a.cantidad) as venta_qty
 FROM {_VCM} a
-LEFT JOIN db_syncros.public.coo_maestro_sucursal b
+LEFT JOIN {_SUCURSAL} b
     ON a.cod_ccosto = b.id_sucursal
 WHERE a.sku_producto = %s
   AND a.fecha BETWEEN %s AND %s
@@ -981,7 +1000,7 @@ group by 1, 2, 3
 """
 
 # Stock on hand actual por SKU
-QUERY_STOCK_ONHAND = """
+QUERY_STOCK_ONHAND = f"""
 select
     sub.sku_producto,
     sum(case when sub.canal_std = 'CD' then sub.stock_unidades else 0 end) as STOCK_CD,
@@ -1004,7 +1023,7 @@ from (
             else 'TIENDA'
         end as canal_std
     from db_supply.hst.ht_in_stock a
-    left join db_syncros.public.coo_maestro_sucursal b
+    left join {_SUCURSAL} b
         on a.cod_bodega = b.id_sucursal
     left join db_dimensiones.dim.dt_ccosto d
         on TRIM(a.cod_bodega) = TRIM(d.cod_ccosto)
@@ -1026,7 +1045,7 @@ select
     sum(a.cantidad) as unidades,
     sum(a.neto)     as neto
 from {_VCM} a
-left join db_syncros.public.coo_maestro_sucursal b
+left join {_SUCURSAL} b
   on a.cod_ccosto = b.id_sucursal
 where a.fecha >= dateadd('day', -90, current_date())
   and a.cantidad > 0
@@ -1065,7 +1084,7 @@ group by 1, 2
 """
 
 # InStock Store Detail snapshot
-QUERY_INSTOCK_STORE_DETAIL = """
+QUERY_INSTOCK_STORE_DETAIL = f"""
 select
     a.sku_producto,
     b.id_sucursal,
@@ -1074,7 +1093,7 @@ select
     a.stock_unidades,
     coalesce(a.cantidad_prom_90, 0) as cantidad_prom_90
 from db_supply.hst.ht_in_stock a
-join db_syncros.public.coo_maestro_sucursal b
+join {_SUCURSAL} b
     on a.cod_bodega = b.id_sucursal
 where b.canal_de_distribucion = 'TIENDA'
   and a.fecha = (
@@ -1086,7 +1105,7 @@ where b.canal_de_distribucion = 'TIENDA'
 """
 
 # Stock por SKU desglosado CD vs TIENDA
-QUERY_STOCK_HIGIENE = """
+QUERY_STOCK_HIGIENE = f"""
 select
     a.sku_producto,
     b.id_sucursal,
@@ -1095,7 +1114,7 @@ select
     sum(a.stock_unidades)  as stock_unidades,
     sum(a.min_exhibicion)  as perfil_tiendas
 from db_supply.hst.ht_in_stock a
-left join db_syncros.public.coo_maestro_sucursal b
+left join {_SUCURSAL} b
     on a.cod_bodega = b.id_sucursal
 where a.fecha = (
     select max(fecha)
@@ -1192,7 +1211,7 @@ select
                       and d.stock_unidades >= coalesce(d.cantidad_prom_365_cia, 0)
                       then 1 else 0 end), 0)                as instock_cd_365
 from {_INSTOCK} a
-join db_syncros.public.coo_maestro_sucursal b
+join {_SUCURSAL} b
     on a.cod_bodega = b.id_sucursal
 left join {_PROD} c
     on a.sku_producto = c.sku_producto
@@ -1294,7 +1313,7 @@ select
                       and d.stock_unidades >= coalesce(d.cantidad_prom_365_cia, 0)
                       then 1 else 0 end), 0)                as instock_cd_365
 from {_INSTOCK} a
-join db_syncros.public.coo_maestro_sucursal b
+join {_SUCURSAL} b
     on a.cod_bodega = b.id_sucursal
 left join {_PROD} c
     on a.sku_producto = c.sku_producto
@@ -1384,7 +1403,7 @@ with base as (
         b.canal_de_distribucion         as canal,
         sum(a.cantidad)                 as unidades
     from {_VCM} a
-    left join db_syncros.public.coo_maestro_sucursal b
+    left join {_SUCURSAL} b
         on a.cod_ccosto = b.id_sucursal
     where a.fecha >= dateadd('month', -12, date_trunc('month', current_date()))
       and a.cantidad > 0
@@ -1417,7 +1436,7 @@ with ventas as (
         b.canal_de_distribucion  as canal,
         sum(a.cantidad)          as unidades
     from {_VCM} a
-    left join db_syncros.public.coo_maestro_sucursal b
+    left join {_SUCURSAL} b
         on a.cod_ccosto = b.id_sucursal
     left join {_PROD} p
         on a.sku_producto = p.sku_producto
@@ -1500,7 +1519,7 @@ with ventas as (
         b.canal_de_distribucion  as canal,
         sum(a.cantidad)          as unidades
     from {_VCM} a
-    left join db_syncros.public.coo_maestro_sucursal b
+    left join {_SUCURSAL} b
         on a.cod_ccosto = b.id_sucursal
     where a.fecha >= dateadd('year', -2, current_date())
       and a.cantidad > 0
@@ -1590,7 +1609,7 @@ select
     sum(a.neto)             as neto_90d,
     count(distinct a.fecha) as dias_con_venta
 from {_VCM} a
-left join db_syncros.public.coo_maestro_sucursal b
+left join {_SUCURSAL} b
     on a.cod_ccosto = b.id_sucursal
 where a.fecha >= dateadd('day', -90, current_date())
   and a.cantidad > 0
@@ -1603,7 +1622,7 @@ group by 1, 2, 3, 4
 #       The Operaciones Supply module is disabled for Peru in app.py.
 # ===========================================================================
 
-QUERY_SUPPLY_PEDIDOS_TRANSFER = """
+QUERY_SUPPLY_PEDIDOS_TRANSFER = f"""
 select
     pt.cod_pedidotransferencia,
     pt.fecha_creacion,
@@ -1627,14 +1646,14 @@ select
 from db_supply.fct.ft_pedidotransferencia pt
 left join db_dimensiones.dim.dt_estadopedidotransferencia e
     on pt.cod_estadopedidotransferencia = e.cod_estadopedidotransferencia
-left join db_syncros.public.coo_maestro_sucursal bo
+left join {_SUCURSAL} bo
     on pt.cod_bodega_origen = bo.id_sucursal
-left join db_syncros.public.coo_maestro_sucursal bd
+left join {_SUCURSAL} bd
     on pt.cod_bodega_destino = bd.id_sucursal
 where pt.fecha_creacion >= dateadd('day', -90, current_date())
 """
 
-QUERY_SUPPLY_PICKING = """
+QUERY_SUPPLY_PICKING = f"""
 select
     pk.cod_picking,
     pk.cod_pedidotransferencia,
@@ -1658,15 +1677,15 @@ select
 from db_supply.fct.ft_picking pk
 left join db_dimensiones.dim.dt_estadopicking ep
     on pk.cod_estadopicking = ep.cod_estadopicking
-left join db_syncros.public.coo_maestro_sucursal bo
+left join {_SUCURSAL} bo
     on pk.cod_bodega_origen = bo.id_sucursal
-left join db_syncros.public.coo_maestro_sucursal bd
+left join {_SUCURSAL} bd
     on pk.cod_bodega_destino = bd.id_sucursal
 where pk.fecha_activacion >= dateadd('day', -90, current_date())
    or pk.fecha_inicio >= dateadd('day', -90, current_date())
 """
 
-QUERY_SUPPLY_STOCK_ACTUAL = """
+QUERY_SUPPLY_STOCK_ACTUAL = f"""
 select
     sa.cod_bodega,
     coalesce(b.descripcion_sucursal, sa.cod_bodega) as bodega_nombre,
@@ -1676,7 +1695,7 @@ select
     sa.stock_reservado,
     sa.cantidad_ordenada
 from db_supply.fct.ft_stock_actual sa
-left join db_syncros.public.coo_maestro_sucursal b
+left join {_SUCURSAL} b
     on sa.cod_bodega = b.id_sucursal
 where sa.stock_actual != 0 or sa.stock_reservado != 0
 """
@@ -1712,7 +1731,7 @@ SELECT
     COALESCE(b.descripcion_sucursal, 'Sin descripcion') AS descripcion_sucursal,
     SUM(a.stock_unidades) AS stock_unidades
 FROM {_INSTOCK} a
-LEFT JOIN db_syncros.public.coo_maestro_sucursal b
+LEFT JOIN {_SUCURSAL} b
     ON a.cod_bodega = b.id_sucursal
 WHERE a.fecha >= %s AND a.fecha <= %s
   AND COALESCE(b.canal_de_distribucion, 'TIENDA') NOT IN ('CD')
@@ -1740,7 +1759,7 @@ SELECT
          THEN SUM(v.neto) / SUM(v.cantidad)
          ELSE 0 END                    AS avg_price
 FROM {_VCM} v
-LEFT JOIN db_syncros.public.coo_maestro_sucursal b
+LEFT JOIN {_SUCURSAL} b
     ON v.cod_ccosto = b.id_sucursal
 WHERE v.fecha >= %s AND v.fecha <= %s
   AND v.cantidad > 0
@@ -1759,7 +1778,7 @@ SELECT
          THEN SUM(v.neto) / SUM(v.cantidad)
          ELSE 0 END                    AS avg_price
 FROM {_VCM} v
-LEFT JOIN db_syncros.public.coo_maestro_sucursal b
+LEFT JOIN {_SUCURSAL} b
     ON v.cod_ccosto = b.id_sucursal
 WHERE v.fecha >= %s AND v.fecha <= %s
   AND v.cantidad > 0
