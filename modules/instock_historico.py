@@ -1887,7 +1887,7 @@ def render_instock_historico(conn):
             _daily_min = _df_daily_t["FECHA"].min()
         elif not _df_daily_cd.empty and "FECHA" in _df_daily_cd.columns:
             _daily_min = _df_daily_cd["FECHA"].min()
-        if _daily_min is not None and _ts_inicio < _daily_min:
+        if _daily_min is not None and _ts_inicio < pd.Timestamp(_daily_min):
             st.warning(
                 f"⚠️ Los datos diarios cubren desde **{_daily_min.strftime('%d/%m/%Y')}**. "
                 f"Para fechas anteriores, los datos son semanales (solo lunes). "
