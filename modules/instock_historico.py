@@ -129,6 +129,94 @@ def _aggregate_instock_cd(
     return agg.drop(columns=["_sum_is", "_count"])
 
 
+def _reaggregate_by_period(
+    df: pd.DataFrame,
+    period: str,
+    is_tienda: bool,
+    window: str,
+    filter_cd: bool = False,
+    solo_perfil: bool = False,
+    group_cols: list[str] | None = None,
+) -> pd.DataFrame:
+    """Re-aggregate SKU×date data into period buckets with correct IS%.
+
+    Parameters
+    ----------
+    period : str
+        ``"D"`` daily (delegates to existing funcs), ``"W"`` weekly,
+        ``"M"`` monthly, ``"Q"`` quarterly.
+    is_tienda : bool
+        True → tienda logic, False → CD logic.
+    group_cols : list[str] | None
+        Extra dimension columns (e.g. ``["AREA"]``).  ``FECHA`` is always
+        included and should **not** appear here.
+    """
+    extra = group_cols or []
+
+    # Daily → delegate to existing functions (no re-aggregation)
+    if period == "D":
+        if is_tienda:
+            return _aggregate_instock_tienda(
+                df, window, ["FECHA"] + extra,
+                filter_cd=filter_cd, solo_perfil=solo_perfil,
+            )
+        return _aggregate_instock_cd(df, window, ["FECHA"] + extra)
+
+    if df.empty:
+        cols = ["FECHA"] + extra + ["INSTOCK_PCT"]
+        cols.append("N_COMBINACIONES" if is_tienda else "N_SKUS")
+        return pd.DataFrame(columns=cols)
+
+    work = df.copy()
+    # Bucket dates
+    work["_PERIODO"] = work["FECHA"].dt.to_period(period).dt.start_time
+
+    if is_tienda:
+        cols_map = _COL_MAP_TIENDA[window]
+        if solo_perfil and cols_map["is_perfil"] in work.columns and cols_map["n_perfil"] in work.columns:
+            is_col, n_col = cols_map["is_perfil"], cols_map["n_perfil"]
+        elif cols_map["n"] in work.columns:
+            is_col, n_col = cols_map["is"], cols_map["n"]
+        else:
+            is_col, n_col = cols_map["is"], "N_TIENDAS"
+
+        if filter_cd:
+            work = work[work[_CD_FILTER_COL] >= 1]
+        if work.empty:
+            return pd.DataFrame(columns=["FECHA"] + extra + ["INSTOCK_PCT", "N_COMBINACIONES"])
+
+        agg_dict: dict = {
+            "_sum_is": (is_col, "sum"),
+            "_sum_n": (n_col, "sum"),
+        }
+        # Stock positions → mean (not sum, it's a snapshot)
+        for sc in ["STOCK_UND_TIENDA", "STOCK_COSTO_TIENDA"]:
+            if sc in work.columns:
+                agg_dict[sc] = (sc, "mean")
+
+        agg = work.groupby(["_PERIODO"] + extra, dropna=False).agg(**agg_dict).reset_index()
+        agg["INSTOCK_PCT"] = np.where(agg["_sum_n"] > 0, agg["_sum_is"] / agg["_sum_n"], 0.0)
+        agg["N_COMBINACIONES"] = agg["_sum_n"]
+        agg = agg.drop(columns=["_sum_is", "_sum_n"])
+    else:
+        cd_col = _COL_MAP_CD[window]
+        agg_dict = {
+            "_sum_is": (cd_col, "sum"),
+            "_count": (cd_col, "count"),
+        }
+        for sc in ["STOCK_UND_CD", "STOCK_COSTO_CD"]:
+            if sc in work.columns:
+                agg_dict[sc] = (sc, "mean")
+
+        agg = work.groupby(["_PERIODO"] + extra, dropna=False).agg(**agg_dict).reset_index()
+        agg["INSTOCK_PCT"] = np.where(agg["_count"] > 0, agg["_sum_is"] / agg["_count"], 0.0)
+        agg["N_SKUS"] = agg["_count"]
+        agg = agg.drop(columns=["_sum_is", "_count"])
+
+    agg = agg.rename(columns={"_PERIODO": "FECHA"})
+    return agg
+
+
 def _format_pct(v: float) -> str:
     """Format 0-1 float as percentage string."""
     return f"{v * 100:.1f}%"
@@ -160,6 +248,7 @@ def _build_pivot_table(
     agg_by_date_dim: pd.DataFrame,
     dim_col: str,
     top_n: int = 15,
+    agg_period: str = "D",
 ) -> pd.DataFrame | None:
     """Build a pivot table: rows = dimension, columns = dates, values = InStock %.
 
@@ -185,9 +274,19 @@ def _build_pivot_table(
         aggfunc="mean",
     )
 
-    # Sort dates ascending and format as dd/mm
+    # Sort dates ascending and format adaptively
     pvt = pvt.reindex(columns=sorted(pvt.columns))
-    pvt.columns = [c.strftime("%d/%m") if hasattr(c, "strftime") else str(c) for c in pvt.columns]
+
+    def _fmt_col(c):
+        if not hasattr(c, "strftime"):
+            return str(c)
+        if agg_period == "M":
+            return c.strftime("%m/%Y")
+        if agg_period == "Q":
+            return f"Q{(c.month - 1) // 3 + 1}/{c.year}"
+        return c.strftime("%d/%m")
+
+    pvt.columns = [_fmt_col(c) for c in pvt.columns]
 
     # Add Total row (weighted by N_COMBINACIONES / N_SKUS if available)
     if not filtered.empty:
@@ -1699,31 +1798,48 @@ def render_instock_historico(conn):
             sel_window = _WINDOW_OPTIONS[sel_window_label]
 
         with fc2:
-            if is_daily:
-                date_range_opts = {
-                    "Ultima semana": 7,
-                    "Ultimas 2 semanas": 14,
-                    "Ultimo mes (30d)": 30,
-                }
-                sel_range_label = st.selectbox(
-                    "Rango de Fechas",
-                    list(date_range_opts.keys()),
-                    index=2,
-                )
+            # Determine available date range from loaded data
+            _all_fechas = pd.concat([
+                df_tienda_raw["FECHA"].dropna() if not df_tienda_raw.empty else pd.Series(dtype="datetime64[ns]"),
+                df_cd_raw["FECHA"].dropna() if not df_cd_raw.empty else pd.Series(dtype="datetime64[ns]"),
+            ])
+            if _all_fechas.empty:
+                _min_date = date.today() - timedelta(days=30)
+                _max_date = date.today()
             else:
-                date_range_opts = {
-                    "Ultimos 3 meses": 90,
-                    "Ultimos 6 meses": 180,
-                    "Ultimo ano": 365,
-                    "Ultimos 2 anos": 730,
-                    "Todo (desde 2023)": 9999,
-                }
-                sel_range_label = st.selectbox(
-                    "Rango de Fechas",
-                    list(date_range_opts.keys()),
-                    index=4,  # default: Todo
+                _min_date = _all_fechas.min().date()
+                _max_date = _all_fechas.max().date()
+
+            _default_start = _max_date - timedelta(days=30 if is_daily else 90)
+            if _default_start < _min_date:
+                _default_start = _min_date
+
+            st.markdown("**Rango de Fechas**")
+            _dc1, _dc2 = st.columns(2)
+            with _dc1:
+                fecha_inicio = st.date_input(
+                    "Desde", value=_default_start,
+                    min_value=_min_date, max_value=_max_date,
+                    key="is_fecha_ini",
                 )
-            sel_days = date_range_opts[sel_range_label]
+            with _dc2:
+                fecha_fin = st.date_input(
+                    "Hasta", value=_max_date,
+                    min_value=_min_date, max_value=_max_date,
+                    key="is_fecha_fin",
+                )
+
+            _AGG_OPTIONS = {
+                "Diario": "D", "Semanal": "W",
+                "Mensual": "M", "Trimestral": "Q",
+            }
+            sel_agg_label = st.selectbox(
+                "Nivel de Agregacion",
+                list(_AGG_OPTIONS.keys()),
+                index=0 if is_daily else 1,
+                key="is_agg_level",
+            )
+            sel_agg_period = _AGG_OPTIONS[sel_agg_label]
 
         with fc3:
             filter_cd_toggle = st.toggle(
@@ -1766,12 +1882,13 @@ def render_instock_historico(conn):
             sel_abc, sel_xyz, sel_fsn = [], [], []
 
     # ── Apply filters ─────────────────────────────────────────────────────
-    cutoff = pd.Timestamp.now() - pd.Timedelta(days=sel_days)
+    _ts_inicio = pd.Timestamp(fecha_inicio)
+    _ts_fin = pd.Timestamp(fecha_fin)
 
     def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()
         if "FECHA" in out.columns:
-            out = out[out["FECHA"] >= cutoff]
+            out = out[(out["FECHA"] >= _ts_inicio) & (out["FECHA"] <= _ts_fin)]
         if sel_areas:
             out = out[out["AREA"].isin(sel_areas)]
         if sel_lineas:
@@ -1797,11 +1914,13 @@ def render_instock_historico(conn):
         return
 
     # ── Compute overall InStock series ────────────────────────────────────
-    ts_tienda = _aggregate_instock_tienda(
-        df_tienda, sel_window, ["FECHA"],
+    ts_tienda = _reaggregate_by_period(
+        df_tienda, sel_agg_period, is_tienda=True, window=sel_window,
         filter_cd=filter_cd_toggle, solo_perfil=solo_perfil_toggle,
     )
-    ts_cd = _aggregate_instock_cd(df_cd, sel_window, ["FECHA"])
+    ts_cd = _reaggregate_by_period(
+        df_cd, sel_agg_period, is_tienda=False, window=sel_window,
+    )
 
     # ── KPI cards ─────────────────────────────────────────────────────────
     def _latest_and_delta(ts: pd.DataFrame) -> tuple[float, float]:
@@ -2083,43 +2202,49 @@ def render_instock_historico(conn):
 
     # ── Pivot tables: Disponibilidad por Area (like PowerBI) ──────────────
     st.markdown("---")
-    st.markdown("### Disponibilidad por Area — Evolucion {}"
-                .format("Diaria" if is_daily else "Semanal"))
+    st.markdown(f"### Disponibilidad por Area — Evolucion {sel_agg_label}")
 
     pvt_col1, pvt_col2 = st.columns(2)
 
     # Tienda pivot by Area × Date
-    area_date_t = _aggregate_instock_tienda(
-        df_tienda, sel_window, ["FECHA", "AREA"],
+    area_date_t = _reaggregate_by_period(
+        df_tienda, sel_agg_period, is_tienda=True, window=sel_window,
         filter_cd=filter_cd_toggle, solo_perfil=solo_perfil_toggle,
+        group_cols=["AREA"],
     )
-    pvt_tienda = _build_pivot_table(area_date_t, "AREA", top_n=20)
+    pvt_tienda = _build_pivot_table(area_date_t, "AREA", top_n=20, agg_period=sel_agg_period)
     with pvt_col1:
         _render_pivot_styled(pvt_tienda, f"InStock Tiendas — {sel_window_label}")
 
     # CD pivot by Area × Date
-    area_date_cd = _aggregate_instock_cd(df_cd, sel_window, ["FECHA", "AREA"])
-    pvt_cd = _build_pivot_table(area_date_cd, "AREA", top_n=20)
+    area_date_cd = _reaggregate_by_period(
+        df_cd, sel_agg_period, is_tienda=False, window=sel_window,
+        group_cols=["AREA"],
+    )
+    pvt_cd = _build_pivot_table(area_date_cd, "AREA", top_n=20, agg_period=sel_agg_period)
     with pvt_col2:
         _render_pivot_styled(pvt_cd, f"InStock CD — {sel_window_label}")
 
     # ── Pivot tables: by Linea ────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("### Disponibilidad por Linea — Evolucion {}"
-                .format("Diaria" if is_daily else "Semanal"))
+    st.markdown(f"### Disponibilidad por Linea — Evolucion {sel_agg_label}")
 
     pvt_col3, pvt_col4 = st.columns(2)
 
-    linea_date_t = _aggregate_instock_tienda(
-        df_tienda, sel_window, ["FECHA", "LINEA"],
+    linea_date_t = _reaggregate_by_period(
+        df_tienda, sel_agg_period, is_tienda=True, window=sel_window,
         filter_cd=filter_cd_toggle, solo_perfil=solo_perfil_toggle,
+        group_cols=["LINEA"],
     )
-    pvt_linea_t = _build_pivot_table(linea_date_t, "LINEA", top_n=20)
+    pvt_linea_t = _build_pivot_table(linea_date_t, "LINEA", top_n=20, agg_period=sel_agg_period)
     with pvt_col3:
         _render_pivot_styled(pvt_linea_t, f"InStock Tiendas por Linea — {sel_window_label}")
 
-    linea_date_cd = _aggregate_instock_cd(df_cd, sel_window, ["FECHA", "LINEA"])
-    pvt_linea_cd = _build_pivot_table(linea_date_cd, "LINEA", top_n=20)
+    linea_date_cd = _reaggregate_by_period(
+        df_cd, sel_agg_period, is_tienda=False, window=sel_window,
+        group_cols=["LINEA"],
+    )
+    pvt_linea_cd = _build_pivot_table(linea_date_cd, "LINEA", top_n=20, agg_period=sel_agg_period)
     with pvt_col4:
         _render_pivot_styled(pvt_linea_cd, f"InStock CD por Linea — {sel_window_label}")
 
@@ -2183,66 +2308,95 @@ def render_instock_historico(conn):
     else:
         st.info("Sin datos de tiendas para grafico de evolucion.")
 
-    # ── Detail table: SKU drill-down (latest date) ────────────────────────
+    # ── Detail table: SKU drill-down (latest date, tienda+CD merged) ─────
     st.markdown("---")
     st.markdown("### Detalle por SKU — Ultima Fecha")
 
     with st.expander("Ver tabla detalle SKU", expanded=False):
-        cols_map = _COL_MAP_TIENDA[sel_window]
+        _cols_map = _COL_MAP_TIENDA[sel_window]
 
+        # ── Tienda detail ─────────────────────────────────────────────
         if not df_tienda.empty:
-            latest_date_t = df_tienda["FECHA"].max()
-            detail = df_tienda[df_tienda["FECHA"] == latest_date_t].copy()
-
+            _latest_t = df_tienda["FECHA"].max()
+            _det_t = df_tienda[df_tienda["FECHA"] == _latest_t].copy()
             if filter_cd_toggle:
-                detail = detail[detail[_CD_FILTER_COL] >= 1]
+                _det_t = _det_t[_det_t[_CD_FILTER_COL] >= 1]
 
-            # Choose perfil or all columns for detail (fallback chain)
             if (solo_perfil_toggle
-                    and cols_map["is_perfil"] in detail.columns
-                    and cols_map["n_perfil"] in detail.columns):
-                is_col = cols_map["is_perfil"]
-                n_col = cols_map["n_perfil"]
-            elif cols_map["n"] in detail.columns:
-                is_col = cols_map["is"]
-                n_col = cols_map["n"]
+                    and _cols_map["is_perfil"] in _det_t.columns
+                    and _cols_map["n_perfil"] in _det_t.columns):
+                _is_col, _n_col = _cols_map["is_perfil"], _cols_map["n_perfil"]
+            elif _cols_map["n"] in _det_t.columns:
+                _is_col, _n_col = _cols_map["is"], _cols_map["n"]
             else:
-                is_col = cols_map["is"]
-                n_col = "N_TIENDAS"  # Legacy fallback
+                _is_col, _n_col = _cols_map["is"], "N_TIENDAS"
 
-            detail["INSTOCK_TIENDA_PCT"] = np.where(
-                detail[n_col] > 0,
-                detail[is_col] / detail[n_col],
-                0.0,
-            )
-            cd_col = cols_map["cd"]
-
-            n_label = n_col
-            display_cols = [
-                "SKU_PRODUCTO", "AREA", "LINEA", "SUBLINEA", "MARCA",
-                n_label, is_col, "INSTOCK_TIENDA_PCT",
-                cd_col, "STOCK_UND_TIENDA",
-            ]
-            display_cols = [c for c in display_cols if c in detail.columns]
-
-            detail_display = detail[display_cols].sort_values(
-                "INSTOCK_TIENDA_PCT", ascending=True,
+            _det_t["IS_PCT_TIENDA"] = np.where(
+                _det_t[_n_col] > 0, _det_t[_is_col] / _det_t[_n_col], 0.0,
             )
 
-            # Format percentages
-            if "INSTOCK_TIENDA_PCT" in detail_display.columns:
-                detail_display["INSTOCK_TIENDA_PCT"] = detail_display["INSTOCK_TIENDA_PCT"].apply(
+            # Build column list
+            _base = ["SKU_PRODUCTO", "AREA", "LINEA", "SUBLINEA", "MARCA", "MIX_OFICIAL"]
+            _metrics = [_n_col, _is_col, "IS_PCT_TIENDA",
+                        "STOCK_UND_TIENDA", "STOCK_COSTO_TIENDA", _cols_map["cd"]]
+            # Add perfil cols if available and not already the main cols
+            if not solo_perfil_toggle:
+                for _pc in [_cols_map.get("n_perfil"), _cols_map.get("is_perfil")]:
+                    if _pc and _pc in _det_t.columns and _pc not in _metrics:
+                        _metrics.append(_pc)
+            # ABC-XYZ
+            for _ac in ["CLASE_ABC", "CLASE_XYZ", "CLASE_FSN"]:
+                if _ac in _det_t.columns:
+                    _metrics.append(_ac)
+
+            _all_cols = [c for c in (_base + _metrics) if c in _det_t.columns]
+            _detail_merged = _det_t[_all_cols].copy()
+        else:
+            _detail_merged = pd.DataFrame()
+
+        # ── CD detail ─────────────────────────────────────────────────
+        if not df_cd.empty:
+            _latest_cd = df_cd["FECHA"].max()
+            _det_cd = df_cd[df_cd["FECHA"] == _latest_cd].copy()
+            _cd_keep = ["SKU_PRODUCTO"]
+            for _cc in ["STOCK_UND_CD", "STOCK_COSTO_CD", "INSTOCK_CD_90",
+                         "CANTIDAD_PROM_90_CIA"]:
+                if _cc in _det_cd.columns:
+                    _cd_keep.append(_cc)
+            _det_cd = _det_cd[_cd_keep].groupby("SKU_PRODUCTO", as_index=False).first()
+        else:
+            _det_cd = pd.DataFrame()
+
+        # ── Merge tienda + CD ─────────────────────────────────────────
+        if not _detail_merged.empty:
+            if not _det_cd.empty:
+                # Avoid duplicate columns
+                _cd_new = [c for c in _det_cd.columns if c not in _detail_merged.columns or c == "SKU_PRODUCTO"]
+                _detail_merged = _detail_merged.merge(
+                    _det_cd[_cd_new], on="SKU_PRODUCTO", how="left",
+                )
+
+            _sort_col = "IS_PCT_TIENDA" if "IS_PCT_TIENDA" in _detail_merged.columns else None
+            if _sort_col:
+                _detail_merged = _detail_merged.sort_values(_sort_col, ascending=True)
+
+            # Display with formatted IS%
+            _detail_display = _detail_merged.copy()
+            if "IS_PCT_TIENDA" in _detail_display.columns:
+                _detail_display["IS_PCT_TIENDA"] = _detail_display["IS_PCT_TIENDA"].apply(
                     lambda v: f"{v*100:.1f}%"
                 )
 
-            st.dataframe(
-                detail_display,
-                use_container_width=True,
-                height=500,
-            )
-            download_buttons(detail_display, prefix="instock_detalle_sku")
+            st.dataframe(_detail_display, use_container_width=True, height=500)
+            # Download with numeric values (not formatted strings)
+            download_buttons(_detail_merged, prefix="instock_detalle_sku")
+
+        elif not _det_cd.empty:
+            # Only CD data available
+            st.dataframe(_det_cd, use_container_width=True, height=500)
+            download_buttons(_det_cd, prefix="instock_detalle_sku")
         else:
-            st.info("Sin datos de tiendas para la fecha mas reciente.")
+            st.info("Sin datos para la fecha mas reciente.")
 
     # ── InStock Proyectado + Venta Perdida (tabs) ─────────────────────────
     st.markdown("---")
