@@ -316,9 +316,12 @@ def _build_combined_summary_table(
 
     combined = pd.concat([combined, pd.DataFrame([total])], ignore_index=True)
 
-    # Sort by IS_TIENDA desc (Total at bottom)
+    # Sort by IS_TIENDA desc (Total at bottom) — fallback to IS_CD if no store data
     mask_total = combined[group_col] == "TOTAL"
-    top = combined[~mask_total].sort_values("IS_TIENDA", ascending=False)
+    _sort_col = "IS_TIENDA" if "IS_TIENDA" in combined.columns else (
+        "IS_CD" if "IS_CD" in combined.columns else None
+    )
+    top = combined[~mask_total].sort_values(_sort_col, ascending=False) if _sort_col else combined[~mask_total]
     combined = pd.concat([top, combined[mask_total]], ignore_index=True)
 
     return combined
