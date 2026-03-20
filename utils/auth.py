@@ -86,13 +86,40 @@ def _hash_password(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
+_DEFAULT_HASH = _hash_password("udechile")
+
+_DEFAULT_USERS = {
+    "camilo.onate@dorel.cl": {
+        "nombre": "Camilo Onate", "cargo": "Administrador", "rol": "admin",
+        "jefe": None, "areas": ["*"], "password_hash": _DEFAULT_HASH,
+        "must_change_password": False, "activo": True,
+    },
+    "sebastian.gibaja@comexa.com.pe": {
+        "nombre": "Sebastian Gibaja", "cargo": "Planificador", "rol": "jefe",
+        "jefe": None, "areas": ["*"], "password_hash": _DEFAULT_HASH,
+        "must_change_password": False, "activo": True,
+    },
+    "kevin.diaz@comexa.com.pe": {
+        "nombre": "Kevin Diaz", "cargo": "Planificador", "rol": "jefe",
+        "jefe": None, "areas": ["*"], "password_hash": _DEFAULT_HASH,
+        "must_change_password": False, "activo": True,
+    },
+    "angela.berrospi@comexa.com.pe": {
+        "nombre": "Angela Berrospi", "cargo": "Planificador", "rol": "jefe",
+        "jefe": None, "areas": ["*"], "password_hash": _DEFAULT_HASH,
+        "must_change_password": False, "activo": True,
+    },
+}
+
+
 def load_users() -> dict:
     """Read ``users.json`` and return the users dict.
 
-    Returns an empty dict if the file is missing or malformed.
+    If the file is missing, creates it with default users (password: udechile).
     """
     if not _USERS_FILE.exists():
-        return {}
+        save_users(_DEFAULT_USERS)
+        return dict(_DEFAULT_USERS)
     try:
         with open(_USERS_FILE, "r", encoding="utf-8") as fh:
             data = json.load(fh)
