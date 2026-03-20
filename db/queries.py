@@ -1453,6 +1453,39 @@ where a.fecha >= %s
   and a.fecha <= %s
 """
 
+# InStock por Tienda individual — fecha × tienda × (area, linea, marca, mix)
+# Permite filtrar por producto en Python y ver la curva de IS por sucursal.
+# Parametrizado: %s fecha_inicio, %s fecha_fin
+QUERY_INSTOCK_POR_TIENDA = f"""
+select
+    a.fecha,
+    b.id_sucursal,
+    b.descripcion_sucursal                             as nom_sucursal,
+    c.area,
+    c.linea,
+    c.marca,
+    c.mix_oficial,
+    count(*)                                           as n_sku_total,
+    sum(case when a.perfil = 'SI' then 1 else 0 end)  as n_sku_perfil,
+    sum(case when a.stock_unidades > 0
+             and a.stock_unidades >= coalesce(a.cantidad_prom_90, 0)
+             then 1 else 0 end)                        as is90_ok,
+    sum(case when a.perfil = 'SI'
+             and a.stock_unidades > 0
+             and a.stock_unidades >= coalesce(a.cantidad_prom_90, 0)
+             then 1 else 0 end)                        as is90_perfil_ok,
+    sum(coalesce(a.stock_unidades, 0))                 as stock_und
+from {_INSTOCK} a
+join {_SUCURSAL} b
+    on a.cod_bodega = b.id_sucursal
+left join {_PROD} c
+    on a.sku_producto = c.sku_producto
+where b.canal_de_distribucion = 'TIENDA'
+  and a.fecha >= %s
+  and a.fecha <= %s
+group by 1, 2, 3, 4, 5, 6, 7
+"""
+
 # Ventas diarias por SKU (ultimo ano, patrones)
 QUERY_VENTAS_DIARIAS_PATRON = f"""
 select

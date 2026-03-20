@@ -1969,6 +1969,14 @@ def render_instock_historico(conn):
     # Collect figures for PPT export
     figures_export: dict[str, go.Figure] = {}
 
+    # Shared color palette for multi-trace charts
+    _palette = [
+        COLORS["primary"], COLORS["status_at_risk"], COLORS["status_on_track"],
+        COLORS["tertiary_teal"], COLORS["tertiary_pink"], COLORS["secondary"],
+        COLORS["status_critical"], COLORS["status_en_curso"],
+        "#FF6F00", "#6D4C41", "#546E7A", "#7B1FA2",
+    ]
+
     # ── Dynamic Y-axis range based on data ─────────────────────────────
     _all_pcts = []
     if not ts_tienda.empty:
@@ -2212,12 +2220,6 @@ def render_instock_historico(conn):
             legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
         ))
 
-        _palette = [
-            COLORS["primary"], COLORS["status_at_risk"], COLORS["status_on_track"],
-            COLORS["tertiary_teal"], COLORS["tertiary_pink"], COLORS["secondary"],
-            COLORS["status_critical"], COLORS["status_en_curso"],
-            "#FF6F00", "#6D4C41", "#546E7A", "#7B1FA2",
-        ]
         areas_sorted = (
             area_date_t.groupby("AREA")["INSTOCK_PCT"].mean()
             .sort_values(ascending=False)
@@ -2245,6 +2247,189 @@ def render_instock_historico(conn):
         figures_export["InStock Tiendas por Area (evolucion)"] = fig_area_ts
     else:
         st.info("Sin datos de tiendas para grafico de evolucion.")
+
+    # ── Chart: InStock por Tienda Individual ──────────────────────────────
+    st.markdown("---")
+    st.markdown("### Evolucion InStock por Tienda")
+    st.caption(
+        "Selecciona tiendas individuales para comparar su curva de InStock. "
+        "Los filtros de Area, Linea, Marca y Mix se aplican sobre los SKUs considerados."
+    )
+
+    # Load per-store data (cached, same date range)
+    with lottie_spinner("snowflake"):
+        _df_store_raw = cq.instock_por_tienda(conn, _fi, _ff)
+
+    if not _df_store_raw.empty:
+        # Coerce numerics
+        for _sc in ["N_SKU_TOTAL", "N_SKU_PERFIL", "IS90_OK", "IS90_PERFIL_OK", "STOCK_UND"]:
+            if _sc in _df_store_raw.columns:
+                _df_store_raw[_sc] = pd.to_numeric(_df_store_raw[_sc], errors="coerce").fillna(0)
+        if "FECHA" in _df_store_raw.columns:
+            _df_store_raw["FECHA"] = pd.to_datetime(_df_store_raw["FECHA"], errors="coerce")
+
+        # Apply same product filters
+        _df_store = _df_store_raw.copy()
+        if sel_areas and "AREA" in _df_store.columns:
+            _df_store = _df_store[_df_store["AREA"].isin(sel_areas)]
+        if sel_lineas and "LINEA" in _df_store.columns:
+            _df_store = _df_store[_df_store["LINEA"].isin(sel_lineas)]
+        if sel_marcas and "MARCA" in _df_store.columns:
+            _df_store = _df_store[_df_store["MARCA"].isin(sel_marcas)]
+        if sel_mix and "MIX_OFICIAL" in _df_store.columns:
+            _df_store = _df_store[_df_store["MIX_OFICIAL"].isin(sel_mix)]
+
+        # Aggregate to fecha × tienda level (sum across product dims)
+        _store_agg = _df_store.groupby(
+            ["FECHA", "ID_SUCURSAL", "NOM_SUCURSAL"], dropna=False
+        ).agg(
+            N_SKU_TOTAL=("N_SKU_TOTAL", "sum"),
+            N_SKU_PERFIL=("N_SKU_PERFIL", "sum"),
+            IS90_OK=("IS90_OK", "sum"),
+            IS90_PERFIL_OK=("IS90_PERFIL_OK", "sum"),
+            STOCK_UND=("STOCK_UND", "sum"),
+        ).reset_index()
+
+        # IS% per store per day
+        if solo_perfil_toggle:
+            _store_agg["IS_PCT"] = np.where(
+                _store_agg["N_SKU_PERFIL"] > 0,
+                _store_agg["IS90_PERFIL_OK"] / _store_agg["N_SKU_PERFIL"],
+                0.0,
+            )
+        else:
+            _store_agg["IS_PCT"] = np.where(
+                _store_agg["N_SKU_TOTAL"] > 0,
+                _store_agg["IS90_OK"] / _store_agg["N_SKU_TOTAL"],
+                0.0,
+            )
+
+        # Re-aggregate by selected period (W, M, Q)
+        if sel_agg_period != "D":
+            _store_agg["_PERIODO"] = _store_agg["FECHA"].dt.to_period(sel_agg_period).dt.start_time
+            _store_agg = _store_agg.groupby(
+                ["_PERIODO", "ID_SUCURSAL", "NOM_SUCURSAL"], dropna=False
+            ).agg(
+                N_SKU_TOTAL=("N_SKU_TOTAL", "sum"),
+                N_SKU_PERFIL=("N_SKU_PERFIL", "sum"),
+                IS90_OK=("IS90_OK", "sum"),
+                IS90_PERFIL_OK=("IS90_PERFIL_OK", "sum"),
+                STOCK_UND=("STOCK_UND", "mean"),
+            ).reset_index()
+            if solo_perfil_toggle:
+                _store_agg["IS_PCT"] = np.where(
+                    _store_agg["N_SKU_PERFIL"] > 0,
+                    _store_agg["IS90_PERFIL_OK"] / _store_agg["N_SKU_PERFIL"],
+                    0.0,
+                )
+            else:
+                _store_agg["IS_PCT"] = np.where(
+                    _store_agg["N_SKU_TOTAL"] > 0,
+                    _store_agg["IS90_OK"] / _store_agg["N_SKU_TOTAL"],
+                    0.0,
+                )
+            _store_agg = _store_agg.rename(columns={"_PERIODO": "FECHA"})
+
+        # Store selector — sorted by avg IS ascending (worst first)
+        _store_avg = (
+            _store_agg.groupby(["ID_SUCURSAL", "NOM_SUCURSAL"])["IS_PCT"]
+            .mean().reset_index()
+            .sort_values("IS_PCT", ascending=True)
+        )
+        _store_options = _store_avg.apply(
+            lambda r: f"{r['NOM_SUCURSAL']} ({r['IS_PCT']*100:.0f}%)", axis=1
+        ).tolist()
+        _store_ids = _store_avg["ID_SUCURSAL"].tolist()
+
+        _sc1, _sc2 = st.columns([3, 1])
+        with _sc1:
+            sel_stores_labels = st.multiselect(
+                "Tiendas (ordenadas por peor IS%)",
+                options=_store_options,
+                default=_store_options[:5] if len(_store_options) >= 5 else _store_options,
+                key="is_store_sel",
+            )
+        with _sc2:
+            st.metric("Total Tiendas", f"{len(_store_options)}")
+
+        # Map labels back to IDs
+        _sel_store_ids = [
+            _store_ids[_store_options.index(lbl)]
+            for lbl in sel_stores_labels if lbl in _store_options
+        ]
+
+        if _sel_store_ids:
+            _store_plot = _store_agg[_store_agg["ID_SUCURSAL"].isin(_sel_store_ids)].copy()
+
+            # Dynamic Y-axis
+            _sp = _store_plot["IS_PCT"].dropna().tolist()
+            if _sp:
+                _sy_min = max(0, min(_sp) - 0.05)
+                _sy_max = min(1.02, max(_sp) + 0.03)
+                if _sy_max - _sy_min < 0.15:
+                    _sy_mid = (_sy_min + _sy_max) / 2
+                    _sy_min = max(0, _sy_mid - 0.075)
+                    _sy_max = min(1.02, _sy_mid + 0.075)
+            else:
+                _sy_min, _sy_max = 0, 1.02
+
+            fig_store = go.Figure(layout=dorel_layout(
+                title=dict(
+                    text=f"InStock por Tienda — {sel_window_label} — {sel_agg_label}",
+                    font_size=14, x=0.5,
+                ),
+                yaxis=dict(
+                    tickformat=".0%", title="InStock %",
+                    gridcolor="#ECECEC", range=[_sy_min, _sy_max],
+                ),
+                xaxis=dict(title="", gridcolor="#ECECEC"),
+                height=500,
+                legend=dict(orientation="v", yanchor="top", y=1.0, xanchor="left", x=1.02,
+                            font_size=9),
+            ))
+
+            _smkr_sz = 2 if len(_store_plot["FECHA"].unique()) > 30 else 4
+
+            for idx, sid in enumerate(_sel_store_ids):
+                sub = _store_plot[_store_plot["ID_SUCURSAL"] == sid].sort_values("FECHA")
+                name = sub["NOM_SUCURSAL"].iloc[0] if not sub.empty else str(sid)
+                fig_store.add_trace(go.Scatter(
+                    x=sub["FECHA"], y=sub["IS_PCT"],
+                    mode="lines+markers",
+                    name=name,
+                    line=dict(color=_palette[idx % len(_palette)], width=2),
+                    marker=dict(size=_smkr_sz),
+                    hovertemplate=f"{name}<br>%{{x|%d/%m/%Y}}: <b>%{{y:.1%}}</b><extra></extra>",
+                ))
+
+            fig_store.add_hline(
+                y=0.93, line_dash="dash", line_color="#888", line_width=1,
+                annotation_text="93%", annotation_position="bottom right",
+                annotation_font_size=10, annotation_font_color="#888",
+            )
+
+            st.plotly_chart(fig_store, use_container_width=True)
+            figures_export["InStock por Tienda"] = fig_store
+
+            # Store ranking table
+            with st.expander("Ranking de tiendas (tabla)", expanded=False):
+                _rank = _store_avg[_store_avg["ID_SUCURSAL"].isin(_sel_store_ids)].copy()
+                _rank["IS_PCT_FMT"] = _rank["IS_PCT"].apply(lambda v: f"{v*100:.1f}%")
+                _rank = _rank.rename(columns={
+                    "NOM_SUCURSAL": "Tienda",
+                    "IS_PCT_FMT": "InStock Prom %",
+                    "ID_SUCURSAL": "ID",
+                })
+                st.dataframe(
+                    _rank[["ID", "Tienda", "InStock Prom %"]],
+                    use_container_width=True, height=min(len(_rank) * 38 + 60, 400),
+                )
+                download_buttons(_store_agg[_store_agg["ID_SUCURSAL"].isin(_sel_store_ids)],
+                                 prefix="instock_por_tienda")
+        else:
+            st.info("Selecciona al menos una tienda para ver la evolucion.")
+    else:
+        st.info("Sin datos de tiendas individuales para el rango seleccionado.")
 
     # ── Detail table: SKU × Periodo (aggregated, with download) ─────────
     st.markdown("---")

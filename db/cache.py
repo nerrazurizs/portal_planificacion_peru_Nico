@@ -81,6 +81,7 @@ from db.queries import (
     QUERY_SUPPLY_DESPACHOS_FEDEX,
     QUERY_INSTOCK_RANGO_TIENDA,
     QUERY_INSTOCK_RANGO_CD,
+    QUERY_INSTOCK_POR_TIENDA,
 )
 from utils.filters import norm_cols
 
@@ -308,6 +309,12 @@ def instock_rango_tienda(_conn_id, _fecha_ini: str, _fecha_fin: str, _conn=None)
 def instock_rango_cd(_conn_id, _fecha_ini: str, _fecha_fin: str, _conn=None) -> pd.DataFrame:
     """InStock CD daily for a custom date range. All days."""
     return _run_params(QUERY_INSTOCK_RANGO_CD, _conn, (_fecha_ini, _fecha_fin))
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def instock_por_tienda(_conn_id, _fecha_ini: str, _fecha_fin: str, _conn=None) -> pd.DataFrame:
+    """InStock aggregated at fecha × store × (area,linea,marca,mix) level."""
+    return _run_params(QUERY_INSTOCK_POR_TIENDA, _conn, (_fecha_ini, _fecha_fin))
 
 
 # ---------------------------------------------------------------------------
@@ -886,6 +893,10 @@ class cached_query:
     @staticmethod
     def instock_rango_cd(conn, fecha_ini: str, fecha_fin: str):
         return instock_rango_cd(cached_query._cid(conn), fecha_ini, fecha_fin, _conn=conn)
+
+    @staticmethod
+    def instock_por_tienda(conn, fecha_ini: str, fecha_fin: str):
+        return instock_por_tienda(cached_query._cid(conn), fecha_ini, fecha_fin, _conn=conn)
 
     # -- ABC-XYZ-FSN (24h) --
     @staticmethod
