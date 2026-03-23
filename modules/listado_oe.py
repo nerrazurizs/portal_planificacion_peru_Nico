@@ -17,7 +17,7 @@ from db.cache import cached_query as cq
 from utils.filters import calcular_moi_ajustado, human_format, norm_cols
 
 # ── Constants ──
-TC_USD_PEN = 3.70  # Peru exchange rate
+TC_USD_PEN = 3.80  # Peru exchange rate
 MARGEN_INTERDIV = 0.05  # 5% margin on sale price
 
 # LINEA → English category for international divisions
@@ -116,8 +116,9 @@ def render_listado_oe(conn):
     """Render the O&E inter-division sales module."""
     st.markdown("## Listado O&E — Venta Inter-Division")
     st.caption(
-        "Stock de CDs principales para oferta a otras "
-        "divisiones Dorel. Precio con margen 5%, tipo de cambio USD/PEN = 3.70."
+        "Stock del CD principal (CDU. Simple Primera Principal) para oferta a otras "
+        "divisiones Dorel. Solo productos importados. Precio con margen 5%, "
+        f"tipo de cambio USD/PEN = {TC_USD_PEN}."
     )
 
     with st.spinner("Consultando stock CDs principales..."):
@@ -130,6 +131,13 @@ def render_listado_oe(conn):
         return
 
     df_raw = apply_pm_filter(df_raw)
+
+    # Only imported products (exclude NACIONAL)
+    if "PROCEDENCIA" in df_raw.columns:
+        df_raw = df_raw[df_raw["PROCEDENCIA"].astype(str).str.strip().str.upper() != "NACIONAL"]
+    if df_raw.empty:
+        st.warning("Sin productos importados en el CD principal.")
+        return
 
     for c in ["QTY", "STOCK_COSTO", "ULTIMO_COSTO"]:
         if c in df_raw.columns:
@@ -185,8 +193,15 @@ def render_listado_oe(conn):
         "MARCA": "BRAND",
         "WAREHOUSE": "Warehouse",
     })
-    if "DESCRIPTION" not in df.columns and "NOM_PRODUCTO" in df.columns:
-        df["DESCRIPTION"] = df["NOM_PRODUCTO"]
+    if "DESCRIPTION" not in df.columns:
+        for _fb in ["NOM_PRODUCTO", "SKU_NOM_PRODUCTO"]:
+            if _fb in df.columns:
+                df["DESCRIPTION"] = df[_fb]
+                break
+        else:
+            df["DESCRIPTION"] = df.get("SKU", "")
+    if "Warehouse" not in df.columns:
+        df["Warehouse"] = "CDU. Simple Primera Principal"
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("SKUs", f"{df['SKU'].nunique():,}")

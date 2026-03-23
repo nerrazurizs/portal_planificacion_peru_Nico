@@ -2317,11 +2317,12 @@ with primera_venta as (
 )
 select
     a.sku_producto,
-    c.nom_producto as description,
+    c.sku_nom_producto as description,
     c.area,
     c.linea,
     c.sublinea,
     c.marca,
+    c.procedencia,
     a.cod_bodega,
     b.descripcion_sucursal as warehouse,
     sum(a.stock_unidades) as qty,
@@ -2335,9 +2336,9 @@ left join {_PROD} c
     on a.sku_producto = c.sku_producto
 left join primera_venta pv
     on a.sku_producto = pv.sku_producto
-where b.canal_de_distribucion = 'CD'
-  and a.fecha = (select max(fecha) from db_supply.hst.ht_in_stock)
+where a.cod_bodega = '1190'
+  and a.fecha = (select max(fecha) from db_supply.hst.ht_in_stock where fecha < current_date())
   and a.stock_unidades > 0
-group by 1,2,3,4,5,6,7,8,11
-order by c.area, c.linea, c.nom_producto
+group by 1,2,3,4,5,6,7,8,9,12
+order by c.area, c.linea, c.sku_nom_producto
 """
