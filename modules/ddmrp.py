@@ -121,11 +121,117 @@ def _init_calendar_from_stores(df_tiendas: pd.DataFrame) -> pd.DataFrame:
 
 # ── DDMRP Engine ──────────────────────────────────────────────────────────
 
+def _compute_adu_progresivo(df_ventas_sem, df_dias_stock):
+    """Compute censored ADU with progressive window expansion.
+
+    Tries 12 weeks first. If a SKU×Store has 0 sales in that window,
+    expands to 24, 36, 48 weeks until data is found or 48w exhausted.
+
+    Parameters
+    ----------
+    df_ventas_sem : DataFrame with SKU_PRODUCTO, ID_SUCURSAL, SEMANA, UNIDADES
+        Weekly sales last 12 months by store.
+    df_dias_stock : DataFrame with SKU_PRODUCTO, ID_SUCURSAL, DIAS_CON_STOCK
+        Days with stock > 0 in last 90 days.
+
+    Returns
+    -------
+    DataFrame with SKU_PRODUCTO, ID_SUCURSAL, ADU, VENTANA_SEMANAS, UNIDADES_VENTANA,
+                    DIAS_CON_STOCK
+    """
+    if df_ventas_sem is None or df_ventas_sem.empty:
+        return pd.DataFrame(columns=[
+            "SKU_PRODUCTO", "ID_SUCURSAL", "ADU", "VENTANA_SEMANAS",
+            "UNIDADES_VENTANA", "DIAS_CON_STOCK",
+        ])
+
+    vs = df_ventas_sem.copy()
+    for c in ["SKU_PRODUCTO", "ID_SUCURSAL"]:
+        if c in vs.columns:
+            vs[c] = vs[c].astype(str).str.strip()
+    vs["SEMANA"] = pd.to_datetime(vs["SEMANA"], errors="coerce")
+    vs["UNIDADES"] = pd.to_numeric(vs["UNIDADES"], errors="coerce").fillna(0)
+
+    hoy = pd.Timestamp.today().normalize()
+    results = []
+    windows = [12, 24, 36, 48]  # weeks
+
+    # Pre-compute all combos
+    all_combos = vs[["SKU_PRODUCTO", "ID_SUCURSAL"]].drop_duplicates()
+    remaining = all_combos.copy()
+
+    for n_weeks in windows:
+        if remaining.empty:
+            break
+        cutoff = hoy - pd.Timedelta(weeks=n_weeks)
+        vs_w = vs[vs["SEMANA"] >= cutoff]
+
+        agg = (
+            vs_w.groupby(["SKU_PRODUCTO", "ID_SUCURSAL"], as_index=False)
+            .agg(UNIDADES_VENTANA=("UNIDADES", "sum"))
+        )
+        agg = agg[agg["UNIDADES_VENTANA"] > 0]
+
+        # Merge with remaining to find which ones got data
+        found = remaining.merge(agg, on=["SKU_PRODUCTO", "ID_SUCURSAL"], how="inner")
+        if not found.empty:
+            found["VENTANA_SEMANAS"] = n_weeks
+            found["DIAS_VENTANA"] = n_weeks * 7
+            results.append(found)
+            # Remove found from remaining
+            remaining = remaining.merge(
+                found[["SKU_PRODUCTO", "ID_SUCURSAL"]],
+                on=["SKU_PRODUCTO", "ID_SUCURSAL"], how="left", indicator=True,
+            )
+            remaining = remaining[remaining["_merge"] == "left_only"].drop(columns=["_merge"])
+
+    if not results:
+        df_adu = all_combos.copy()
+        df_adu["UNIDADES_VENTANA"] = 0
+        df_adu["VENTANA_SEMANAS"] = 48
+        df_adu["DIAS_VENTANA"] = 48 * 7
+    else:
+        df_adu = pd.concat(results, ignore_index=True)
+        # Add remaining with 0 sales
+        if not remaining.empty:
+            remaining["UNIDADES_VENTANA"] = 0
+            remaining["VENTANA_SEMANAS"] = 48
+            remaining["DIAS_VENTANA"] = 48 * 7
+            df_adu = pd.concat([df_adu, remaining], ignore_index=True)
+
+    # Merge dias_con_stock for censored ADU
+    dcs = df_dias_stock.copy()
+    for c in ["SKU_PRODUCTO", "ID_SUCURSAL"]:
+        if c in dcs.columns:
+            dcs[c] = dcs[c].astype(str).str.strip()
+    if "DIAS_CON_STOCK" in dcs.columns:
+        dcs["DIAS_CON_STOCK"] = pd.to_numeric(dcs["DIAS_CON_STOCK"], errors="coerce").fillna(0)
+        df_adu = df_adu.merge(dcs[["SKU_PRODUCTO", "ID_SUCURSAL", "DIAS_CON_STOCK"]],
+                              on=["SKU_PRODUCTO", "ID_SUCURSAL"], how="left")
+    df_adu["DIAS_CON_STOCK"] = df_adu.get("DIAS_CON_STOCK", pd.Series(0)).fillna(0)
+
+    # ADU = units / max(dias_con_stock, dias_ventana * proportion)
+    # If stock days available, use censored; otherwise use full window
+    df_adu["DIAS_EFECTIVOS"] = np.where(
+        df_adu["DIAS_CON_STOCK"] > 0,
+        df_adu["DIAS_CON_STOCK"].clip(lower=1),
+        df_adu["DIAS_VENTANA"].clip(lower=1),
+    )
+    df_adu["ADU"] = (df_adu["UNIDADES_VENTANA"] / df_adu["DIAS_EFECTIVOS"]).round(3)
+
+    return df_adu[["SKU_PRODUCTO", "ID_SUCURSAL", "ADU", "VENTANA_SEMANAS",
+                   "UNIDADES_VENTANA", "DIAS_CON_STOCK"]]
+
+
 def _compute_ddmrp_buffers(
-    df_stock, df_config, df_ventas, df_dias_stock, df_transito, df_calendar,
+    df_stock, df_config, df_adu, df_transito, df_calendar,
     df_maestra, df_abc=None,
 ):
     """Compute DDMRP buffer zones and Net Flow Position for all SKU x Store combos.
+
+    Parameters
+    ----------
+    df_adu : DataFrame from _compute_adu_progresivo() with ADU, VENTANA_SEMANAS, etc.
 
     Returns DataFrame with one row per SKU x Store.
     """
@@ -168,35 +274,15 @@ def _compute_ddmrp_buffers(
     base = base.merge(stk_agg, on=["SKU_PRODUCTO", "ID_SUCURSAL"], how="left")
     base["ON_HAND"] = base["ON_HAND"].fillna(0)
 
-    # ── 4. Merge ventas 90d ──
-    vta = df_ventas.copy()
-    for c in ["SKU_PRODUCTO", "ID_SUCURSAL"]:
-        if c in vta.columns:
-            vta[c] = vta[c].astype(str).str.strip()
-    if "UNIDADES_90D" in vta.columns:
-        vta["UNIDADES_90D"] = pd.to_numeric(vta["UNIDADES_90D"], errors="coerce").fillna(0)
-    if "DIAS_CON_VENTA" in vta.columns:
-        vta["DIAS_CON_VENTA"] = pd.to_numeric(vta["DIAS_CON_VENTA"], errors="coerce").fillna(0)
-    vta_cols = [c for c in ["SKU_PRODUCTO", "ID_SUCURSAL", "UNIDADES_90D", "DIAS_CON_VENTA"] if c in vta.columns]
-    if len(vta_cols) >= 3:
-        vta_dedup = vta[vta_cols].groupby(["SKU_PRODUCTO", "ID_SUCURSAL"], as_index=False).sum()
-        base = base.merge(vta_dedup, on=["SKU_PRODUCTO", "ID_SUCURSAL"], how="left")
-    base["UNIDADES_90D"] = base.get("UNIDADES_90D", pd.Series(0, index=base.index)).fillna(0)
+    # ── 4. Merge ADU (pre-computed with progressive windows) ──
+    if df_adu is not None and not df_adu.empty:
+        adu_cols = [c for c in ["SKU_PRODUCTO", "ID_SUCURSAL", "ADU", "VENTANA_SEMANAS",
+                                "UNIDADES_VENTANA", "DIAS_CON_STOCK"] if c in df_adu.columns]
+        base = base.merge(df_adu[adu_cols], on=["SKU_PRODUCTO", "ID_SUCURSAL"], how="left")
+    for c in ["ADU", "VENTANA_SEMANAS", "UNIDADES_VENTANA", "DIAS_CON_STOCK"]:
+        base[c] = base.get(c, pd.Series(0, index=base.index)).fillna(0)
 
-    # ── 5. Merge dias con stock (for censored ADU) ──
-    dcs = df_dias_stock.copy()
-    for c in ["SKU_PRODUCTO", "ID_SUCURSAL"]:
-        if c in dcs.columns:
-            dcs[c] = dcs[c].astype(str).str.strip()
-    if "DIAS_CON_STOCK" in dcs.columns:
-        dcs["DIAS_CON_STOCK"] = pd.to_numeric(dcs["DIAS_CON_STOCK"], errors="coerce").fillna(0)
-        base = base.merge(
-            dcs[["SKU_PRODUCTO", "ID_SUCURSAL", "DIAS_CON_STOCK"]],
-            on=["SKU_PRODUCTO", "ID_SUCURSAL"], how="left",
-        )
-    base["DIAS_CON_STOCK"] = base.get("DIAS_CON_STOCK", pd.Series(0, index=base.index)).fillna(0)
-
-    # ── 6. Merge transit ──
+    # ── 5. Merge transit ──
     tr = df_transito.copy()
     if not tr.empty:
         for c in ["SKU_PRODUCTO", "ID_SUCURSAL_DESTINO"]:
@@ -208,7 +294,7 @@ def _compute_ddmrp_buffers(
         base = base.merge(tr_agg, on=["SKU_PRODUCTO", "ID_SUCURSAL"], how="left")
     base["IN_TRANSIT"] = base.get("IN_TRANSIT", pd.Series(0, index=base.index)).fillna(0)
 
-    # ── 7. Merge calendar (LT_PROM, SEM_REVISION) ──
+    # ── 6. Merge calendar (LT_PROM, SEM_REVISION) ──
     cal = df_calendar.copy()
     if not cal.empty:
         cal["ID_SUCURSAL"] = cal["ID_SUCURSAL"].astype(str).str.strip()
@@ -218,7 +304,7 @@ def _compute_ddmrp_buffers(
     base["SEM_REVISION"] = base.get("SEM_REVISION", pd.Series(7, index=base.index)).fillna(7).astype(int)
     base["LT_PROM"] = base.get("LT_PROM", pd.Series(2, index=base.index)).fillna(2).astype(int)
 
-    # ── 8. Merge maestra (dimensions + costo) ──
+    # ── 7. Merge maestra (dimensions + costo) ──
     mae = df_maestra.copy()
     mae_cols = ["SKU_PRODUCTO", "SKU_NOM_PRODUCTO", "AREA", "LINEA", "SUBLINEA", "MARCA", "ULTIMO_COSTO"]
     mae_cols = [c for c in mae_cols if c in mae.columns]
@@ -226,18 +312,16 @@ def _compute_ddmrp_buffers(
         mae_dedup = mae[mae_cols].drop_duplicates(subset=["SKU_PRODUCTO"])
         base = base.merge(mae_dedup, on="SKU_PRODUCTO", how="left")
 
-    # ── 9. Merge ABC class ──
-    if df_abc is not None and not df_abc.empty and "CLASE_COMBINADA" in df_abc.columns:
-        abc_cols = ["SKU_PRODUCTO", "CLASE_ABC", "CLASE_COMBINADA"]
+    # ── 8. Merge ABC-XYZ-FSN class ──
+    if df_abc is not None and not df_abc.empty:
+        abc_cols = ["SKU_PRODUCTO", "CLASE_ABC", "CLASE_XYZ", "CLASE_FSN", "CLASE_COMBINADA"]
         abc_cols = [c for c in abc_cols if c in df_abc.columns]
-        base = base.merge(df_abc[abc_cols].drop_duplicates("SKU_PRODUCTO"),
-                          on="SKU_PRODUCTO", how="left")
+        if abc_cols:
+            base = base.merge(df_abc[abc_cols].drop_duplicates("SKU_PRODUCTO"),
+                              on="SKU_PRODUCTO", how="left")
 
-    # ── 10. Compute DDMRP buffers ──
-    # Censored ADU
-    dias_instock = base["DIAS_CON_STOCK"].clip(lower=1)
-    base["ADU"] = (base["UNIDADES_90D"] / dias_instock).round(3)
-
+    # ── 9. Compute DDMRP buffers ──
+    # ADU already comes pre-computed from _compute_adu_progresivo()
     # Buffer zones
     base["RED_ZONE"] = base["MIN_INV_REQUERIDO"]
     base["YELLOW_ZONE"] = (base["ADU"] * base["LT_PROM"]).round(1)
@@ -396,7 +480,8 @@ def _render_buffers(df):
     display_cols = [
         "SKU_PRODUCTO", "ID_SUCURSAL", "DESCRIPCION_SUCURSAL",
         "AREA", "LINEA", "MARCA",
-        "ADU", "LT_PROM", "SEM_REVISION",
+        "CLASE_ABC", "CLASE_XYZ", "CLASE_COMBINADA",
+        "ADU", "VENTANA_SEMANAS", "LT_PROM", "SEM_REVISION",
         "RED_ZONE", "YELLOW_ZONE", "GREEN_ZONE", "TOG", "TOY",
         "ON_HAND", "IN_TRANSIT", "NFP", "STATUS",
         "ORDER_QTY", "COSTO_PEN",
@@ -495,9 +580,10 @@ def _render_proposals(df):
     prop_cols = [
         "STATUS", "SKU_PRODUCTO", "ID_SUCURSAL", "DESCRIPCION_SUCURSAL",
         "AREA", "LINEA", "MARCA",
+        "CLASE_ABC", "CLASE_XYZ", "CLASE_COMBINADA",
         "ON_HAND", "IN_TRANSIT", "NFP", "TOY", "TOG",
         "ORDER_QTY", "COSTO_PEN", "COSTO_USD",
-        "ADU", "RED_ZONE", "YELLOW_ZONE", "GREEN_ZONE",
+        "ADU", "VENTANA_SEMANAS", "RED_ZONE", "YELLOW_ZONE", "GREEN_ZONE",
     ]
     prop_cols = [c for c in prop_cols if c in df_prop.columns]
 
@@ -535,7 +621,7 @@ def render_ddmrp(conn):
     with st.spinner("Cargando datos DDMRP..."):
         df_stock = norm_cols(cq.ddmrp_stock_tienda(conn))
         df_config = norm_cols(cq.syncro_config(conn))
-        df_ventas = norm_cols(cq.ventas_90d_sucursal(conn))
+        df_ventas_sem = norm_cols(cq.ventas_semanal_sucursal_12m(conn))
         df_dias_stock = norm_cols(cq.ddmrp_dias_con_stock(conn))
         df_transito_raw = cq.transito_sucursales(conn)
         df_transito = _parse_transito(df_transito_raw)
@@ -555,11 +641,13 @@ def render_ddmrp(conn):
     # Apply PM filter to maestra
     df_maestra = apply_pm_filter(df_maestra)
 
+    # ── Compute ADU with progressive windows (12w → 24w → 36w → 48w) ──
     # ── Compute DDMRP ──
-    cache_key = "ddmrp_result_v1"
+    cache_key = "ddmrp_result_v2"
     if cache_key not in st.session_state or st.button("🔄 Recalcular", key="ddmrp_recalc"):
+        df_adu = _compute_adu_progresivo(df_ventas_sem, df_dias_stock)
         df_ddmrp = _compute_ddmrp_buffers(
-            df_stock, df_config, df_ventas, df_dias_stock,
+            df_stock, df_config, df_adu,
             df_transito, df_calendar, df_maestra, df_abc,
         )
         st.session_state[cache_key] = df_ddmrp

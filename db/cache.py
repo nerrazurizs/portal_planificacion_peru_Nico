@@ -93,6 +93,7 @@ from db.queries import (
     QUERY_DDMRP_STOCK_TIENDA,
     QUERY_DDMRP_DIAS_CON_STOCK,
     QUERY_VENTAS_DIARIAS_HIST,
+    QUERY_VENTAS_SEMANAL_SUCURSAL_12M,
 )
 from utils.filters import norm_cols
 
@@ -277,6 +278,12 @@ def stock_detalle_bodega(_conn_id, _conn=None) -> pd.DataFrame:
 def stock_oe(_conn_id, _conn=None) -> pd.DataFrame:
     """Stock in CDs for O&E inter-division sales."""
     return _run(QUERY_STOCK_OE, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def ventas_semanal_sucursal_12m(_conn_id, _conn=None) -> pd.DataFrame:
+    """Weekly sales last 12 months per SKU x Store (for DDMRP progressive ADU)."""
+    return _run(QUERY_VENTAS_SEMANAL_SUCURSAL_12M, _conn)
 
 
 @st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
@@ -1084,6 +1091,10 @@ class cached_query:
     @staticmethod
     def stock_oe(conn):
         return stock_oe(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def ventas_semanal_sucursal_12m(conn):
+        return ventas_semanal_sucursal_12m(cached_query._cid(conn), _conn=conn)
 
     # -- DDMRP (24h) --
     @staticmethod

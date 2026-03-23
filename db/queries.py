@@ -1765,6 +1765,24 @@ where a.fecha >= dateadd('day', -90, current_date())
 group by 1, 2, 3, 4
 """
 
+# Ventas semanales ultimos 12 meses por SKU x Sucursal (para DDMRP ADU progresivo)
+QUERY_VENTAS_SEMANAL_SUCURSAL_12M = f"""
+select
+    a.sku_producto,
+    b.id_sucursal,
+    date_trunc('week', a.fecha) as semana,
+    sum(a.cantidad)             as unidades,
+    sum(a.neto)                 as neto,
+    count(distinct a.fecha)     as dias_con_venta
+from {_VCM} a
+left join {_SUCURSAL} b
+    on a.cod_ccosto = b.id_sucursal
+where a.fecha >= dateadd('month', -12, current_date())
+  and a.cantidad > 0
+  and b.canal_de_distribucion = 'TIENDA'
+group by 1, 2, 3
+"""
+
 # ===========================================================================
 # SUPPLY OPERATIONS — Pedidos, Picking, Stock Actual, Bultos, Despachos
 # NOTE: ft_pedidotransferencia and ft_picking do NOT exist in Peru.
