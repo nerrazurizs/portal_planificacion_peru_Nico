@@ -156,9 +156,8 @@ def _load_combined_data(conn):
             ).reset_index()
 
             piv_wide.columns.name = None
-            piv_wide["UND_TIENDA"] = pd.to_numeric(piv_wide.get("TIENDA", 0), errors="coerce").fillna(0)
-            piv_wide["UND_ETAIL"] = pd.to_numeric(piv_wide.get("ETAIL", 0), errors="coerce").fillna(0)
-            piv_wide["UND_MAYOR"] = pd.to_numeric(piv_wide.get("MAYORISTA", 0), errors="coerce").fillna(0)
+            for _src, _dst in [("TIENDA", "UND_TIENDA"), ("ETAIL", "UND_ETAIL"), ("MAYORISTA", "UND_MAYOR")]:
+                piv_wide[_dst] = pd.to_numeric(piv_wide[_src], errors="coerce").fillna(0) if _src in piv_wide.columns else 0
             piv_wide["UND_TOTAL"] = piv_wide["UND_TIENDA"] + piv_wide["UND_ETAIL"] + piv_wide["UND_MAYOR"]
             piv_wide["TIPO_DATO"] = "HIST_REAL"
 
