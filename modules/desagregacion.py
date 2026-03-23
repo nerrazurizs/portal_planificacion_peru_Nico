@@ -31,29 +31,25 @@ CHANNEL_MAP = {
 CHANNEL_LABELS = {"TIENDA": "Tienda", "ETAIL": "Etail", "MAYORISTA": "Mayorista"}
 
 EVENT_COLORS = {
-    "SaleVerano":   "rgba(0, 180, 216, 0.10)",    # celeste — Sale Verano
-    "BlackWeek":    "rgba(50, 50, 50, 0.10)",      # gris oscuro
-    "ExpoBebe":     "rgba(147, 51, 234, 0.10)",    # violeta — Expo Bebe
-    "CyberDay":     "rgba(255, 165, 0, 0.12)",     # naranja
-    "DiaPadre":     "rgba(30, 144, 255, 0.10)",    # azul — Dia del Padre
-    "DiaNino":      "rgba(34, 197, 94, 0.10)",     # verde — Dia del Niño
-    "CyberOctubre": "rgba(0, 128, 255, 0.12)",     # azul fuerte — Cyber Octubre
-    "ToysWeek":     "rgba(236, 72, 153, 0.10)",    # rosa — Toys Week
-    "BlackFriday":  "rgba(80, 80, 80, 0.10)",      # gris
-    "Navidad":      "rgba(220, 20, 60, 0.12)",     # rojo
+    "SaleVerano":    "rgba(0, 180, 216, 0.10)",     # celeste — Sale Verano
+    "DiaMadre":      "rgba(236, 72, 153, 0.10)",    # rosa — Dia de la Madre
+    "CyberWow":      "rgba(255, 165, 0, 0.12)",     # naranja — CyberWow Peru
+    "DiaPadre":      "rgba(30, 144, 255, 0.10)",    # azul — Dia del Padre
+    "FiestasPatrias": "rgba(220, 20, 60, 0.10)",    # rojo — Fiestas Patrias
+    "DiaNino":       "rgba(34, 197, 94, 0.10)",     # verde — Dia del Nino
+    "BlackFriday":   "rgba(80, 80, 80, 0.10)",      # gris — Black Friday
+    "Navidad":       "rgba(220, 20, 60, 0.12)",     # rojo — Navidad
 }
 
 EVENT_LINE_COLORS = {
-    "SaleVerano":   "#00b4d8",
-    "BlackWeek":    "#333333",
-    "ExpoBebe":     "#9333ea",
-    "CyberDay":     "#e68a00",
-    "DiaPadre":     "#1e90ff",
-    "DiaNino":      "#22c55e",
-    "CyberOctubre": "#0066cc",
-    "ToysWeek":     "#ec4899",
-    "BlackFriday":  "#555555",
-    "Navidad":      "#cc1a36",
+    "SaleVerano":    "#00b4d8",
+    "DiaMadre":      "#ec4899",
+    "CyberWow":      "#e68a00",
+    "DiaPadre":      "#1e90ff",
+    "FiestasPatrias": "#cc1a36",
+    "DiaNino":       "#22c55e",
+    "BlackFriday":   "#555555",
+    "Navidad":       "#cc1a36",
 }
 
 

@@ -249,19 +249,17 @@ def _build_daily_weights(conn) -> dict:
 # (QUERY_EVENT_BOOSTS), not from hardcoded values.
 
 EVENTOS_COMERCIALES = [
-    # Calendario comercial 2026 (fuente: Copia de CALENDARIO 2026.xlsx)
-    ("SaleVerano",    1,  1, 25),   # W1-W3: SALE %
-    ("BlackWeek",     3, 16, 31),   # W12-W13: BLACK INFANTI WEEK HASTA 60%
-    ("BlackWeek",     4,  1,  5),   # W14: BLACK INFANTI WEEK (cont.)
-    ("ExpoBebe",      5, 25, 31),   # W22: EXPO BEBE
-    ("CyberDay",      6,  1, 14),   # W23-W24: CYBERDAY + REVANCHA
-    ("DiaPadre",      6, 15, 21),   # W25: DIA DE PADRE
-    ("DiaNino",       8,  3, 16),   # W32-W33: DIA DEL NINO
-    ("CyberOctubre", 10,  5, 18),   # W41-W42: CYBER INFANTI HASTA 70%
-    ("ToysWeek",     11,  9, 15),   # W46: TOYS WEEK
-    ("BlackFriday",  11, 17, 30),   # W47-W49: BLACK INFANTI HASTA 70%
-    ("BlackFriday",  12,  1,  6),   # (continuación)
-    ("Navidad",      12,  7, 24),   # W50-W52: NAVIDAD INFANTI
+    # Calendario comercial Peru 2026
+    ("SaleVerano",    1,  1, 25),   # Sale de verano
+    ("DiaMadre",      5,  5, 11),   # Dia de la Madre (2do domingo mayo)
+    ("CyberWow",      5, 19, 22),   # CyberWow Peru (mayo)
+    ("DiaPadre",      6, 15, 21),   # Dia del Padre (3er domingo junio)
+    ("FiestasPatrias", 7, 21, 31),  # Fiestas Patrias Peru (28-29 jul + promos)
+    ("DiaNino",       8, 11, 17),   # Dia del Nino (3er domingo agosto)
+    ("CyberWow",     10, 19, 22),   # CyberWow Peru (octubre)
+    ("BlackFriday",  11, 24, 30),   # Black Friday
+    ("CyberWow",     11, 17, 23),   # CyberWow Peru (noviembre, pre-BF)
+    ("Navidad",      12,  1, 24),   # Navidad
 ]
 
 
