@@ -145,8 +145,11 @@ def _compute_adu_from_stock(df_stock):
         if c in stk.columns:
             stk[c] = stk[c].astype(str).str.strip()
 
-    stk["CANTIDAD_PROM_90"] = pd.to_numeric(stk.get("CANTIDAD_PROM_90", 0), errors="coerce").fillna(0)
-    stk["CANTIDAD_PROM_180"] = pd.to_numeric(stk.get("CANTIDAD_PROM_180", 0), errors="coerce").fillna(0)
+    for c in ["CANTIDAD_PROM_90", "CANTIDAD_PROM_180"]:
+        if c not in stk.columns:
+            stk[c] = 0.0
+        else:
+            stk[c] = pd.to_numeric(stk[c], errors="coerce").fillna(0)
 
     # Use 90-day avg; fallback to 180-day avg / 2
     stk["UNIDADES_VENTANA"] = np.where(
