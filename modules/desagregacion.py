@@ -758,6 +758,194 @@ def _render_detail_table(df):
     download_buttons(df_out, "forecast_diario")
 
 
+def _render_custom_download(df):
+    """Interactive report builder: user picks scope, granularity and columns,
+    previews the result, and downloads CSV / Excel."""
+    st.markdown("### 📥 Vista Descargable Personalizada")
+    st.caption(
+        "Arma tu reporte eligiendo qué datos incluir, la granularidad "
+        "y las columnas adicionales. Luego descárgalo en CSV o Excel."
+    )
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        scope = st.radio(
+            "Alcance de datos",
+            ["Forecast + Historia", "Solo Forecast", "Solo Historia"],
+            horizontal=True, key="dl_scope",
+        )
+    with c2:
+        granularity = st.radio(
+            "Granularidad",
+            ["SKU × Canal × Día", "SKU × Día", "SKU × Canal × Mes", "SKU × Mes"],
+            horizontal=True, key="dl_granularity",
+        )
+    with c3:
+        extra_cols = st.multiselect(
+            "Columnas adicionales",
+            options=[
+                "Stock (apertura/cierre)", "Fulfillment (und)", "Venta Perdida",
+                "Financiero ($)", "Precios", "Supply (compras + ETA)", "Eventos",
+            ],
+            default=["Eventos"], key="dl_extra_cols",
+        )
+
+    fecha_min = df["FECHA"].min().date()
+    fecha_max = df["FECHA"].max().date()
+    d1, d2, d3 = st.columns([1, 1, 2])
+    with d1:
+        fecha_desde = st.date_input("Desde", value=fecha_min, min_value=fecha_min,
+                                     max_value=fecha_max, key="dl_fecha_desde")
+    with d2:
+        fecha_hasta = st.date_input("Hasta", value=fecha_max, min_value=fecha_min,
+                                     max_value=fecha_max, key="dl_fecha_hasta")
+    with d3:
+        st.caption("")
+        st.caption(f"Rango disponible: **{fecha_min.strftime('%d/%m/%Y')}** — "
+                   f"**{fecha_max.strftime('%d/%m/%Y')}**")
+
+    wk = df.copy()
+    if scope == "Solo Forecast":
+        wk = wk[wk["TIPO_DATO"].isin(["PROYECCION", "REAL+FC"])]
+    elif scope == "Solo Historia":
+        wk = wk[wk["TIPO_DATO"].isin(["HIST_REAL", "HISTORICO"])]
+
+    wk = wk[(wk["FECHA"].dt.date >= fecha_desde) & (wk["FECHA"].dt.date <= fecha_hasta)]
+    if wk.empty:
+        st.info("No hay datos para el alcance y rango de fechas seleccionados.")
+        return
+
+    dim_cols = ["SKU_PRODUCTO", "SKU_NOM_PRODUCTO", "AREA", "LINEA", "SUBLINEA", "MARCA"]
+    has_canal = "Canal" in granularity
+
+    stock_cols = ["STOCK_INICIAL_CD", "STOCK_INICIAL_TIENDA", "STOCK_INICIAL_TOTAL",
+                  "STOCK_FINAL_CD", "STOCK_FINAL_TIENDA", "STOCK_FINAL_TOTAL"]
+    fulfillment_cols = ["VENTA_FUL_TIENDA_UND", "VENTA_FUL_ETAIL_UND", "VENTA_FUL_MAYOR_UND"]
+    lost_sales_cols = ["LOST_SALES_TIENDA", "LOST_SALES_ETAIL", "LOST_SALES_MAYOR", "LOST_SALES_TOTAL"]
+    financial_cols = ["VN_RES_TIENDA", "VN_RES_ETAIL", "VN_RES_MAYOR", "VN_RES_TOTAL",
+                      "COGS_RES_TOTAL", "APORTE_RES_TOTAL", "MARGEN_RES_TOTAL"]
+    price_cols = ["PRECIO_USADO_TIENDA", "PRECIO_USADO_ETAIL", "PRECIO_USADO_MAYOR", "COSTO_UNITARIO"]
+    supply_cols = ["FORECAST_COMPRA", "ETA"]
+    event_col = ["EVENTO"]
+
+    extra_requested = []
+    if "Stock (apertura/cierre)" in extra_cols:
+        extra_requested += [c for c in stock_cols if c in wk.columns]
+    if "Fulfillment (und)" in extra_cols:
+        extra_requested += [c for c in fulfillment_cols if c in wk.columns]
+    if "Venta Perdida" in extra_cols:
+        extra_requested += [c for c in lost_sales_cols if c in wk.columns]
+    if "Financiero ($)" in extra_cols:
+        extra_requested += [c for c in financial_cols if c in wk.columns]
+    if "Precios" in extra_cols:
+        extra_requested += [c for c in price_cols if c in wk.columns]
+    if "Supply (compras + ETA)" in extra_cols:
+        extra_requested += [c for c in supply_cols if c in wk.columns]
+    if "Eventos" in extra_cols:
+        extra_requested += [c for c in event_col if c in wk.columns]
+
+    is_monthly = "Mes" in granularity
+    if is_monthly:
+        wk["_MES_NUM"] = wk["FECHA"].dt.to_period("M")
+        wk["PERIODO"] = wk["FECHA"].dt.month.map(MESES_ES) + " " + wk["FECHA"].dt.year.astype(str).str[-2:]
+    else:
+        wk["PERIODO"] = wk["FECHA"].dt.strftime("%Y-%m-%d")
+    time_col = "PERIODO"
+
+    if has_canal:
+        canal_melt = [("Tienda", "UND_TIENDA"), ("Etail", "UND_ETAIL"), ("Mayorista", "UND_MAYOR")]
+        melted_parts = []
+        for canal_label, und_col in canal_melt:
+            if und_col not in wk.columns:
+                continue
+            part = wk.copy()
+            part["CANAL"] = canal_label
+            part["UNIDADES"] = pd.to_numeric(part[und_col], errors="coerce").fillna(0)
+            melted_parts.append(part)
+        if not melted_parts:
+            st.info("No hay columnas de demanda por canal disponibles.")
+            return
+        wk_long = pd.concat(melted_parts, ignore_index=True)
+        group_keys = dim_cols + [time_col, "CANAL"]
+        agg_dict = {"UNIDADES": "sum"}
+        for c in [x for x in extra_requested if x != "EVENTO"]:
+            if c in wk_long.columns:
+                wk_long[c] = pd.to_numeric(wk_long[c], errors="coerce").fillna(0)
+                if "INICIAL" in c or "APERTURA" in c:
+                    agg_dict[c] = "first"
+                elif "FINAL" in c or "CIERRE" in c:
+                    agg_dict[c] = "last"
+                else:
+                    agg_dict[c] = "sum"
+        for c in [x for x in extra_requested if x == "EVENTO"]:
+            if c in wk_long.columns:
+                agg_dict[c] = "first"
+        safe_keys = [k for k in group_keys if k in wk_long.columns]
+        agg_cols = {k: v for k, v in agg_dict.items() if k in wk_long.columns}
+        result = wk_long.groupby(safe_keys, as_index=False, sort=False).agg(agg_cols)
+        out_cols = [c for c in dim_cols if c in result.columns]
+        out_cols += [time_col, "CANAL", "UNIDADES"]
+        out_cols += [c for c in extra_requested if c in result.columns and c not in out_cols]
+        result = result[[c for c in out_cols if c in result.columns]]
+    else:
+        group_keys = dim_cols + [time_col]
+        agg_dict = {"UND_TOTAL": "sum"}
+        for uc in ["UND_TIENDA", "UND_ETAIL", "UND_MAYOR"]:
+            if uc in wk.columns:
+                wk[uc] = pd.to_numeric(wk[uc], errors="coerce").fillna(0)
+                agg_dict[uc] = "sum"
+        for c in [x for x in extra_requested if x != "EVENTO"]:
+            if c in wk.columns:
+                wk[c] = pd.to_numeric(wk[c], errors="coerce").fillna(0)
+                if "INICIAL" in c or "APERTURA" in c:
+                    agg_dict[c] = "first"
+                elif "FINAL" in c or "CIERRE" in c:
+                    agg_dict[c] = "last"
+                else:
+                    agg_dict[c] = "sum"
+        for c in [x for x in extra_requested if x == "EVENTO"]:
+            if c in wk.columns:
+                agg_dict[c] = "first"
+        safe_keys = [k for k in group_keys if k in wk.columns]
+        agg_cols = {k: v for k, v in agg_dict.items() if k in wk.columns}
+        result = wk.groupby(safe_keys, as_index=False, sort=False).agg(agg_cols)
+        out_cols = [c for c in dim_cols if c in result.columns]
+        out_cols += [time_col]
+        und_order = ["UND_TIENDA", "UND_ETAIL", "UND_MAYOR", "UND_TOTAL"]
+        out_cols += [c for c in und_order if c in result.columns]
+        out_cols += [c for c in extra_requested if c in result.columns and c not in out_cols]
+        result = result[[c for c in out_cols if c in result.columns]]
+
+    sort_cols = ["SKU_PRODUCTO"]
+    if time_col in result.columns:
+        sort_cols.append(time_col)
+    if "CANAL" in result.columns:
+        sort_cols.append("CANAL")
+    result = result.sort_values([c for c in sort_cols if c in result.columns]).reset_index(drop=True)
+
+    n_rows = len(result)
+    n_skus = result["SKU_PRODUCTO"].nunique() if "SKU_PRODUCTO" in result.columns else 0
+    MAX_PREVIEW = 5_000
+    scope_label = {"Forecast + Historia": "FC+Hist", "Solo Forecast": "Solo FC",
+                   "Solo Historia": "Solo Hist"}.get(scope, "")
+    gran_label = granularity.replace(" × ", "×")
+
+    st.markdown(f"**{n_rows:,}** filas — **{n_skus}** SKUs — _{scope_label}_ — _{gran_label}_ — "
+                f"**{fecha_desde.strftime('%d/%m/%Y')}** a **{fecha_hasta.strftime('%d/%m/%Y')}**")
+
+    if n_rows > MAX_PREVIEW:
+        st.caption(f"Vista previa: primeras {MAX_PREVIEW:,} filas. "
+                   "El archivo descargado contiene todas las filas.")
+        st.dataframe(result.head(MAX_PREVIEW), use_container_width=True, height=500, hide_index=True)
+    elif n_rows > 0:
+        st.dataframe(result, use_container_width=True, height=min(500, 35 + 35 * n_rows), hide_index=True)
+    else:
+        st.info("El reporte está vacío para los filtros y alcance seleccionados.")
+        return
+
+    download_buttons(result, f"forecast_{scope_label.lower().replace('+', '')}_{gran_label.lower()}")
+
+
 # ---------------------------------------------------------------------------
 # Main render
 # ---------------------------------------------------------------------------
@@ -859,6 +1047,11 @@ def render_forecast_diario(conn):
     _render_summary_table(df_filtered)
     st.markdown("---")
     _render_detail_table(df_filtered)
+
+    st.markdown("---")
+
+    # ── Custom downloadable view ─────────────────────────────────────────
+    _render_custom_download(df_filtered)
 
 
 # Backward compatibility alias
