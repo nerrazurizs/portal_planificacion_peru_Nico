@@ -1052,6 +1052,22 @@ where a.fecha >= dateadd('day', -90, current_date())
 group by 1, 2, 3
 """
 
+# Ventas diarias historicas (15 meses) — para Forecast Diario YoY overlay
+QUERY_VENTAS_DIARIAS_HIST = f"""
+select
+    a.sku_producto,
+    a.fecha,
+    b.canal_de_distribucion,
+    sum(a.cantidad) as unidades,
+    sum(a.neto)     as neto
+from {_VCM} a
+left join {_SUCURSAL} b
+  on a.cod_ccosto = b.id_sucursal
+where a.fecha >= dateadd('month', -15, current_date())
+  and a.cantidad > 0
+group by 1, 2, 3
+"""
+
 # Ventas mensuales por SKU x Canal (elasticidad)
 QUERY_VENTAS_MENSUAL_PRECIO = f"""
 select

@@ -92,6 +92,7 @@ from db.queries import (
     QUERY_STOCK_OE,
     QUERY_DDMRP_STOCK_TIENDA,
     QUERY_DDMRP_DIAS_CON_STOCK,
+    QUERY_VENTAS_DIARIAS_HIST,
 )
 from utils.filters import norm_cols
 
@@ -305,6 +306,12 @@ def instock_store_detail(_conn_id, _conn=None) -> pd.DataFrame:
 def ventas_diarias_90d(_conn_id, _conn=None) -> pd.DataFrame:
     """Daily sales last 90 days (for stock-out alerts)."""
     return _run(QUERY_VENTAS_DIARIAS_90D, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def ventas_diarias_hist(_conn_id, _conn=None) -> pd.DataFrame:
+    """Daily sales last 15 months (for Forecast Diario YoY overlay)."""
+    return _run(QUERY_VENTAS_DIARIAS_HIST, _conn)
 
 
 @st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
@@ -920,6 +927,10 @@ class cached_query:
     @staticmethod
     def ventas_diarias_90d(conn):
         return ventas_diarias_90d(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def ventas_diarias_hist(conn):
+        return ventas_diarias_hist(cached_query._cid(conn), _conn=conn)
 
     @staticmethod
     def tienda_dim(conn):

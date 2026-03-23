@@ -115,11 +115,14 @@ def _load_combined_data(conn):
 
         parts.append(dp)
 
-    # ── 2. Extended history from ventas_90d ───────────────────────────────
+    # ── 2. Extended history (15 months for YoY comparison) ────────────────
     try:
-        df_v90 = cq.ventas_diarias_90d(conn)
+        df_v90 = cq.ventas_diarias_hist(conn)
     except Exception:
-        df_v90 = None
+        try:
+            df_v90 = cq.ventas_diarias_90d(conn)  # fallback
+        except Exception:
+            df_v90 = None
 
     if df_v90 is not None and not df_v90.empty:
         v90 = df_v90.copy()
