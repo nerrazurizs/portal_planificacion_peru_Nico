@@ -2397,6 +2397,26 @@ WHERE a.fecha = (
 GROUP BY 1, 2, 3
 """
 
+# ADU por SKU x Tienda (90 dias, join via cod_agencia = cod_bodega)
+QUERY_DDMRP_ADU_TIENDA = """
+SELECT
+    v.cod_producto   AS sku_producto,
+    v.cod_agencia    AS id_sucursal,
+    SUM(v.unidades)  AS unidades_90d,
+    COUNT(DISTINCT TRY_TO_DATE(CAST(v.id_periodo AS VARCHAR), 'YYYYMMDD')) AS dias_con_venta,
+    SUM(v.unidades) / 90.0 AS adu
+FROM db_finanzas.fct.ft_vcm v
+WHERE TRY_TO_DATE(CAST(v.id_periodo AS VARCHAR), 'YYYYMMDD') >= DATEADD('day', -90, CURRENT_DATE())
+  AND v.unidades > 0
+  AND v.cod_agencia IN (
+      SELECT DISTINCT cod_bodega
+      FROM db_supply.hst.ht_in_stock
+      WHERE fecha = (SELECT MAX(fecha) FROM db_supply.hst.ht_in_stock WHERE fecha < CURRENT_DATE())
+        AND stock_unidades > 0
+  )
+GROUP BY 1, 2
+"""
+
 QUERY_DDMRP_DIAS_CON_STOCK = """
 SELECT
     sku_producto,

@@ -121,56 +121,39 @@ def _init_calendar_from_stores(df_tiendas: pd.DataFrame) -> pd.DataFrame:
 
 # ── DDMRP Engine ──────────────────────────────────────────────────────────
 
-def _compute_adu_from_stock(df_stock):
-    """Compute ADU from ht_in_stock's CANTIDAD_PROM_90 field.
+def _compute_adu_from_vcm(df_adu_tienda):
+    """Compute ADU from VCM directly (join via cod_agencia = cod_bodega).
 
-    This is the most reliable ADU source in Peru because:
-    - ht_in_stock already has cantidad_prom_90 per SKU×Store pre-calculated
-    - No join issues (the field comes directly from the stock snapshot)
-    - Falls back to cantidad_prom_180 / 2 if 90-day data is 0
-
-    ADU = cantidad_prom_90 / 90  (it stores TOTAL units in 90 days, not daily avg)
+    The ft_vcm table in Peru uses cod_agencia (NOT cod_ccosto) as the
+    store identifier. QUERY_DDMRP_ADU_TIENDA already computes:
+        ADU = SUM(unidades) / 90 per SKU x Store
 
     Returns DataFrame with SKU_PRODUCTO, ID_SUCURSAL, ADU, VENTANA_SEMANAS,
                           UNIDADES_VENTANA, DIAS_CON_STOCK
     """
-    if df_stock is None or df_stock.empty:
+    if df_adu_tienda is None or df_adu_tienda.empty:
         return pd.DataFrame(columns=[
             "SKU_PRODUCTO", "ID_SUCURSAL", "ADU", "VENTANA_SEMANAS",
             "UNIDADES_VENTANA", "DIAS_CON_STOCK",
         ])
 
-    stk = df_stock.copy()
+    df = df_adu_tienda.copy()
     for c in ["SKU_PRODUCTO", "ID_SUCURSAL"]:
-        if c in stk.columns:
-            stk[c] = stk[c].astype(str).str.strip()
+        if c in df.columns:
+            df[c] = df[c].astype(str).str.strip()
 
-    for c in ["CANTIDAD_PROM_90", "CANTIDAD_PROM_180"]:
-        if c not in stk.columns:
-            stk[c] = 0.0
-        else:
-            stk[c] = pd.to_numeric(stk[c], errors="coerce").fillna(0)
+    df["ADU"] = pd.to_numeric(df.get("ADU", 0), errors="coerce").fillna(0)
+    df["UNIDADES_90D"] = pd.to_numeric(df.get("UNIDADES_90D", 0), errors="coerce").fillna(0)
+    df["DIAS_CON_VENTA"] = pd.to_numeric(df.get("DIAS_CON_VENTA", 0), errors="coerce").fillna(0)
 
-    # Use 90-day avg; fallback to 180-day avg / 2
-    stk["UNIDADES_VENTANA"] = np.where(
-        stk["CANTIDAD_PROM_90"] > 0,
-        stk["CANTIDAD_PROM_90"],
-        stk["CANTIDAD_PROM_180"] / 2,
-    )
-    stk["VENTANA_SEMANAS"] = np.where(
-        stk["CANTIDAD_PROM_90"] > 0, 12, 24,
-    )
+    # Recalculate ADU: simple = und / 90
+    df["ADU"] = (df["UNIDADES_90D"] / 90.0).round(3)
+    df["VENTANA_SEMANAS"] = 12
+    df["UNIDADES_VENTANA"] = df["UNIDADES_90D"]
+    df["DIAS_CON_STOCK"] = df["DIAS_CON_VENTA"]
 
-    # ADU = daily average (cantidad_prom_90 is the avg daily usage * 90)
-    # Actually cantidad_prom_90 IS the daily average already in Syncro
-    # Let's keep it as-is — if it's truly a daily avg, ADU = cantidad_prom_90
-    # If it's total 90d, ADU = cantidad_prom_90 / 90
-    # We'll use it directly as the daily average (Syncro convention)
-    stk["ADU"] = stk["UNIDADES_VENTANA"].round(3)
-    stk["DIAS_CON_STOCK"] = 0  # not available from this source
-
-    result = stk[["SKU_PRODUCTO", "ID_SUCURSAL", "ADU", "VENTANA_SEMANAS",
-                   "UNIDADES_VENTANA", "DIAS_CON_STOCK"]].copy()
+    result = df[["SKU_PRODUCTO", "ID_SUCURSAL", "ADU", "VENTANA_SEMANAS",
+                 "UNIDADES_VENTANA", "DIAS_CON_STOCK"]].copy()
     return result[result["ADU"] > 0]
 
 
@@ -572,6 +555,7 @@ def render_ddmrp(conn):
     with st.spinner("Cargando datos DDMRP..."):
         df_stock = norm_cols(cq.ddmrp_stock_tienda(conn))
         df_config = norm_cols(cq.syncro_config(conn))
+        df_adu_raw = norm_cols(cq.ddmrp_adu_tienda(conn))
         df_transito_raw = cq.transito_sucursales(conn)
         df_transito = _parse_transito(df_transito_raw)
         df_maestra = norm_cols(cq.maestra(conn))
@@ -590,11 +574,11 @@ def render_ddmrp(conn):
     # Apply PM filter to maestra
     df_maestra = apply_pm_filter(df_maestra)
 
-    # ── Compute ADU from ht_in_stock (cantidad_prom_90) ──
+    # ── Compute ADU from VCM (cod_agencia = tienda) ──
     # ── Compute DDMRP ──
-    cache_key = "ddmrp_result_v3"
+    cache_key = "ddmrp_result_v4"
     if cache_key not in st.session_state or st.button("🔄 Recalcular", key="ddmrp_recalc"):
-        df_adu = _compute_adu_from_stock(df_stock)
+        df_adu = _compute_adu_from_vcm(df_adu_raw)
         df_ddmrp = _compute_ddmrp_buffers(
             df_stock, df_config, df_adu,
             df_transito, df_calendar, df_maestra, df_abc,
