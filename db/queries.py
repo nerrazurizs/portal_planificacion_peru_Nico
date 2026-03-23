@@ -2385,7 +2385,9 @@ SELECT
     a.cod_bodega         AS id_sucursal,
     b.descripcion_sucursal,
     SUM(a.stock_unidades)  AS stock_unidades,
-    SUM(a.min_exhibicion)  AS min_exhibicion
+    SUM(a.min_exhibicion)  AS min_exhibicion,
+    AVG(a.cantidad_prom_90)  AS cantidad_prom_90,
+    AVG(a.cantidad_prom_180) AS cantidad_prom_180
 FROM {_INSTOCK} a
 LEFT JOIN {_SUCURSAL} b ON a.cod_bodega = b.id_sucursal
 WHERE a.fecha = (
