@@ -48,6 +48,7 @@ from modules.diagnostico import render_diagnostico
 from modules.stock_critico_v2 import render_stock_dashboard_v2
 from modules.business_case import render_business_case
 from modules.listado_oe import render_listado_oe
+from modules.ddmrp import render_ddmrp
 from db.cache import cached_query as cq, clear_all as clear_query_cache, last_refresh_label, auto_refresh_if_new_day
 from utils.ui_animations import lottie_spinner, show_lottie, animated_kpi_row
 
@@ -280,6 +281,7 @@ def main_app():
             ("📅", "Forecast Diario"),
             ("🔄", "Redistribucion Stock"),
             ("📊", "Ventas Forecast 2+10"),
+            ("🚦", "DDMRP Reposicion"),
         ],
         "ANALISIS": [
             ("📊", "Dashboard Stock"),
@@ -474,6 +476,7 @@ def main_app():
         "Dashboard Stock 2.0": render_stock_dashboard_v2,
         "Caso de Negocio": render_business_case,
         "Listado O&E": render_listado_oe,
+        "DDMRP Reposicion": render_ddmrp,
         "Stock": render_stock,
         "Maestra Productos": render_maestra,
         "Comex": render_comex,

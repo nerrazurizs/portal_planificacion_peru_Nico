@@ -2342,3 +2342,32 @@ where a.cod_bodega = '1190'
 group by 1,2,3,4,5,6,7,8,9,12
 order by c.area, c.linea, c.sku_nom_producto
 """
+
+# ── DDMRP Store Replenishment ─────────────────────────────────────────────
+
+QUERY_DDMRP_STOCK_TIENDA = f"""
+SELECT
+    a.sku_producto,
+    a.cod_bodega         AS id_sucursal,
+    b.descripcion_sucursal,
+    SUM(a.stock_unidades)  AS stock_unidades,
+    SUM(a.min_exhibicion)  AS min_exhibicion
+FROM {_INSTOCK} a
+LEFT JOIN {_SUCURSAL} b ON a.cod_bodega = b.id_sucursal
+WHERE a.fecha = (
+    SELECT MAX(fecha) FROM db_supply.hst.ht_in_stock WHERE fecha < CURRENT_DATE()
+)
+  AND b.canal_de_distribucion = 'TIENDA'
+GROUP BY 1, 2, 3
+"""
+
+QUERY_DDMRP_DIAS_CON_STOCK = """
+SELECT
+    sku_producto,
+    cod_bodega   AS id_sucursal,
+    COUNT(DISTINCT fecha) AS dias_con_stock
+FROM db_supply.hst.ht_in_stock
+WHERE fecha >= DATEADD('day', -90, CURRENT_DATE())
+  AND stock_unidades > 0
+GROUP BY 1, 2
+"""

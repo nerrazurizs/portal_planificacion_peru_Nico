@@ -90,6 +90,8 @@ from db.queries import (
     QUERY_TIENDAS_VENTA_SKU,
     QUERY_STOCK_DETALLE_BODEGA,
     QUERY_STOCK_OE,
+    QUERY_DDMRP_STOCK_TIENDA,
+    QUERY_DDMRP_DIAS_CON_STOCK,
 )
 from utils.filters import norm_cols
 
@@ -274,6 +276,18 @@ def stock_detalle_bodega(_conn_id, _conn=None) -> pd.DataFrame:
 def stock_oe(_conn_id, _conn=None) -> pd.DataFrame:
     """Stock in CDs for O&E inter-division sales."""
     return _run(QUERY_STOCK_OE, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def ddmrp_stock_tienda(_conn_id, _conn=None) -> pd.DataFrame:
+    """Current store stock for DDMRP (latest date, TIENDA only)."""
+    return _run(QUERY_DDMRP_STOCK_TIENDA, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def ddmrp_dias_con_stock(_conn_id, _conn=None) -> pd.DataFrame:
+    """Days with stock > 0 per SKU x Store, last 90 days (for censored ADU)."""
+    return _run(QUERY_DDMRP_DIAS_CON_STOCK, _conn)
 
 
 @st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
@@ -1059,3 +1073,12 @@ class cached_query:
     @staticmethod
     def stock_oe(conn):
         return stock_oe(cached_query._cid(conn), _conn=conn)
+
+    # -- DDMRP (24h) --
+    @staticmethod
+    def ddmrp_stock_tienda(conn):
+        return ddmrp_stock_tienda(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def ddmrp_dias_con_stock(conn):
+        return ddmrp_dias_con_stock(cached_query._cid(conn), _conn=conn)

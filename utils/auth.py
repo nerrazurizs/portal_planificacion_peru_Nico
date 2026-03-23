@@ -59,6 +59,7 @@ PLANNER_MODULES = [
     "ABC-XYZ",
     "Dashboard Stock 2.0",
     "Listado O&E",
+    "DDMRP Reposicion",
 ]
 
 # Modules that only jefe+ can access (everything else is also available)
