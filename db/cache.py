@@ -82,6 +82,14 @@ from db.queries import (
     QUERY_INSTOCK_RANGO_TIENDA,
     QUERY_INSTOCK_RANGO_CD,
     QUERY_INSTOCK_POR_TIENDA,
+    QUERY_STOCK_CRITICO_METRICS_V2,
+    QUERY_STOCK_CD_DIARIO_6M,
+    QUERY_SKU_DASHBOARD,
+    QUERY_PRIMERA_VENTA_SKU,
+    QUERY_STOCK_AGE_FIFO,
+    QUERY_TIENDAS_VENTA_SKU,
+    QUERY_STOCK_DETALLE_BODEGA,
+    QUERY_STOCK_OE,
 )
 from utils.filters import norm_cols
 
@@ -218,6 +226,54 @@ def stock_critico_metrics(_conn_id, _conn=None) -> pd.DataFrame:
 def stock_higiene(_conn_id, _conn=None) -> pd.DataFrame:
     """Detailed stock by warehouse (for supply hygiene analysis)."""
     return _run(QUERY_STOCK_HIGIENE, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def stock_critico_metrics_v2(_conn_id, _conn=None) -> pd.DataFrame:
+    """Stock metrics V2 with FIFO age + MESES_EN_CIA (product lifecycle)."""
+    return _run(QUERY_STOCK_CRITICO_METRICS_V2, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def stock_cd_diario_6m(_conn_id, _conn=None) -> pd.DataFrame:
+    """Daily CD stock by SKU (last 6 months). Used for InStock-based MOI adjustment."""
+    return _run(QUERY_STOCK_CD_DIARIO_6M, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def sku_dashboard(_conn_id, _conn=None) -> pd.DataFrame:
+    """Per-SKU dashboard: stock CD/tienda, perfil, precio, rotacion, margen."""
+    return _run(QUERY_SKU_DASHBOARD, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def primera_venta_sku(_conn_id, _conn=None) -> pd.DataFrame:
+    """First sale date per SKU — product age in the company."""
+    return _run(QUERY_PRIMERA_VENTA_SKU, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def stock_age_fifo(_conn_id, _conn=None) -> pd.DataFrame:
+    """FIFO stock age per SKU — date of oldest units still in current stock."""
+    return _run(QUERY_STOCK_AGE_FIFO, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def tiendas_venta_sku(_conn_id, _conn=None) -> pd.DataFrame:
+    """Store penetration: stores actually selling vs perfil (6m window)."""
+    return _run(QUERY_TIENDAS_VENTA_SKU, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def stock_detalle_bodega(_conn_id, _conn=None) -> pd.DataFrame:
+    """Stock by warehouse/location for each SKU."""
+    return _run(QUERY_STOCK_DETALLE_BODEGA, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def stock_oe(_conn_id, _conn=None) -> pd.DataFrame:
+    """Stock in CDs for O&E inter-division sales."""
+    return _run(QUERY_STOCK_OE, _conn)
 
 
 @st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
@@ -970,3 +1026,36 @@ class cached_query:
     @staticmethod
     def supply_despachos_fedex(conn):
         return supply_despachos_fedex(cached_query._cid(conn), _conn=conn)
+
+    # -- Dashboard Stock 2.0, Caso de Negocio, Listado O&E --
+    @staticmethod
+    def stock_critico_metrics_v2(conn):
+        return stock_critico_metrics_v2(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def stock_cd_diario_6m(conn):
+        return stock_cd_diario_6m(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def sku_dashboard(conn):
+        return sku_dashboard(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def primera_venta_sku(conn):
+        return primera_venta_sku(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def stock_age_fifo(conn):
+        return stock_age_fifo(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def tiendas_venta_sku(conn):
+        return tiendas_venta_sku(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def stock_detalle_bodega(conn):
+        return stock_detalle_bodega(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def stock_oe(conn):
+        return stock_oe(cached_query._cid(conn), _conn=conn)

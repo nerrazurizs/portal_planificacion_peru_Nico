@@ -1974,3 +1974,370 @@ WHERE a.fecha >= DATEADD('month', -24, DATE_TRUNC('month', CURRENT_DATE()))
   AND a.cantidad > 0
 GROUP BY 1, 2, 3
 """
+
+# ============================================================
+# NEW QUERIES — Dashboard Stock 2.0, Caso de Negocio, Listado O&E
+# ============================================================
+
+# Stock Critico V2: FIFO age + MESES_EN_CIA (product lifecycle age)
+QUERY_STOCK_CRITICO_METRICS_V2 = f"""
+with
+recepciones as (
+    select sku_producto, fecha_recepcion_en_cd,
+        sum(cantidad_carpeta_recepcionada) as qty_recepcionada
+    from {_COMPRAS}
+    where fecha_recepcion_en_cd is not null
+      and cantidad_carpeta_recepcionada > 0
+    group by 1, 2
+),
+recepciones_acum as (
+    select sku_producto, fecha_recepcion_en_cd, qty_recepcionada,
+        sum(qty_recepcionada) over (
+            partition by sku_producto
+            order by fecha_recepcion_en_cd desc
+            rows between unbounded preceding and current row
+        ) as cum_desde_reciente
+    from recepciones
+),
+stock_actual as (
+    select sku_producto, sum(stock_unidades) as stock_hoy
+    from {_INSTOCK}
+    where fecha = (select max(fecha) from db_supply.hst.ht_in_stock)
+    group by 1
+),
+recepciones_en_stock as (
+    select r.sku_producto, r.fecha_recepcion_en_cd
+    from recepciones_acum r
+    join stock_actual s on r.sku_producto = s.sku_producto
+    where (r.cum_desde_reciente - r.qty_recepcionada) < s.stock_hoy
+      and s.stock_hoy > 0
+),
+fifo_age as (
+    select s.sku_producto,
+        min(r.fecha_recepcion_en_cd) as fecha_stock_antiguo,
+        max(r.fecha_recepcion_en_cd) as fecha_ultima_recepcion,
+        datediff('month', min(r.fecha_recepcion_en_cd), current_date()) as antiguedad_stock_meses
+    from stock_actual s
+    left join recepciones_en_stock r on s.sku_producto = r.sku_producto
+    group by 1
+),
+primera_venta as (
+    select sku_producto,
+        min(fecha) as primera_fecha_venta,
+        datediff('month', min(fecha), current_date()) as meses_en_cia
+    from {_VCM}
+    where cantidad > 0
+    group by 1
+)
+select
+  a.fecha,
+  a.sku_producto,
+  c.nom_producto,
+  c.area,
+  c.linea,
+  c.sublinea,
+  c.marca,
+  c.modelo,
+  c.proveedor,
+  c.ultimo_ingreso_cd,
+  max(f.antiguedad_stock_meses)      as antiguedad_stock_meses,
+  max(f.fecha_stock_antiguo)         as fecha_stock_antiguo,
+  max(f.fecha_ultima_recepcion)      as fecha_ultima_recepcion,
+  coalesce(max(pv.meses_en_cia), 0)  as meses_en_cia,
+  max(pv.primera_fecha_venta)        as primera_fecha_venta,
+  sum(a.stock_costo)                 as stock_costo,
+  sum(a.stock_unidades)              as stock_unidades,
+  max(d.costo_prom_90_cia)           as costo_prom_90_cia,
+  (sum(a.stock_costo) / nullif(max(d.costo_prom_90_cia), 0)) / 30.44 as moi,
+  case
+    when (sum(a.stock_costo) / nullif(max(d.costo_prom_90_cia), 0)) / 30.44 is null then 'Sin MOI'
+    when (sum(a.stock_costo) / nullif(max(d.costo_prom_90_cia), 0)) / 30.44 >= 24 then '>= 24 meses'
+    when (sum(a.stock_costo) / nullif(max(d.costo_prom_90_cia), 0)) / 30.44 >= 12 then '>= 12 meses'
+    when (sum(a.stock_costo) / nullif(max(d.costo_prom_90_cia), 0)) / 30.44 >= 6  then '>= 6 meses'
+    when (sum(a.stock_costo) / nullif(max(d.costo_prom_90_cia), 0)) / 30.44 >= 3  then '>= 3 meses'
+    else '< 3 meses'
+  end as rango_moi,
+  case
+    when max(f.antiguedad_stock_meses) is null then 'Sin fecha ingreso'
+    when max(f.antiguedad_stock_meses) >= 24 then '>= 24 meses'
+    when max(f.antiguedad_stock_meses) >= 12 then '>= 12 meses'
+    when max(f.antiguedad_stock_meses) >= 6  then '>= 6 meses'
+    when max(f.antiguedad_stock_meses) >= 3  then '>= 3 meses'
+    else '< 3 meses'
+  end as rango_antiguedad
+from {_INSTOCK} a
+left join {_PROD} c
+  on a.sku_producto = c.sku_producto
+left join {_INSTOCK_CD} d
+  on a.fecha = d.fecha
+ and a.sku_producto = d.sku_producto
+left join fifo_age f
+  on a.sku_producto = f.sku_producto
+left join primera_venta pv
+  on a.sku_producto = pv.sku_producto
+where a.fecha >= '2025-01-01'
+  and (dayname(a.fecha) = 'Mon' or a.fecha = (select max(fecha) from db_supply.hst.ht_in_stock))
+group by 1,2,3,4,5,6,7,8,9,10
+"""
+
+# Stock CD diario 6 meses (para MOI ajustado y Caso de Negocio)
+QUERY_STOCK_CD_DIARIO_6M = f"""
+with stock_cd as (
+    select
+        a.sku_producto,
+        a.fecha,
+        sum(a.stock_unidades) as stock_cd_und
+    from {_INSTOCK} a
+    left join {_SUCURSAL} b
+        on a.cod_bodega = b.id_sucursal
+    where b.canal_de_distribucion = 'CD'
+        and a.fecha >= date_trunc('month', dateadd('month', -6, current_date()))
+    group by a.sku_producto, a.fecha
+),
+ventas_dia as (
+    select
+        a.sku_producto,
+        a.fecha,
+        sum(a.cantidad) as vta_und,
+        sum(a.neto)     as vta_neto,
+        sum(a.neto) - sum(coalesce(a.aporte, 0)) as vta_cogs
+    from {_VCM} a
+    where a.fecha >= date_trunc('month', dateadd('month', -6, current_date()))
+        and a.cantidad > 0
+    group by a.sku_producto, a.fecha
+)
+select
+    coalesce(s.sku_producto, v.sku_producto) as sku_producto,
+    coalesce(s.fecha, v.fecha)               as fecha,
+    coalesce(s.stock_cd_und, 0)              as stock_cd_und,
+    coalesce(v.vta_und, 0)                   as vta_und,
+    coalesce(v.vta_neto, 0)                  as vta_neto,
+    coalesce(v.vta_cogs, 0)                  as vta_cogs
+from stock_cd s
+full outer join ventas_dia v
+    on s.sku_producto = v.sku_producto
+    and s.fecha = v.fecha
+"""
+
+# SKU Dashboard: stock CD/tienda, perfil, rotacion, margen
+QUERY_SKU_DASHBOARD = f"""
+with stock_split as (
+    select
+        a.sku_producto,
+        case when b.canal_de_distribucion = 'CD' then 'CD' else 'TIENDA' end as canal,
+        sum(a.stock_unidades)  as stock_und,
+        sum(a.stock_costo)     as stock_costo,
+        sum(case when b.canal_de_distribucion != 'CD'
+                  and a.min_exhibicion > 0 then 1 else 0 end) as tiendas_con_perfil,
+        sum(a.min_exhibicion) as perfil_total
+    from {_INSTOCK} a
+    left join {_SUCURSAL} b
+        on a.cod_bodega = b.id_sucursal
+    where a.fecha = (
+        select max(fecha) from db_supply.hst.ht_in_stock
+        where fecha < current_date()
+    )
+    and b.canal_de_distribucion in ('TIENDA', 'CD')
+    group by 1, 2
+),
+stock_pivot as (
+    select
+        sku_producto,
+        sum(case when canal = 'CD'     then stock_und    else 0 end) as stock_cd_und,
+        sum(case when canal = 'TIENDA' then stock_und    else 0 end) as stock_tienda_und,
+        sum(case when canal = 'CD'     then stock_costo  else 0 end) as stock_cd_clp,
+        sum(case when canal = 'TIENDA' then stock_costo  else 0 end) as stock_tienda_clp,
+        max(tiendas_con_perfil)  as tiendas_con_perfil,
+        max(perfil_total)        as perfil_total
+    from stock_split
+    group by 1
+),
+ventas_6m as (
+    select
+        a.sku_producto,
+        sum(a.cantidad) as und_6m,
+        sum(a.neto)     as neto_6m,
+        sum(a.aporte)   as aporte_6m,
+        sum(case when a.cantidad > 0 then a.neto else 0 end)
+          / nullif(sum(case when a.cantidad > 0 then a.cantidad else 0 end), 0) as precio_prom_neto,
+        sum(a.cantidad) / 6.0 as rotacion_und_mes
+    from {_VCM} a
+    where a.fecha >= dateadd('month', -6, date_trunc('month', current_date()))
+      and a.fecha <  date_trunc('month', current_date())
+      and a.cantidad > 0
+    group by 1
+)
+select
+    s.sku_producto,
+    s.stock_cd_und,
+    s.stock_tienda_und,
+    s.stock_cd_clp,
+    s.stock_tienda_clp,
+    s.tiendas_con_perfil,
+    s.perfil_total,
+    coalesce(v.und_6m, 0)           as und_6m,
+    coalesce(v.neto_6m, 0)          as neto_6m,
+    coalesce(v.aporte_6m, 0)        as aporte_6m,
+    coalesce(v.precio_prom_neto, 0) as precio_prom_neto,
+    coalesce(v.rotacion_und_mes, 0) as rotacion_und_mes,
+    case when coalesce(v.neto_6m, 0) > 0
+         then coalesce(v.aporte_6m, 0) / v.neto_6m
+         else 0 end as margen_6m
+from stock_pivot s
+left join ventas_6m v on s.sku_producto = v.sku_producto
+"""
+
+# Primera venta por SKU (antiguedad del producto en la compania)
+QUERY_PRIMERA_VENTA_SKU = f"""
+select
+    sku_producto,
+    min(fecha)  as PRIMERA_VENTA,
+    max(fecha)  as ULTIMA_VENTA,
+    datediff('month', min(fecha), current_date()) as MESES_EN_CIA
+from {_VCM}
+where cantidad > 0
+group by 1
+"""
+
+# FIFO stock age por SKU (fecha del stock mas antiguo aun en inventario)
+QUERY_STOCK_AGE_FIFO = f"""
+with recepciones as (
+    select
+        sku_producto,
+        fecha_recepcion_en_cd,
+        sum(cantidad_carpeta_recepcionada) as qty_recepcionada
+    from {_COMPRAS}
+    where fecha_recepcion_en_cd is not null
+      and cantidad_carpeta_recepcionada > 0
+    group by 1, 2
+),
+recepciones_acum as (
+    select
+        sku_producto,
+        fecha_recepcion_en_cd,
+        qty_recepcionada,
+        sum(qty_recepcionada) over (
+            partition by sku_producto
+            order by fecha_recepcion_en_cd desc
+            rows between unbounded preceding and current row
+        ) as cum_desde_reciente
+    from recepciones
+),
+stock_actual as (
+    select sku_producto, sum(stock_unidades) as stock_hoy
+    from {_INSTOCK}
+    where fecha = (select max(fecha) from db_supply.hst.ht_in_stock)
+    group by 1
+),
+recepciones_en_stock as (
+    select r.sku_producto, r.fecha_recepcion_en_cd
+    from recepciones_acum r
+    join stock_actual s on r.sku_producto = s.sku_producto
+    where (r.cum_desde_reciente - r.qty_recepcionada) < s.stock_hoy
+      and s.stock_hoy > 0
+)
+select
+    s.sku_producto,
+    min(r.fecha_recepcion_en_cd)                                    as FECHA_STOCK_ANTIGUO,
+    max(r.fecha_recepcion_en_cd)                                    as FECHA_ULTIMA_RECEPCION,
+    datediff('month', min(r.fecha_recepcion_en_cd), current_date()) as ANTIGUEDAD_STOCK_MESES
+from stock_actual s
+left join recepciones_en_stock r on s.sku_producto = r.sku_producto
+group by 1
+"""
+
+# Tiendas con venta por SKU (penetracion tiendas)
+# NOTE Peru: join on id_sucursal directly (Chile used CUSTOM 1 for cod_ccosto)
+QUERY_TIENDAS_VENTA_SKU = f"""
+with perfil_ccosto as (
+    select
+        c.id_material  as sku_producto,
+        c.id_sucursal
+    from db_syncros.public.coo_config_sku_sucursal c
+    inner join {_SUCURSAL} m
+        on c.id_sucursal = m.id_sucursal
+    where c.min_inv_requerido > 0
+      and m.canal_de_distribucion = 'TIENDA'
+),
+ventas_tienda as (
+    select sku_producto, cod_ccosto, fecha
+    from {_VCM}
+    where fecha >= dateadd('month', -6, current_date())
+      and cantidad > 0
+)
+select
+    p.sku_producto,
+    count(distinct p.id_sucursal)  as N_SUC_PERFIL,
+    count(distinct case when v.cod_ccosto is not null
+                        then p.id_sucursal end) as N_TIENDAS_VENTA,
+    count(distinct case when v.cod_ccosto is not null
+                             and v.fecha >= dateadd('month', -3, current_date())
+                        then p.id_sucursal end) as N_TIENDAS_VENTA_3M,
+    count(distinct case when v.cod_ccosto is not null
+                        then date_trunc('month', v.fecha) end) as N_MESES_CON_VENTA
+from perfil_ccosto p
+left join ventas_tienda v
+    on p.sku_producto = v.sku_producto
+   and p.id_sucursal  = v.cod_ccosto
+group by 1
+"""
+
+# Stock detalle por bodega (diagnostico locacion)
+QUERY_STOCK_DETALLE_BODEGA = f"""
+select
+    a.sku_producto,
+    a.cod_bodega,
+    coalesce(b.descripcion_sucursal, a.cod_bodega) as bodega_nombre,
+    coalesce(b.canal_de_distribucion, 'DESCONOCIDO') as canal,
+    sum(a.stock_unidades) as stock_unidades,
+    sum(a.stock_costo)    as stock_costo
+from {_INSTOCK} a
+left join {_SUCURSAL} b
+    on a.cod_bodega = b.id_sucursal
+where a.fecha = (
+    select max(fecha)
+    from db_supply.hst.ht_in_stock
+    where fecha < current_date()
+)
+and a.stock_unidades > 0
+group by 1, 2, 3, 4
+order by stock_unidades desc
+"""
+
+# Stock O&E: inventario en CDs para venta inter-division
+# NOTE Peru: filter by canal = 'CD' (not hardcoded warehouse IDs)
+QUERY_STOCK_OE = f"""
+with primera_venta as (
+    select sku_producto,
+        min(fecha) as primera_fecha_venta,
+        datediff('month', min(fecha), current_date()) as meses_en_cia
+    from {_VCM}
+    where cantidad > 0
+    group by 1
+)
+select
+    a.sku_producto,
+    c.nom_producto as description,
+    c.area,
+    c.linea,
+    c.sublinea,
+    c.marca,
+    a.cod_bodega,
+    b.descripcion_sucursal as warehouse,
+    sum(a.stock_unidades) as qty,
+    sum(a.stock_costo) as stock_costo,
+    c.ultimo_costo,
+    coalesce(max(pv.meses_en_cia), 0) as meses_en_cia
+from {_INSTOCK} a
+left join {_SUCURSAL} b
+    on a.cod_bodega = b.id_sucursal
+left join {_PROD} c
+    on a.sku_producto = c.sku_producto
+left join primera_venta pv
+    on a.sku_producto = pv.sku_producto
+where b.canal_de_distribucion = 'CD'
+  and a.fecha = (select max(fecha) from db_supply.hst.ht_in_stock)
+  and a.stock_unidades > 0
+group by 1,2,3,4,5,6,7,8,11
+order by c.area, c.linea, c.nom_producto
+"""

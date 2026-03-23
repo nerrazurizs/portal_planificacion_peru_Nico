@@ -45,6 +45,9 @@ from modules.operaciones_supply import render_operaciones_supply
 from modules.venta_perdida import render_venta_perdida
 from modules.ventas_forecast_210 import render_ventas_forecast_210
 from modules.diagnostico import render_diagnostico
+from modules.stock_critico_v2 import render_stock_dashboard_v2
+from modules.business_case import render_business_case
+from modules.listado_oe import render_listado_oe
 from db.cache import cached_query as cq, clear_all as clear_query_cache, last_refresh_label, auto_refresh_if_new_day
 from utils.ui_animations import lottie_spinner, show_lottie, animated_kpi_row
 
@@ -280,6 +283,9 @@ def main_app():
         ],
         "ANALISIS": [
             ("📊", "Dashboard Stock"),
+            ("📊", "Dashboard Stock 2.0"),
+            ("📋", "Caso de Negocio"),
+            ("📦", "Listado O&E"),
             ("🏬", "InStock Historico"),
             ("🎯", "ABC-XYZ"),
             ("💲", "Elasticidad"),
@@ -465,6 +471,9 @@ def main_app():
         "Ventas": render_ventas,
         "Proyeccion Stock": render_proyeccion,
         "Dashboard Stock": render_stock_dashboard,
+        "Dashboard Stock 2.0": render_stock_dashboard_v2,
+        "Caso de Negocio": render_business_case,
+        "Listado O&E": render_listado_oe,
         "Stock": render_stock,
         "Maestra Productos": render_maestra,
         "Comex": render_comex,
