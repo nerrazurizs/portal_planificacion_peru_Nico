@@ -44,9 +44,12 @@ STATUS_COLORS = {
 
 STATUS_ORDER = ["CRITICO", "REORDER", "OK", "EXCESO"]
 
-# Mapping VCM cod_agencia (padded 4 digits) → Syncro/InStock id_sucursal
-# Source: PE - DB_Canal_Tienda.xlsx (COD_CCOSTO padded → COD_SYNCRO)
-VCM_AGENCIA_TO_SYNCRO = {
+# Mapping VCM cod_ccosto (padded 4 digits) → Syncro/InStock id_sucursal
+# Source: PE - DB_Canal_Tienda.xlsx (COD_CCOSTO → COD_SYNCRO)
+# In Peru VCM, cod_ccosto is the centro de costo (02xx for retail stores).
+# cod_agencia is a DIFFERENT code that does NOT match Syncro IDs.
+VCM_CCOSTO_TO_SYNCRO = {
+    "0201": "0201",  # Web Bis (etail, kept for completeness)
     "0206": "0005", "0207": "0002", "0209": "0009",
     "0212": "1090", "0213": "1110", "0216": "1710",
     "0217": "1170", "0218": "1180", "0219": "1690",
@@ -141,8 +144,9 @@ def _init_calendar_from_stores(df_tiendas: pd.DataFrame) -> pd.DataFrame:
 def _compute_adu_from_vcm(df_adu_tienda):
     """Compute ADU from VCM sales data.
 
-    The query returns cod_agencia (VCM's store code) which must be
-    translated to the Syncro/InStock id_sucursal via VCM_AGENCIA_TO_SYNCRO.
+    The query returns cod_ccosto (VCM's centro de costo, e.g. 0209 for
+    Trujillo) which must be translated to the Syncro/InStock id_sucursal
+    (e.g. 0009) via VCM_CCOSTO_TO_SYNCRO dictionary.
 
     Returns DataFrame with SKU_PRODUCTO, ID_SUCURSAL, ADU, VENTANA_SEMANAS,
                           UNIDADES_VENTANA, DIAS_CON_STOCK
@@ -156,12 +160,12 @@ def _compute_adu_from_vcm(df_adu_tienda):
     df = df_adu_tienda.copy()
     df["SKU_PRODUCTO"] = df["SKU_PRODUCTO"].astype(str).str.strip()
 
-    # Translate VCM cod_agencia → Syncro id_sucursal
-    agencia_col = "COD_AGENCIA" if "COD_AGENCIA" in df.columns else "ID_SUCURSAL"
-    df[agencia_col] = df[agencia_col].astype(str).str.strip().str.zfill(4)
-    df["ID_SUCURSAL"] = df[agencia_col].map(VCM_AGENCIA_TO_SYNCRO)
+    # Translate VCM cod_ccosto → Syncro id_sucursal
+    ccosto_col = "COD_CCOSTO" if "COD_CCOSTO" in df.columns else "ID_SUCURSAL"
+    df[ccosto_col] = df[ccosto_col].astype(str).str.strip().str.zfill(4)
+    df["ID_SUCURSAL"] = df[ccosto_col].map(VCM_CCOSTO_TO_SYNCRO)
 
-    # Drop rows that didn't map (non-retail stores like mayorista, etail)
+    # Drop rows that didn't map (non-retail centros de costo)
     df = df.dropna(subset=["ID_SUCURSAL"])
 
     for c in ["UNIDADES_90D", "DIAS_CON_VENTA", "ADU"]:

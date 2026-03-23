@@ -2398,19 +2398,20 @@ GROUP BY 1, 2, 3
 """
 
 # ADU por SKU x Tienda (90 dias)
-# Peru VCM uses cod_agencia as the store code, but it does NOT match
-# the id_sucursal in coo_config/ht_in_stock. A Python-side mapping
-# (VCM_AGENCIA_TO_SYNCRO) translates cod_agencia → config id_sucursal.
+# Peru VCM: the store is identified by cod_ccosto (centro de costo).
+# The Python-side dict VCM_CCOSTO_TO_SYNCRO maps cod_ccosto → Syncro id_sucursal.
+# We group by cod_ccosto (padded to 4 digits) and translate in Python.
 QUERY_DDMRP_ADU_TIENDA = """
 SELECT
     v.cod_producto   AS sku_producto,
-    LPAD(CAST(v.cod_agencia AS VARCHAR), 4, '0') AS cod_agencia,
+    LPAD(CAST(v.cod_ccosto AS VARCHAR), 4, '0') AS cod_ccosto,
     SUM(v.unidades)  AS unidades_90d,
     COUNT(DISTINCT TRY_TO_DATE(CAST(v.id_periodo AS VARCHAR), 'YYYYMMDD')) AS dias_con_venta,
     SUM(v.unidades) / 90.0 AS adu
 FROM db_finanzas.fct.ft_vcm v
 WHERE TRY_TO_DATE(CAST(v.id_periodo AS VARCHAR), 'YYYYMMDD') >= DATEADD('day', -90, CURRENT_DATE())
   AND v.unidades > 0
+  AND CAST(v.cod_ccosto AS INT) BETWEEN 200 AND 270
 GROUP BY 1, 2
 """
 
