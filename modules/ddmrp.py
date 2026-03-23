@@ -44,6 +44,23 @@ STATUS_COLORS = {
 
 STATUS_ORDER = ["CRITICO", "REORDER", "OK", "EXCESO"]
 
+# Mapping VCM cod_agencia (padded 4 digits) → Syncro/InStock id_sucursal
+# Source: PE - DB_Canal_Tienda.xlsx (COD_CCOSTO padded → COD_SYNCRO)
+VCM_AGENCIA_TO_SYNCRO = {
+    "0206": "0005", "0207": "0002", "0209": "0009",
+    "0212": "1090", "0213": "1110", "0216": "1710",
+    "0217": "1170", "0218": "1180", "0219": "1690",
+    "0224": "1240", "0226": "1260", "0227": "1270",
+    "0229": "1290", "0230": "1300", "0231": "1310",
+    "0232": "1320", "0233": "1330", "0234": "1340",
+    "0238": "1380", "0240": "1400", "0241": "1410",
+    "0242": "1420", "0248": "1480", "0250": "1500",
+    "0252": "1520", "0255": "1550", "0259": "1590",
+    "0260": "1600", "0261": "1610", "0265": "1650",
+    "0266": "1680", "0267": "1670", "0268": "1700",
+    "0269": "1720",
+}
+
 # ── Calendar persistence ──────────────────────────────────────────────────
 
 def _load_calendar() -> pd.DataFrame:
@@ -122,11 +139,10 @@ def _init_calendar_from_stores(df_tiendas: pd.DataFrame) -> pd.DataFrame:
 # ── DDMRP Engine ──────────────────────────────────────────────────────────
 
 def _compute_adu_from_vcm(df_adu_tienda):
-    """Compute ADU from VCM directly (join via cod_agencia = cod_bodega).
+    """Compute ADU from VCM sales data.
 
-    The ft_vcm table in Peru uses cod_agencia (NOT cod_ccosto) as the
-    store identifier. QUERY_DDMRP_ADU_TIENDA already computes:
-        ADU = SUM(unidades) / 90 per SKU x Store
+    The query returns cod_agencia (VCM's store code) which must be
+    translated to the Syncro/InStock id_sucursal via VCM_AGENCIA_TO_SYNCRO.
 
     Returns DataFrame with SKU_PRODUCTO, ID_SUCURSAL, ADU, VENTANA_SEMANAS,
                           UNIDADES_VENTANA, DIAS_CON_STOCK
@@ -138,22 +154,34 @@ def _compute_adu_from_vcm(df_adu_tienda):
         ])
 
     df = df_adu_tienda.copy()
-    for c in ["SKU_PRODUCTO", "ID_SUCURSAL"]:
+    df["SKU_PRODUCTO"] = df["SKU_PRODUCTO"].astype(str).str.strip()
+
+    # Translate VCM cod_agencia → Syncro id_sucursal
+    agencia_col = "COD_AGENCIA" if "COD_AGENCIA" in df.columns else "ID_SUCURSAL"
+    df[agencia_col] = df[agencia_col].astype(str).str.strip().str.zfill(4)
+    df["ID_SUCURSAL"] = df[agencia_col].map(VCM_AGENCIA_TO_SYNCRO)
+
+    # Drop rows that didn't map (non-retail stores like mayorista, etail)
+    df = df.dropna(subset=["ID_SUCURSAL"])
+
+    for c in ["UNIDADES_90D", "DIAS_CON_VENTA", "ADU"]:
         if c in df.columns:
-            df[c] = df[c].astype(str).str.strip()
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
-    df["ADU"] = pd.to_numeric(df.get("ADU", 0), errors="coerce").fillna(0)
-    df["UNIDADES_90D"] = pd.to_numeric(df.get("UNIDADES_90D", 0), errors="coerce").fillna(0)
-    df["DIAS_CON_VENTA"] = pd.to_numeric(df.get("DIAS_CON_VENTA", 0), errors="coerce").fillna(0)
-
-    # Recalculate ADU: simple = und / 90
-    df["ADU"] = (df["UNIDADES_90D"] / 90.0).round(3)
+    # ADU = und / 90
+    if "UNIDADES_90D" in df.columns:
+        df["ADU"] = (df["UNIDADES_90D"] / 90.0).round(3)
     df["VENTANA_SEMANAS"] = 12
-    df["UNIDADES_VENTANA"] = df["UNIDADES_90D"]
-    df["DIAS_CON_STOCK"] = df["DIAS_CON_VENTA"]
+    df["UNIDADES_VENTANA"] = df.get("UNIDADES_90D", pd.Series(0, index=df.index))
+    df["DIAS_CON_STOCK"] = df.get("DIAS_CON_VENTA", pd.Series(0, index=df.index))
 
-    result = df[["SKU_PRODUCTO", "ID_SUCURSAL", "ADU", "VENTANA_SEMANAS",
-                 "UNIDADES_VENTANA", "DIAS_CON_STOCK"]].copy()
+    # Aggregate in case of duplicates after mapping
+    result = df.groupby(["SKU_PRODUCTO", "ID_SUCURSAL"], as_index=False).agg(
+        ADU=("ADU", "sum"),
+        VENTANA_SEMANAS=("VENTANA_SEMANAS", "first"),
+        UNIDADES_VENTANA=("UNIDADES_VENTANA", "sum"),
+        DIAS_CON_STOCK=("DIAS_CON_STOCK", "max"),
+    )
     return result[result["ADU"] > 0]
 
 

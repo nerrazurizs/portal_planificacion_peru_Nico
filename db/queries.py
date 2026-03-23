@@ -2397,23 +2397,20 @@ WHERE a.fecha = (
 GROUP BY 1, 2, 3
 """
 
-# ADU por SKU x Tienda (90 dias, join via cod_agencia = cod_bodega)
+# ADU por SKU x Tienda (90 dias)
+# Peru VCM uses cod_agencia as the store code, but it does NOT match
+# the id_sucursal in coo_config/ht_in_stock. A Python-side mapping
+# (VCM_AGENCIA_TO_SYNCRO) translates cod_agencia → config id_sucursal.
 QUERY_DDMRP_ADU_TIENDA = """
 SELECT
     v.cod_producto   AS sku_producto,
-    v.cod_agencia    AS id_sucursal,
+    LPAD(CAST(v.cod_agencia AS VARCHAR), 4, '0') AS cod_agencia,
     SUM(v.unidades)  AS unidades_90d,
     COUNT(DISTINCT TRY_TO_DATE(CAST(v.id_periodo AS VARCHAR), 'YYYYMMDD')) AS dias_con_venta,
     SUM(v.unidades) / 90.0 AS adu
 FROM db_finanzas.fct.ft_vcm v
 WHERE TRY_TO_DATE(CAST(v.id_periodo AS VARCHAR), 'YYYYMMDD') >= DATEADD('day', -90, CURRENT_DATE())
   AND v.unidades > 0
-  AND v.cod_agencia IN (
-      SELECT DISTINCT cod_bodega
-      FROM db_supply.hst.ht_in_stock
-      WHERE fecha = (SELECT MAX(fecha) FROM db_supply.hst.ht_in_stock WHERE fecha < CURRENT_DATE())
-        AND stock_unidades > 0
-  )
 GROUP BY 1, 2
 """
 
