@@ -31,25 +31,27 @@ CHANNEL_MAP = {
 CHANNEL_LABELS = {"TIENDA": "Tienda", "ETAIL": "Etail", "MAYORISTA": "Mayorista"}
 
 EVENT_COLORS = {
-    "SaleVerano":    "rgba(0, 180, 216, 0.10)",     # celeste — Sale Verano
-    "DiaMadre":      "rgba(236, 72, 153, 0.10)",    # rosa — Dia de la Madre
-    "CyberWow":      "rgba(255, 165, 0, 0.12)",     # naranja — CyberWow Peru
-    "DiaPadre":      "rgba(30, 144, 255, 0.10)",    # azul — Dia del Padre
-    "FiestasPatrias": "rgba(220, 20, 60, 0.10)",    # rojo — Fiestas Patrias
-    "DiaNino":       "rgba(34, 197, 94, 0.10)",     # verde — Dia del Nino
-    "BlackFriday":   "rgba(80, 80, 80, 0.10)",      # gris — Black Friday
-    "Navidad":       "rgba(220, 20, 60, 0.12)",     # rojo — Navidad
+    "SaleVerano":     "rgba(0, 180, 216, 0.10)",     # celeste — Sale Verano
+    "CyberDays":      "rgba(147, 51, 234, 0.10)",    # violeta — CyberDays CCL
+    "CyberWow":       "rgba(255, 165, 0, 0.12)",     # naranja — CyberWow IAB
+    "DiaMadre":       "rgba(236, 72, 153, 0.10)",    # rosa — Dia de la Madre
+    "DiaPadre":       "rgba(30, 144, 255, 0.10)",    # azul — Dia del Padre
+    "FiestasPatrias": "rgba(220, 20, 60, 0.10)",     # rojo — Fiestas Patrias
+    "DiaNino":        "rgba(34, 197, 94, 0.10)",     # verde — Dia del Nino
+    "BlackFriday":    "rgba(80, 80, 80, 0.10)",      # gris — Black Friday
+    "Navidad":        "rgba(220, 20, 60, 0.12)",     # rojo — Navidad
 }
 
 EVENT_LINE_COLORS = {
-    "SaleVerano":    "#00b4d8",
-    "DiaMadre":      "#ec4899",
-    "CyberWow":      "#e68a00",
-    "DiaPadre":      "#1e90ff",
+    "SaleVerano":     "#00b4d8",
+    "CyberDays":      "#9333ea",
+    "CyberWow":       "#e68a00",
+    "DiaMadre":       "#ec4899",
+    "DiaPadre":       "#1e90ff",
     "FiestasPatrias": "#cc1a36",
-    "DiaNino":       "#22c55e",
-    "BlackFriday":   "#555555",
-    "Navidad":       "#cc1a36",
+    "DiaNino":        "#22c55e",
+    "BlackFriday":    "#555555",
+    "Navidad":        "#cc1a36",
 }
 
 
@@ -362,18 +364,16 @@ def _add_event_bands(fig, df, year=None):
 
     # Build event date ranges that overlap with visible data
     added = set()
-    for label, em, ds, de in EVENTOS_COMERCIALES:
-        # Try current year and next year
-        for y in sorted({fecha_min.year, fecha_max.year, fecha_min.year + 1}):
-            ev_start = pd.Timestamp(year=y, month=em, day=ds)
-            ev_end = pd.Timestamp(year=y, month=em, day=de)
-            if ev_end < fecha_min or ev_start > fecha_max:
-                continue
-            key = (label, y, em)
-            if key in added:
-                continue
-            added.add(key)
-            fig.add_vrect(
+    for label, ey, em, ds, de in EVENTOS_COMERCIALES:
+        ev_start = pd.Timestamp(year=ey, month=em, day=ds)
+        ev_end = pd.Timestamp(year=ey, month=em, day=de)
+        if ev_end < fecha_min or ev_start > fecha_max:
+            continue
+        key = (label, ey, em)
+        if key in added:
+            continue
+        added.add(key)
+        fig.add_vrect(
                 x0=max(ev_start, fecha_min), x1=min(ev_end, fecha_max),
                 fillcolor=EVENT_COLORS.get(label, "rgba(128,128,128,0.08)"),
                 line_width=0.5,
@@ -615,17 +615,15 @@ def _render_event_table(df):
 
     # Build event rows (deduplicate multi-month events like CyberDay May+Jun)
     event_groups = {}
-    for label, em, ds, de in EVENTOS_COMERCIALES:
-        for y in sorted({fecha_min.year, fecha_max.year, fecha_min.year + 1}):
-            ev_start = pd.Timestamp(year=y, month=em, day=ds)
-            ev_end = pd.Timestamp(year=y, month=em, day=de)
-            key = (label, y)
-            if key not in event_groups:
-                event_groups[key] = {"start": ev_start, "end": ev_end}
-            else:
-                # Extend range (e.g. CyberDay May 26 + Jun 3)
-                event_groups[key]["start"] = min(event_groups[key]["start"], ev_start)
-                event_groups[key]["end"] = max(event_groups[key]["end"], ev_end)
+    for label, ey, em, ds, de in EVENTOS_COMERCIALES:
+        ev_start = pd.Timestamp(year=ey, month=em, day=ds)
+        ev_end = pd.Timestamp(year=ey, month=em, day=de)
+        key = (label, ey)
+        if key not in event_groups:
+            event_groups[key] = {"start": ev_start, "end": ev_end}
+        else:
+            event_groups[key]["start"] = min(event_groups[key]["start"], ev_start)
+            event_groups[key]["end"] = max(event_groups[key]["end"], ev_end)
 
     rows = []
     for (label, y), rng in sorted(event_groups.items(), key=lambda x: x[1]["start"]):

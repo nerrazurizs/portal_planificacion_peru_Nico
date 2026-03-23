@@ -249,25 +249,75 @@ def _build_daily_weights(conn) -> dict:
 # (QUERY_EVENT_BOOSTS), not from hardcoded values.
 
 EVENTOS_COMERCIALES = [
-    # Calendario comercial Peru 2026
-    ("SaleVerano",    1,  1, 25),   # Sale de verano
-    ("DiaMadre",      5,  5, 11),   # Dia de la Madre (2do domingo mayo)
-    ("CyberWow",      5, 19, 22),   # CyberWow Peru (mayo)
-    ("DiaPadre",      6, 15, 21),   # Dia del Padre (3er domingo junio)
-    ("FiestasPatrias", 7, 21, 31),  # Fiestas Patrias Peru (28-29 jul + promos)
-    ("DiaNino",       8, 11, 17),   # Dia del Nino (3er domingo agosto)
-    ("CyberWow",     10, 19, 22),   # CyberWow Peru (octubre)
-    ("BlackFriday",  11, 24, 30),   # Black Friday
-    ("CyberWow",     11, 17, 23),   # CyberWow Peru (noviembre, pre-BF)
-    ("Navidad",      12,  1, 24),   # Navidad
+    # Calendario comercial Peru — year-specific (label, year, month, day_start, day_end)
+    # Fuentes: cyberwow.pe, cyberdays.pe, CCL, IAB Peru
+
+    # ── 2024 ──────────────────────────────────────────────────────
+    ("SaleVerano",     2024,  1,  1, 25),
+    ("CyberDays",      2024,  3, 18, 21),   # CyberDays marzo 2024
+    ("CyberWow",       2024,  4, 15, 19),   # CyberWow abril 2024
+    ("DiaMadre",       2024,  5,  6, 12),   # 2do dom mayo = 12 may 2024
+    ("DiaPadre",       2024,  6, 10, 16),   # 3er dom junio = 16 jun 2024
+    ("CyberDays",      2024,  7, 22, 25),   # CyberDays julio 2024
+    ("CyberWow",       2024,  7, 15, 18),   # CyberWow julio 2024
+    ("FiestasPatrias",  2024,  7, 21, 31),
+    ("DiaNino",        2024,  8, 12, 18),   # 3er dom agosto = 18 ago 2024
+    ("CyberWow",       2024, 11,  4,  7),   # CyberWow noviembre 2024
+    ("BlackFriday",    2024, 11, 25, 30),   # Black Friday 29 nov + Black Week
+    ("Navidad",        2024, 12,  1, 24),
+
+    # ── 2025 ──────────────────────────────────────────────────────
+    ("SaleVerano",     2025,  1,  1, 25),
+    ("CyberDays",      2025,  3, 24, 27),   # CyberDays marzo 2025
+    ("CyberWow",       2025,  4, 14, 17),   # CyberWow abril 2025 (est.)
+    ("DiaMadre",       2025,  5,  5, 11),   # 2do dom mayo = 11 may 2025
+    ("DiaPadre",       2025,  6,  9, 15),   # 3er dom junio = 15 jun 2025
+    ("CyberDays",      2025,  7,  7, 10),   # CyberDays julio 2025
+    ("CyberWow",       2025,  7, 14, 17),   # CyberWow julio 2025
+    ("FiestasPatrias",  2025,  7, 21, 31),
+    ("DiaNino",        2025,  8, 11, 17),   # 3er dom agosto = 17 ago 2025
+    ("CyberDays",      2025, 10, 27, 30),   # CyberDays octubre 2025
+    ("CyberWow",       2025, 11,  3,  6),   # CyberWow noviembre 2025
+    ("BlackFriday",    2025, 11, 24, 30),   # Black Friday 28 nov + Black Week
+    ("Navidad",        2025, 12,  1, 24),
+
+    # ── 2026 ──────────────────────────────────────────────────────
+    ("SaleVerano",     2026,  1,  1, 25),
+    ("CyberDays",      2026,  3, 23, 26),   # CyberDays marzo 2026 (est.)
+    ("CyberWow",       2026,  4, 13, 16),   # CyberWow abril 2026 (est.)
+    ("DiaMadre",       2026,  5,  4, 10),   # 2do dom mayo = 10 may 2026
+    ("DiaPadre",       2026,  6, 15, 21),   # 3er dom junio = 21 jun 2026
+    ("CyberDays",      2026,  7,  6,  9),   # CyberDays julio 2026 (est.)
+    ("CyberWow",       2026,  7, 13, 16),   # CyberWow julio 2026 (est.)
+    ("FiestasPatrias",  2026,  7, 21, 31),
+    ("DiaNino",        2026,  8, 10, 16),   # 3er dom agosto = 16 ago 2026
+    ("CyberDays",      2026, 10, 26, 29),   # CyberDays octubre 2026 (est.)
+    ("CyberWow",       2026, 11,  2,  5),   # CyberWow noviembre 2026 (est.)
+    ("BlackFriday",    2026, 11, 23, 29),   # Black Friday 27 nov + Black Week
+    ("Navidad",        2026, 12,  1, 24),
+
+    # ── 2027 (forecast) ──────────────────────────────────────────
+    ("SaleVerano",     2027,  1,  1, 25),
+    ("CyberDays",      2027,  3, 22, 25),
+    ("CyberWow",       2027,  4, 12, 15),
+    ("DiaMadre",       2027,  5,  3,  9),   # 2do dom mayo = 9 may 2027
+    ("DiaPadre",       2027,  6, 14, 20),   # 3er dom junio = 20 jun 2027
+    ("CyberDays",      2027,  7,  5,  8),
+    ("CyberWow",       2027,  7, 12, 15),
+    ("FiestasPatrias",  2027,  7, 21, 31),
+    ("DiaNino",        2027,  8,  9, 15),   # 3er dom agosto = 15 ago 2027
+    ("CyberDays",      2027, 10, 25, 28),
+    ("CyberWow",       2027, 11,  1,  4),
+    ("BlackFriday",    2027, 11, 22, 28),   # Black Friday 26 nov
+    ("Navidad",        2027, 12,  1, 24),
 ]
 
 
 def _classify_event_date(fecha):
     """Return event label for a date, or 'Normal'."""
-    m, d = fecha.month, fecha.day
-    for label, em, ds, de in EVENTOS_COMERCIALES:
-        if m == em and ds <= d <= de:
+    y, m, d = fecha.year, fecha.month, fecha.day
+    for label, ey, em, ds, de in EVENTOS_COMERCIALES:
+        if y == ey and m == em and ds <= d <= de:
             return label
     return "Normal"
 
