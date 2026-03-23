@@ -121,106 +121,119 @@ def _init_calendar_from_stores(df_tiendas: pd.DataFrame) -> pd.DataFrame:
 
 # ── DDMRP Engine ──────────────────────────────────────────────────────────
 
-def _compute_adu_progresivo(df_ventas_sem, df_dias_stock):
-    """Compute censored ADU with progressive window expansion.
+def _compute_adu_progresivo(df_ventas_90d, df_ventas_sem, df_dias_stock):
+    """Compute ADU (Average Daily Usage) with progressive window expansion.
 
-    Tries 12 weeks first. If a SKU×Store has 0 sales in that window,
-    expands to 24, 36, 48 weeks until data is found or 48w exhausted.
+    Strategy:
+    1. Start with ventas_90d_sucursal (90 days, reliable join via cod_ccosto)
+       ADU = UNIDADES_90D / max(DIAS_CON_STOCK, 90)  [censored if stock data available]
+    2. If ADU still 0, try weekly sales data (12m) expanding 12w→24w→36w→48w
 
-    Parameters
-    ----------
-    df_ventas_sem : DataFrame with SKU_PRODUCTO, ID_SUCURSAL, SEMANA, UNIDADES
-        Weekly sales last 12 months by store.
-    df_dias_stock : DataFrame with SKU_PRODUCTO, ID_SUCURSAL, DIAS_CON_STOCK
-        Days with stock > 0 in last 90 days.
-
-    Returns
-    -------
-    DataFrame with SKU_PRODUCTO, ID_SUCURSAL, ADU, VENTANA_SEMANAS, UNIDADES_VENTANA,
-                    DIAS_CON_STOCK
+    Returns DataFrame with SKU_PRODUCTO, ID_SUCURSAL, ADU, VENTANA_SEMANAS,
+                          UNIDADES_VENTANA, DIAS_CON_STOCK
     """
-    if df_ventas_sem is None or df_ventas_sem.empty:
+    parts = []
+
+    # ── Primary: ventas_90d_sucursal (most reliable join) ──
+    if df_ventas_90d is not None and not df_ventas_90d.empty:
+        v90 = df_ventas_90d.copy()
+        for c in ["SKU_PRODUCTO", "ID_SUCURSAL"]:
+            if c in v90.columns:
+                v90[c] = v90[c].astype(str).str.strip()
+        v90["UNIDADES_90D"] = pd.to_numeric(v90.get("UNIDADES_90D", 0), errors="coerce").fillna(0)
+
+        # Filter to tienda only
+        if "CANAL_DE_DISTRIBUCION" in v90.columns:
+            v90 = v90[v90["CANAL_DE_DISTRIBUCION"].astype(str).str.upper() == "TIENDA"]
+
+        v90_agg = v90.groupby(["SKU_PRODUCTO", "ID_SUCURSAL"], as_index=False).agg(
+            UNIDADES_VENTANA=("UNIDADES_90D", "sum"),
+        )
+
+        # Merge dias_con_stock for censored calculation
+        dcs = df_dias_stock.copy() if df_dias_stock is not None else pd.DataFrame()
+        if not dcs.empty:
+            for c in ["SKU_PRODUCTO", "ID_SUCURSAL"]:
+                if c in dcs.columns:
+                    dcs[c] = dcs[c].astype(str).str.strip()
+            if "DIAS_CON_STOCK" in dcs.columns:
+                dcs["DIAS_CON_STOCK"] = pd.to_numeric(dcs["DIAS_CON_STOCK"], errors="coerce").fillna(0)
+                v90_agg = v90_agg.merge(
+                    dcs[["SKU_PRODUCTO", "ID_SUCURSAL", "DIAS_CON_STOCK"]],
+                    on=["SKU_PRODUCTO", "ID_SUCURSAL"], how="left",
+                )
+        if "DIAS_CON_STOCK" not in v90_agg.columns:
+            v90_agg["DIAS_CON_STOCK"] = 0
+        v90_agg["DIAS_CON_STOCK"] = v90_agg["DIAS_CON_STOCK"].fillna(0)
+
+        # ADU = unidades / max(dias_con_stock, 90)
+        # Use censored if we have stock-days data; otherwise full 90 days
+        v90_agg["DIAS_EFECTIVOS"] = np.where(
+            v90_agg["DIAS_CON_STOCK"] > 0,
+            v90_agg["DIAS_CON_STOCK"],
+            90,
+        ).clip(min=1)
+        v90_agg["ADU"] = (v90_agg["UNIDADES_VENTANA"] / v90_agg["DIAS_EFECTIVOS"]).round(3)
+        v90_agg["VENTANA_SEMANAS"] = 12  # ~90 days
+        v90_agg = v90_agg[v90_agg["UNIDADES_VENTANA"] > 0]
+        parts.append(v90_agg[["SKU_PRODUCTO", "ID_SUCURSAL", "ADU",
+                              "VENTANA_SEMANAS", "UNIDADES_VENTANA", "DIAS_CON_STOCK"]])
+
+    # ── Fallback: weekly sales 12m with progressive expansion ──
+    found_keys = set()
+    if parts:
+        _p = parts[0]
+        found_keys = set(zip(_p["SKU_PRODUCTO"], _p["ID_SUCURSAL"]))
+
+    if df_ventas_sem is not None and not df_ventas_sem.empty:
+        vs = df_ventas_sem.copy()
+        for c in ["SKU_PRODUCTO", "ID_SUCURSAL"]:
+            if c in vs.columns:
+                vs[c] = vs[c].astype(str).str.strip()
+        vs["SEMANA"] = pd.to_datetime(vs.get("SEMANA"), errors="coerce")
+        vs["UNIDADES"] = pd.to_numeric(vs.get("UNIDADES", 0), errors="coerce").fillna(0)
+
+        hoy = pd.Timestamp.today().normalize()
+        all_combos = vs[["SKU_PRODUCTO", "ID_SUCURSAL"]].drop_duplicates()
+
+        # Remove already-found combos
+        if found_keys:
+            mask = all_combos.apply(
+                lambda r: (r["SKU_PRODUCTO"], r["ID_SUCURSAL"]) not in found_keys, axis=1
+            )
+            remaining = all_combos[mask]
+        else:
+            remaining = all_combos
+
+        for n_weeks in [12, 24, 36, 48]:
+            if remaining.empty:
+                break
+            cutoff = hoy - pd.Timedelta(weeks=n_weeks)
+            vs_w = vs[vs["SEMANA"] >= cutoff]
+            agg = vs_w.groupby(["SKU_PRODUCTO", "ID_SUCURSAL"], as_index=False).agg(
+                UNIDADES_VENTANA=("UNIDADES", "sum"),
+            )
+            agg = agg[agg["UNIDADES_VENTANA"] > 0]
+            found = remaining.merge(agg, on=["SKU_PRODUCTO", "ID_SUCURSAL"], how="inner")
+            if not found.empty:
+                found["VENTANA_SEMANAS"] = n_weeks
+                found["DIAS_CON_STOCK"] = 0
+                found["ADU"] = (found["UNIDADES_VENTANA"] / (n_weeks * 7)).round(3)
+                parts.append(found[["SKU_PRODUCTO", "ID_SUCURSAL", "ADU",
+                                    "VENTANA_SEMANAS", "UNIDADES_VENTANA", "DIAS_CON_STOCK"]])
+                remaining = remaining.merge(
+                    found[["SKU_PRODUCTO", "ID_SUCURSAL"]],
+                    on=["SKU_PRODUCTO", "ID_SUCURSAL"], how="left", indicator=True,
+                )
+                remaining = remaining[remaining["_merge"] == "left_only"].drop(columns=["_merge"])
+
+    if not parts:
         return pd.DataFrame(columns=[
             "SKU_PRODUCTO", "ID_SUCURSAL", "ADU", "VENTANA_SEMANAS",
             "UNIDADES_VENTANA", "DIAS_CON_STOCK",
         ])
 
-    vs = df_ventas_sem.copy()
-    for c in ["SKU_PRODUCTO", "ID_SUCURSAL"]:
-        if c in vs.columns:
-            vs[c] = vs[c].astype(str).str.strip()
-    vs["SEMANA"] = pd.to_datetime(vs["SEMANA"], errors="coerce")
-    vs["UNIDADES"] = pd.to_numeric(vs["UNIDADES"], errors="coerce").fillna(0)
-
-    hoy = pd.Timestamp.today().normalize()
-    results = []
-    windows = [12, 24, 36, 48]  # weeks
-
-    # Pre-compute all combos
-    all_combos = vs[["SKU_PRODUCTO", "ID_SUCURSAL"]].drop_duplicates()
-    remaining = all_combos.copy()
-
-    for n_weeks in windows:
-        if remaining.empty:
-            break
-        cutoff = hoy - pd.Timedelta(weeks=n_weeks)
-        vs_w = vs[vs["SEMANA"] >= cutoff]
-
-        agg = (
-            vs_w.groupby(["SKU_PRODUCTO", "ID_SUCURSAL"], as_index=False)
-            .agg(UNIDADES_VENTANA=("UNIDADES", "sum"))
-        )
-        agg = agg[agg["UNIDADES_VENTANA"] > 0]
-
-        # Merge with remaining to find which ones got data
-        found = remaining.merge(agg, on=["SKU_PRODUCTO", "ID_SUCURSAL"], how="inner")
-        if not found.empty:
-            found["VENTANA_SEMANAS"] = n_weeks
-            found["DIAS_VENTANA"] = n_weeks * 7
-            results.append(found)
-            # Remove found from remaining
-            remaining = remaining.merge(
-                found[["SKU_PRODUCTO", "ID_SUCURSAL"]],
-                on=["SKU_PRODUCTO", "ID_SUCURSAL"], how="left", indicator=True,
-            )
-            remaining = remaining[remaining["_merge"] == "left_only"].drop(columns=["_merge"])
-
-    if not results:
-        df_adu = all_combos.copy()
-        df_adu["UNIDADES_VENTANA"] = 0
-        df_adu["VENTANA_SEMANAS"] = 48
-        df_adu["DIAS_VENTANA"] = 48 * 7
-    else:
-        df_adu = pd.concat(results, ignore_index=True)
-        # Add remaining with 0 sales
-        if not remaining.empty:
-            remaining["UNIDADES_VENTANA"] = 0
-            remaining["VENTANA_SEMANAS"] = 48
-            remaining["DIAS_VENTANA"] = 48 * 7
-            df_adu = pd.concat([df_adu, remaining], ignore_index=True)
-
-    # Merge dias_con_stock for censored ADU
-    dcs = df_dias_stock.copy()
-    for c in ["SKU_PRODUCTO", "ID_SUCURSAL"]:
-        if c in dcs.columns:
-            dcs[c] = dcs[c].astype(str).str.strip()
-    if "DIAS_CON_STOCK" in dcs.columns:
-        dcs["DIAS_CON_STOCK"] = pd.to_numeric(dcs["DIAS_CON_STOCK"], errors="coerce").fillna(0)
-        df_adu = df_adu.merge(dcs[["SKU_PRODUCTO", "ID_SUCURSAL", "DIAS_CON_STOCK"]],
-                              on=["SKU_PRODUCTO", "ID_SUCURSAL"], how="left")
-    df_adu["DIAS_CON_STOCK"] = df_adu.get("DIAS_CON_STOCK", pd.Series(0)).fillna(0)
-
-    # ADU = units / max(dias_con_stock, dias_ventana * proportion)
-    # If stock days available, use censored; otherwise use full window
-    df_adu["DIAS_EFECTIVOS"] = np.where(
-        df_adu["DIAS_CON_STOCK"] > 0,
-        df_adu["DIAS_CON_STOCK"].clip(lower=1),
-        df_adu["DIAS_VENTANA"].clip(lower=1),
-    )
-    df_adu["ADU"] = (df_adu["UNIDADES_VENTANA"] / df_adu["DIAS_EFECTIVOS"]).round(3)
-
-    return df_adu[["SKU_PRODUCTO", "ID_SUCURSAL", "ADU", "VENTANA_SEMANAS",
-                   "UNIDADES_VENTANA", "DIAS_CON_STOCK"]]
+    return pd.concat(parts, ignore_index=True)
 
 
 def _compute_ddmrp_buffers(
@@ -621,7 +634,11 @@ def render_ddmrp(conn):
     with st.spinner("Cargando datos DDMRP..."):
         df_stock = norm_cols(cq.ddmrp_stock_tienda(conn))
         df_config = norm_cols(cq.syncro_config(conn))
-        df_ventas_sem = norm_cols(cq.ventas_semanal_sucursal_12m(conn))
+        df_ventas_90d = norm_cols(cq.ventas_90d_sucursal(conn))
+        try:
+            df_ventas_sem = norm_cols(cq.ventas_semanal_sucursal_12m(conn))
+        except Exception:
+            df_ventas_sem = pd.DataFrame()
         df_dias_stock = norm_cols(cq.ddmrp_dias_con_stock(conn))
         df_transito_raw = cq.transito_sucursales(conn)
         df_transito = _parse_transito(df_transito_raw)
@@ -645,7 +662,7 @@ def render_ddmrp(conn):
     # ── Compute DDMRP ──
     cache_key = "ddmrp_result_v2"
     if cache_key not in st.session_state or st.button("🔄 Recalcular", key="ddmrp_recalc"):
-        df_adu = _compute_adu_progresivo(df_ventas_sem, df_dias_stock)
+        df_adu = _compute_adu_progresivo(df_ventas_90d, df_ventas_sem, df_dias_stock)
         df_ddmrp = _compute_ddmrp_buffers(
             df_stock, df_config, df_adu,
             df_transito, df_calendar, df_maestra, df_abc,
