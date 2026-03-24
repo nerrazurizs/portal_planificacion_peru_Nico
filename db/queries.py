@@ -161,6 +161,26 @@ _SUCURSAL = """(
     FROM db_syncros.public.coo_maestro_sucursal
 )"""
 
+# CDs excluidos del stock de la compañía (mermas, siniestros, consumibles, etc.)
+# Source: "cds perú.xlsx" — STATUS = NO
+_CD_EXCLUIDOS_LIST = [
+    "1926",  # Cdu. Simple Consumibles
+    "1983",  # Cdu. Siniestro
+    "1988",  # Cdu. Vas
+    "1",     # Estandar Servicios (cod_almacen=1)
+    "0001",  # Estandar Servicios (padded)
+    "1989",  # Cdu. Factor Comercial
+    "191",   # Cdu. Merma Retail (cod_almacen=191)
+    "0191",  # Cdu. Merma Retail (padded)
+    "1982",  # Cdu. Faltantes
+    "1957",  # Cdu. Merma Operativa
+    "1927",  # Cdu. Simple Mat Publicitario
+    "1987",  # Cdu. Merma Etail
+    "1985",  # Cdu. Merma Origen
+    "1986",  # Cdu. Merma Mayorista
+]
+_CD_EXCL_CLAUSE = "AND a.cod_bodega NOT IN (" + ",".join(f"'{x}'" for x in _CD_EXCLUIDOS_LIST) + ")"
+
 _INSTOCK = """(
     SELECT
         fecha,
@@ -661,6 +681,7 @@ where a.fecha = (
     from db_supply.hst.ht_in_stock
     where fecha < current_date()
 )
+  {_CD_EXCL_CLAUSE}
 group by 1,2,3
 """
 
@@ -711,6 +732,7 @@ left join db_supply.hst.ht_in_stock_cd d
  and a.sku_producto = d.sku_producto
 where a.fecha >= '2025-01-01'
   and (dayname(a.fecha) = 'Mon' or a.fecha = (select max(fecha) from db_supply.hst.ht_in_stock))
+  {_CD_EXCL_CLAUSE}
 group by 1,2,3,4,5,6,7,8,9,10
 """
 
@@ -760,6 +782,7 @@ left join (
     group by cod_almacen
   ) bo on a.cod_bodega = bo.cod_almacen
 where a.fecha = (select max(fecha) from db_supply.hst.ht_in_stock)
+  {_CD_EXCL_CLAUSE}
 group by 1,2,3,4,5,6,7,8,9,10,11,12
 """
 
@@ -1032,6 +1055,7 @@ from (
         from db_supply.hst.ht_in_stock
         where fecha < current_date()
     )
+      {_CD_EXCL_CLAUSE}
 ) sub
 group by 1
 """
