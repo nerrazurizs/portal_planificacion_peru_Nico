@@ -5380,11 +5380,352 @@ def _render_ppt_tables(df_proy):
 
 
 # ============================================================================
+# SCENARIO COMPARISON
+# ============================================================================
+
+MESES_CORTO = {
+    1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr", 5: "May", 6: "Jun",
+    7: "Jul", 8: "Ago", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dic",
+}
+
+
+def _render_comparison_results(df1, df2, label1, label2):
+    """Render side-by-side comparison charts and tables for two scenario DataFrames."""
+
+    # ── Metric selector + filters ────────────────────────────────────────
+    _m1, _m2, _m3 = st.columns([2, 2, 2])
+    with _m1:
+        metric_options = {
+            "Venta Neta (S/)": "VN_RES_TOTAL",
+            "COGS (S/)": "COGS_RES_TOTAL",
+            "Aporte (S/)": "APORTE_RES_TOTAL",
+            "Unidades Vendidas": "VENTA_FUL_TOTAL_UND",
+            "Venta Neta Tienda": "VN_RES_TIENDA",
+            "Venta Neta Etail": "VN_RES_ETAIL",
+            "Venta Neta Mayor": "VN_RES_MAYOR",
+            "Lost Sales (und)": "LOST_SALES_TOTAL",
+            "Stock Final (und)": "STOCK_FINAL_TOTAL",
+        }
+        sel_metrics = st.multiselect(
+            "Métricas a comparar",
+            list(metric_options.keys()),
+            default=["Venta Neta (S/)", "Aporte (S/)", "Unidades Vendidas"],
+            key="esc_metrics",
+        )
+    with _m2:
+        _areas_esc = sorted(set(
+            list(df1["AREA"].dropna().unique()) + list(df2["AREA"].dropna().unique())
+        )) if "AREA" in df1.columns and "AREA" in df2.columns else []
+        sel_area_esc = st.multiselect("Filtro Área", _areas_esc, key="esc_area")
+    with _m3:
+        _src_l = df1 if not sel_area_esc else df1[df1["AREA"].isin(sel_area_esc)]
+        _lineas_esc = sorted(set(
+            list(_src_l["LINEA"].dropna().unique()) +
+            list(df2["LINEA"].dropna().unique())
+        )) if "LINEA" in df1.columns and "LINEA" in df2.columns else []
+        sel_linea_esc = st.multiselect("Filtro Línea", _lineas_esc, key="esc_linea")
+
+    if not sel_metrics:
+        st.warning("Selecciona al menos una métrica.")
+        return
+
+    def _filter_esc(df):
+        _d = df.copy()
+        if sel_area_esc and "AREA" in _d.columns:
+            _d = _d[_d["AREA"].isin(sel_area_esc)]
+        if sel_linea_esc and "LINEA" in _d.columns:
+            _d = _d[_d["LINEA"].isin(sel_linea_esc)]
+        if "TIPO_DATO" in _d.columns:
+            _d = _d[_d["TIPO_DATO"].isin(["PROYECCION", "REAL+FC", "HISTORICO"])]
+        return _d
+
+    df1_f = _filter_esc(df1)
+    df2_f = _filter_esc(df2)
+
+    def _agg_monthly(df, metric_col):
+        if "PERIODO" not in df.columns:
+            return pd.DataFrame(columns=["PERIODO", "VALOR"])
+        if metric_col not in df.columns:
+            if metric_col == "VENTA_FUL_TOTAL_UND":
+                _parts = ["VENTA_FUL_TIENDA_UND", "VENTA_FUL_ETAIL_UND", "VENTA_FUL_MAYOR_UND"]
+                _existing = [c for c in _parts if c in df.columns]
+                if _existing:
+                    df = df.copy()
+                    df[metric_col] = sum(df[c].fillna(0) for c in _existing)
+                else:
+                    return pd.DataFrame(columns=["PERIODO", "VALOR"])
+            else:
+                return pd.DataFrame(columns=["PERIODO", "VALOR"])
+        agg = df.groupby("PERIODO", as_index=False)[metric_col].sum()
+        agg.rename(columns={metric_col: "VALOR"}, inplace=True)
+        return agg.sort_values("PERIODO")
+
+    # ── Per-metric comparison ────────────────────────────────────────────
+    st.markdown("---")
+
+    for metric_label in sel_metrics:
+        metric_col = metric_options[metric_label]
+        agg1 = _agg_monthly(df1_f, metric_col)
+        agg2 = _agg_monthly(df2_f, metric_col)
+
+        if agg1.empty and agg2.empty:
+            st.caption(f"Sin datos para **{metric_label}**")
+            continue
+
+        merged = pd.merge(
+            agg1.rename(columns={"VALOR": "ESC_1"}),
+            agg2.rename(columns={"VALOR": "ESC_2"}),
+            on="PERIODO", how="outer",
+        ).fillna(0).sort_values("PERIODO")
+
+        merged["DELTA"] = merged["ESC_2"] - merged["ESC_1"]
+        merged["DELTA_%"] = np.where(
+            merged["ESC_1"] > 0,
+            merged["DELTA"] / merged["ESC_1"] * 100,
+            0.0,
+        )
+        merged["MES_LABEL"] = merged["PERIODO"].apply(
+            lambda p: f"{MESES_CORTO.get(int(str(p)[4:6]), '?')} {str(p)[:4]}"
+            if pd.notna(p) and len(str(int(p))) >= 6
+            else str(p)
+        )
+
+        st.markdown(f"#### {metric_label}")
+
+        total1 = merged["ESC_1"].sum()
+        total2 = merged["ESC_2"].sum()
+        delta_total = total2 - total1
+        delta_pct = (delta_total / total1 * 100) if total1 > 0 else 0
+        is_monetary = "S/" in metric_label or metric_label in ("COGS (S/)", "Aporte (S/)")
+
+        _k1, _k2, _k3 = st.columns(3)
+        if is_monetary:
+            _k1.metric(f"📌 {label1}", _fmt_cl(total1))
+            _k2.metric(f"📌 {label2}", _fmt_cl(total2))
+            _k3.metric("Δ Diferencia", _fmt_cl(delta_total), f"{delta_pct:+.1f}%")
+        else:
+            _k1.metric(f"📌 {label1}", f"{total1:,.0f}")
+            _k2.metric(f"📌 {label2}", f"{total2:,.0f}")
+            _k3.metric("Δ Diferencia", f"{delta_total:+,.0f}", f"{delta_pct:+.1f}%")
+
+        # Chart
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=merged["MES_LABEL"], y=merged["ESC_1"], name=label1,
+            marker_color="#065E8B",
+            text=[_fmt_cl(v) if is_monetary else f"{v:,.0f}" for v in merged["ESC_1"]],
+            textposition="outside", textfont=dict(size=10),
+        ))
+        fig.add_trace(go.Bar(
+            x=merged["MES_LABEL"], y=merged["ESC_2"], name=label2,
+            marker_color="#23CED3",
+            text=[_fmt_cl(v) if is_monetary else f"{v:,.0f}" for v in merged["ESC_2"]],
+            textposition="outside", textfont=dict(size=10),
+        ))
+        fig.update_layout(**dorel_layout(
+            barmode="group",
+            xaxis=dict(title=""),
+            yaxis=dict(title=metric_label),
+            legend=dict(orientation="h", y=1.12, x=0.5, xanchor="center"),
+            height=380, margin=dict(t=50, b=40),
+        ))
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Detail table
+        with st.expander(f"📋 Tabla detallada — {metric_label}", expanded=False):
+            tbl = merged[["MES_LABEL", "ESC_1", "ESC_2", "DELTA", "DELTA_%"]].copy()
+            tbl.columns = ["Mes", label1, label2, "Diferencia", "Δ %"]
+            totals_row = pd.DataFrame([{
+                "Mes": "TOTAL", label1: total1, label2: total2,
+                "Diferencia": delta_total, "Δ %": delta_pct,
+            }])
+            tbl = pd.concat([tbl, totals_row], ignore_index=True)
+            col_cfg = {}
+            fmt_money = "$%,.0f" if is_monetary else "%,.0f"
+            for c in [label1, label2, "Diferencia"]:
+                col_cfg[c] = st.column_config.NumberColumn(format=fmt_money)
+            col_cfg["Δ %"] = st.column_config.NumberColumn(format="%.1f%%")
+            st.dataframe(tbl, use_container_width=True, hide_index=True, column_config=col_cfg)
+
+        st.markdown("")
+
+
+def _render_scenario_mode(conn):
+    """Render the full scenario comparison mode with dual file uploaders."""
+
+    st.html("<h2 class='sub-header'>Comparador de Escenarios</h2>")
+    st.caption(
+        "Carga dos versiones de Forecast y/o Plan de Compras para simular "
+        "ambos escenarios y comparar métricas lado a lado."
+    )
+
+    # ── Escenario names ──────────────────────────────────────────────────
+    _n1, _n2 = st.columns(2)
+    with _n1:
+        name_a = st.text_input("Nombre Escenario A", value="Escenario A", key="esc_name_a")
+    with _n2:
+        name_b = st.text_input("Nombre Escenario B", value="Escenario B", key="esc_name_b")
+
+    # ── File uploaders side by side ──────────────────────────────────────
+    st.markdown("---")
+    col_a, col_sep, col_b = st.columns([5, 0.3, 5])
+
+    with col_a:
+        st.markdown(f"##### 📁 {name_a}")
+        fa_fc = st.file_uploader("Forecast (Excel)", type=["xlsx"], key="esc_a_fc")
+        fa_co = st.file_uploader("Plan Compra (CSV)", type=["csv"], key="esc_a_co")
+        fa_pr = st.file_uploader("Precios (Excel, opcional)", type=["xlsx"], key="esc_a_pr")
+
+    with col_sep:
+        st.markdown("")  # visual separator
+
+    with col_b:
+        st.markdown(f"##### 📁 {name_b}")
+        fb_fc = st.file_uploader("Forecast (Excel)", type=["xlsx"], key="esc_b_fc")
+        fb_co = st.file_uploader("Plan Compra (CSV)", type=["csv"], key="esc_b_co")
+        fb_pr = st.file_uploader("Precios (Excel, opcional)", type=["xlsx"], key="esc_b_pr")
+
+    # ── Shared options ───────────────────────────────────────────────────
+    st.markdown("")
+    _opt1, _opt2 = st.columns(2)
+    with _opt1:
+        _shared_compra = st.checkbox(
+            "Usar mismo Plan de Compra para ambos escenarios",
+            value=False, key="esc_shared_compra",
+            help="Si el cambio es solo en el Forecast, activa esto y solo carga 1 CSV.",
+        )
+    with _opt2:
+        _shared_fc = st.checkbox(
+            "Usar mismo Forecast para ambos escenarios",
+            value=False, key="esc_shared_fc",
+            help="Si el cambio es solo en el Plan de Compras, activa esto y solo carga 1 Forecast.",
+        )
+
+    # Resolve effective files
+    eff_a_fc = fa_fc
+    eff_a_co = fa_co
+    eff_a_pr = fa_pr
+    eff_b_fc = fb_fc if not _shared_fc else fa_fc
+    eff_b_co = fb_co if not _shared_compra else fa_co
+    eff_b_pr = fb_pr if fb_pr else fa_pr  # precios fallback
+
+    ready_a = eff_a_fc is not None and eff_a_co is not None
+    ready_b = eff_b_fc is not None and eff_b_co is not None
+
+    if not ready_a or not ready_b:
+        missing = []
+        if not ready_a:
+            missing.append(f"**{name_a}**: falta Forecast y/o Plan Compra")
+        if not ready_b:
+            missing.append(f"**{name_b}**: falta Forecast y/o Plan Compra")
+        st.warning("Archivos pendientes:\n\n" + "\n\n".join(missing))
+        return
+
+    # ── Run both simulations ─────────────────────────────────────────────
+    if st.button("🚀 Comparar Escenarios", type="primary", key="btn_run_comparison"):
+        try:
+            with st.spinner(f"Simulando {name_a}..."):
+                result_a = process_projection_daily(
+                    eff_a_fc, eff_a_co, eff_a_pr, conn, excluir_plan_compra=False,
+                )
+            if result_a is None:
+                st.error(f"Error al procesar {name_a}.")
+                return
+            df_a, _ = result_a
+
+            # Reset file positions for scenario B (in case shared files)
+            for _f in [eff_b_fc, eff_b_co, eff_b_pr]:
+                if _f is not None and hasattr(_f, "seek"):
+                    _f.seek(0)
+
+            with st.spinner(f"Simulando {name_b}..."):
+                result_b = process_projection_daily(
+                    eff_b_fc, eff_b_co, eff_b_pr, conn, excluir_plan_compra=False,
+                )
+            if result_b is None:
+                st.error(f"Error al procesar {name_b}.")
+                return
+            df_b, _ = result_b
+
+            st.session_state["esc_df_a"] = df_a
+            st.session_state["esc_df_b"] = df_b
+            st.session_state["esc_label_a"] = name_a
+            st.session_state["esc_label_b"] = name_b
+            st.session_state["esc_ready"] = True
+            st.toast("Ambos escenarios simulados exitosamente")
+            st.rerun()
+
+        except Exception as e:
+            st.error(f"Error: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+
+    # ── Show comparison results ──────────────────────────────────────────
+    if st.session_state.get("esc_ready"):
+        df_a = st.session_state["esc_df_a"]
+        df_b = st.session_state["esc_df_b"]
+        lbl_a = st.session_state.get("esc_label_a", "Escenario A")
+        lbl_b = st.session_state.get("esc_label_b", "Escenario B")
+
+        st.markdown("---")
+        st.markdown(f"### Resultados: {lbl_a} vs {lbl_b}")
+
+        # Quick summary KPIs
+        _sa, _sb = st.columns(2)
+        with _sa:
+            _skus_a = df_a["SKU_PRODUCTO"].nunique() if "SKU_PRODUCTO" in df_a.columns else 0
+            _periods_a = df_a["PERIODO"].nunique() if "PERIODO" in df_a.columns else 0
+            st.info(f"**{lbl_a}**: {_skus_a:,} SKUs · {_periods_a} periodos · {len(df_a):,} filas")
+        with _sb:
+            _skus_b = df_b["SKU_PRODUCTO"].nunique() if "SKU_PRODUCTO" in df_b.columns else 0
+            _periods_b = df_b["PERIODO"].nunique() if "PERIODO" in df_b.columns else 0
+            st.info(f"**{lbl_b}**: {_skus_b:,} SKUs · {_periods_b} periodos · {len(df_b):,} filas")
+
+        _render_comparison_results(df_a, df_b, lbl_a, lbl_b)
+
+        # ── Download both scenarios ──────────────────────────────────
+        st.markdown("---")
+        st.markdown("### 📥 Descargar Escenarios")
+        _d1, _d2 = st.columns(2)
+        with _d1:
+            buf_a = io.BytesIO()
+            df_a.to_excel(buf_a, index=False, engine="openpyxl")
+            st.download_button(
+                f"📥 Descargar {lbl_a} (Excel)",
+                data=buf_a.getvalue(),
+                file_name=f"{lbl_a.replace(' ', '_')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.spreadsheet",
+            )
+        with _d2:
+            buf_b = io.BytesIO()
+            df_b.to_excel(buf_b, index=False, engine="openpyxl")
+            st.download_button(
+                f"📥 Descargar {lbl_b} (Excel)",
+                data=buf_b.getvalue(),
+                file_name=f"{lbl_b.replace(' ', '_')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.spreadsheet",
+            )
+
+
+# ============================================================================
 # UI
 # ============================================================================
 
 def render_proyeccion(conn):
     st.html("<h2 class='sub-header'>Proyeccion de Stock</h2>")
+
+    # ── Mode toggle: Proyección vs Comparador ─────────────────────────
+    _mode = st.radio(
+        "Modo",
+        ["📊 Proyección", "🔄 Comparar Escenarios"],
+        horizontal=True,
+        key="proy_mode_toggle",
+        label_visibility="collapsed",
+    )
+
+    if _mode == "🔄 Comparar Escenarios":
+        _render_scenario_mode(conn)
+        return
 
     # Tutorial download button
     import pathlib as _pathlib
