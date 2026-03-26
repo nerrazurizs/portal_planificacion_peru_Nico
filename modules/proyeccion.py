@@ -5426,65 +5426,64 @@ def _ensure_total_und(df):
 
 
 def _render_comparison_results(df1, df2, label1, label2):
-    """Render scenario comparison with hierarchical filters and monthly matrix."""
+    """Render scenario comparison with hierarchical drill-down matrix."""
 
     # ── Ensure total units column ────────────────────────────────────────
     df1 = _ensure_total_und(df1)
     df2 = _ensure_total_und(df2)
 
-    # ── Metric selector ──────────────────────────────────────────────────
+    # ── Controls row ─────────────────────────────────────────────────────
+    _c_metric, _c_agg, _c_canal, _c_view = st.columns([2, 2, 1, 1.5])
+
     metric_options = {
         "Venta Neta (S/)": "VN_RES_TOTAL",
         "COGS (S/)": "COGS_RES_TOTAL",
         "Aporte (S/)": "APORTE_RES_TOTAL",
         "Unidades Vendidas": "VENTA_FUL_TOTAL_UND",
-        "Venta Neta Tienda": "VN_RES_TIENDA",
-        "Venta Neta Etail": "VN_RES_ETAIL",
-        "Venta Neta Mayor": "VN_RES_MAYOR",
         "Lost Sales (und)": "LOST_SALES_TOTAL",
         "Stock Final (und)": "STOCK_FINAL_TOTAL",
     }
-
-    sel_metric_label = st.selectbox(
-        "📊 Métrica a comparar",
-        list(metric_options.keys()),
-        index=0,
-        key="esc_metric_sel",
-    )
+    with _c_metric:
+        sel_metric_label = st.selectbox(
+            "📊 Métrica", list(metric_options.keys()), index=0, key="esc_metric_sel",
+        )
     metric_col = metric_options[sel_metric_label]
-    is_monetary = "S/" in sel_metric_label or sel_metric_label in ("COGS (S/)", "Aporte (S/)")
+    is_monetary = "S/" in sel_metric_label
 
-    # ── Hierarchical cascading filters ───────────────────────────────────
-    # Combine both DFs for filter options
-    _all = pd.concat([df1, df2], ignore_index=True)
-    if "TIPO_DATO" in _all.columns:
-        _all = _all[_all["TIPO_DATO"].isin(["PROYECCION", "REAL+FC", "HISTORICO"])]
+    # Dimension hierarchy
+    _DIM_MAP = [
+        ("AREA", "Grupo"),
+        ("LINEA", "Línea"),
+        ("SUBLINEA", "Familia"),
+        ("MARCA", "Marca"),
+        ("MIX_OFICIAL", "Mix"),
+    ]
+    _all_check = pd.concat([df1, df2], ignore_index=True)
+    _avail_dims = [(col, lbl) for col, lbl in _DIM_MAP if col in _all_check.columns]
+    _avail_labels = [lbl for _, lbl in _avail_dims]
 
-    _dim_cols = ["AREA", "LINEA", "SUBLINEA", "MARCA", "MIX_OFICIAL"]
-    _dim_labels = ["Grupo", "Línea", "Familia", "Marca", "Mix"]
-    _available_dims = [c for c in _dim_cols if c in _all.columns]
-    _available_labels = [_dim_labels[i] for i, c in enumerate(_dim_cols) if c in _all.columns]
+    # Aggregation selector: build progressive levels
+    agg_levels = ["Total"]
+    for i, (_, lbl) in enumerate(_avail_dims):
+        agg_levels.append(" > ".join([l for _, l in _avail_dims[: i + 1]]))
 
-    # Build cascading filters
-    _filter_vals = {}
-    _filt_cols = st.columns(min(len(_available_dims) + 1, 6))  # +1 for Canal
+    with _c_agg:
+        sel_agg = st.selectbox("📐 Nivel de apertura", agg_levels, index=0, key="esc_agg_level")
 
-    _filtered_pool = _all.copy()
-    for idx, (dim_col, dim_label) in enumerate(zip(_available_dims, _available_labels)):
-        if idx < len(_filt_cols) - 1:
-            with _filt_cols[idx]:
-                opts = sorted(_filtered_pool[dim_col].dropna().unique().tolist())
-                sel = st.multiselect(dim_label, opts, key=f"esc_filt_{dim_col}")
-                _filter_vals[dim_col] = sel
-                if sel:
-                    _filtered_pool = _filtered_pool[_filtered_pool[dim_col].isin(sel)]
+    # Determine which dim columns are active for grouping
+    if sel_agg == "Total":
+        group_dims = []
+    else:
+        parts = [p.strip() for p in sel_agg.split(">")]
+        group_dims = []
+        for col, lbl in _avail_dims:
+            if lbl in parts:
+                group_dims.append((col, lbl))
 
-    # Canal filter (virtual — splits by channel suffix)
-    canal_options = ["TOTAL", "TIENDA", "ETAIL", "MAYORISTA"]
-    with _filt_cols[min(len(_available_dims), len(_filt_cols) - 1)]:
-        sel_canal = st.selectbox("Canal", canal_options, index=0, key="esc_filt_canal")
-
-    # Map canal to metric column override
+    # Canal
+    with _c_canal:
+        sel_canal = st.selectbox("Canal", ["TOTAL", "TIENDA", "ETAIL", "MAYORISTA"],
+                                 index=0, key="esc_filt_canal")
     if sel_canal != "TOTAL":
         _canal_map = {
             "TIENDA": {"VN_RES_TOTAL": "VN_RES_TIENDA", "VENTA_FUL_TOTAL_UND": "VENTA_FUL_TIENDA_UND",
@@ -5496,7 +5495,29 @@ def _render_comparison_results(df1, df2, label1, label2):
         }
         metric_col = _canal_map.get(sel_canal, {}).get(metric_col, metric_col)
 
-    # ── Apply hierarchical filters ───────────────────────────────────────
+    # View mode
+    with _c_view:
+        view_mode = st.selectbox("Vista", [f"{label1} vs {label2}", "Solo Δ", "Solo Δ %"],
+                                 index=0, key="esc_view_mode")
+
+    # ── Cascading dimension filters ──────────────────────────────────────
+    if _avail_dims:
+        _filt_cols = st.columns(len(_avail_dims))
+        _filter_vals = {}
+        _pool = _all_check.copy()
+        if "TIPO_DATO" in _pool.columns:
+            _pool = _pool[_pool["TIPO_DATO"].isin(["PROYECCION", "REAL+FC", "HISTORICO"])]
+        for idx, (dim_col, dim_label) in enumerate(_avail_dims):
+            with _filt_cols[idx]:
+                opts = sorted(_pool[dim_col].dropna().unique().tolist())
+                sel = st.multiselect(dim_label, opts, key=f"esc_filt_{dim_col}")
+                _filter_vals[dim_col] = sel
+                if sel:
+                    _pool = _pool[_pool[dim_col].isin(sel)]
+    else:
+        _filter_vals = {}
+
+    # ── Apply filters ────────────────────────────────────────────────────
     def _apply_filters(df):
         _d = df.copy()
         if "TIPO_DATO" in _d.columns:
@@ -5513,60 +5534,172 @@ def _render_comparison_results(df1, df2, label1, label2):
         st.warning(f"Columna `{metric_col}` no encontrada en los datos.")
         return
 
-    # ── Aggregate monthly ────────────────────────────────────────────────
-    def _agg(df):
-        if "PERIODO" not in df.columns or metric_col not in df.columns:
-            return pd.DataFrame(columns=["PERIODO", "VALOR"])
-        agg = df.groupby("PERIODO", as_index=False)[metric_col].sum()
-        agg.rename(columns={metric_col: "VALOR"}, inplace=True)
-        return agg
+    # ── Compute periods ──────────────────────────────────────────────────
+    all_periods = sorted(
+        set(df1_f["PERIODO"].dropna().unique().tolist() +
+            df2_f["PERIODO"].dropna().unique().tolist()),
+        key=_periodo_sort_key,
+    )
+    if not all_periods:
+        st.info("Sin datos para los filtros seleccionados.")
+        return
+    month_labels = [_periodo_label(p) for p in all_periods]
 
-    agg1 = _agg(df1_f)
-    agg2 = _agg(df2_f)
+    # ── Build hierarchical rows ──────────────────────────────────────────
+    group_col_names = [c for c, _ in group_dims]
 
-    if agg1.empty and agg2.empty:
+    def _agg_by_group(df, periods, gcols):
+        """Aggregate metric by period, optionally grouped by dimension columns."""
+        if metric_col not in df.columns or "PERIODO" not in df.columns:
+            return {}
+        gb_cols = ["PERIODO"] + gcols
+        agg = df.groupby(gb_cols, as_index=False)[metric_col].sum()
+        result = {}
+        if not gcols:
+            for _, row in agg.iterrows():
+                result[row["PERIODO"]] = row[metric_col]
+        else:
+            for _, row in agg.iterrows():
+                key = tuple(str(row[c]) for c in gcols)
+                if key not in result:
+                    result[key] = {}
+                result[key][row["PERIODO"]] = row[metric_col]
+        return result
+
+    agg1_grouped = _agg_by_group(df1_f, all_periods, group_col_names)
+    agg2_grouped = _agg_by_group(df2_f, all_periods, group_col_names)
+
+    _fmt = _fmt_cl if is_monetary else lambda v: f"{v:,.0f}"
+
+    def _build_row_block(row_label, vals1_dict, vals2_dict, indent=0):
+        """Build 1-3 rows (Esc1, Esc2, Δ) for a given group."""
+        prefix = "　" * indent  # fullwidth space for visual indent
+        rows = []
+        e1_vals = [vals1_dict.get(p, 0) for p in all_periods]
+        e2_vals = [vals2_dict.get(p, 0) for p in all_periods]
+        delta_vals = [e2 - e1 for e1, e2 in zip(e1_vals, e2_vals)]
+        delta_pct_vals = [
+            ((e2 - e1) / abs(e1) * 100) if e1 != 0 else 0.0
+            for e1, e2 in zip(e1_vals, e2_vals)
+        ]
+        t1 = sum(e1_vals)
+        t2 = sum(e2_vals)
+        td = t2 - t1
+        tp = (td / abs(t1) * 100) if t1 != 0 else 0.0
+
+        if view_mode.startswith(label1):
+            # Full view: Esc1, Esc2, Δ
+            r1 = {"": f"{prefix}{row_label} — {label1}"}
+            r2 = {"": f"{prefix}{row_label} — {label2}"}
+            r3 = {"": f"{prefix}{row_label} — Δ"}
+            r4 = {"": f"{prefix}{row_label} — Δ %"}
+            for i, ml in enumerate(month_labels):
+                r1[ml] = _fmt(e1_vals[i])
+                r2[ml] = _fmt(e2_vals[i])
+                r3[ml] = _fmt(delta_vals[i])
+                r4[ml] = f"{delta_pct_vals[i]:+.1f}%"
+            r1["TOTAL"] = _fmt(t1)
+            r2["TOTAL"] = _fmt(t2)
+            r3["TOTAL"] = _fmt(td)
+            r4["TOTAL"] = f"{tp:+.1f}%"
+            rows.extend([r1, r2, r3, r4])
+        elif view_mode == "Solo Δ":
+            r = {"": f"{prefix}{row_label}"}
+            for i, ml in enumerate(month_labels):
+                r[ml] = _fmt(delta_vals[i])
+            r["TOTAL"] = _fmt(td)
+            rows.append(r)
+        else:  # Solo Δ %
+            r = {"": f"{prefix}{row_label}"}
+            for i, ml in enumerate(month_labels):
+                r[ml] = f"{delta_pct_vals[i]:+.1f}%"
+            r["TOTAL"] = f"{tp:+.1f}%"
+            rows.append(r)
+        return rows, t1, t2
+
+    all_rows = []
+
+    if not group_col_names:
+        # Total only
+        v1 = _agg_by_group(df1_f, all_periods, [])
+        v2 = _agg_by_group(df2_f, all_periods, [])
+        block, t1, t2 = _build_row_block("TOTAL", v1, v2, indent=0)
+        all_rows.extend(block)
+    else:
+        # Get all unique group keys from both scenarios
+        all_keys = sorted(set(
+            list(agg1_grouped.keys()) + list(agg2_grouped.keys())
+        ))
+
+        # TOTAL row first
+        v1_total = {}
+        v2_total = {}
+        for p in all_periods:
+            v1_total[p] = sum(d.get(p, 0) for d in agg1_grouped.values())
+            v2_total[p] = sum(d.get(p, 0) for d in agg2_grouped.values())
+        block, grand_t1, grand_t2 = _build_row_block("TOTAL", v1_total, v2_total, indent=0)
+        all_rows.extend(block)
+
+        # Add separator
+        sep = {"": "─" * 30}
+        for ml in month_labels:
+            sep[ml] = "─" * 8
+        sep["TOTAL"] = "─" * 8
+        all_rows.append(sep)
+
+        # Per-group rows with hierarchy indentation
+        # Sort keys by the hierarchy for nice display
+        for key in all_keys:
+            # Build label from key parts
+            parts = list(key) if isinstance(key, tuple) else [key]
+            # Show deepest level with indent, or full path
+            if len(parts) == 1:
+                row_label = str(parts[0])
+            else:
+                row_label = str(parts[-1])
+            indent_level = len(parts) - 1
+
+            v1 = agg1_grouped.get(key, {})
+            v2 = agg2_grouped.get(key, {})
+            block, _, _ = _build_row_block(row_label, v1, v2, indent=indent_level)
+            all_rows.extend(block)
+
+    if not all_rows:
         st.info("Sin datos para los filtros seleccionados.")
         return
 
-    merged = pd.merge(
-        agg1.rename(columns={"VALOR": "ESC_1"}),
-        agg2.rename(columns={"VALOR": "ESC_2"}),
-        on="PERIODO", how="outer",
-    ).fillna(0)
-    merged["_sort"] = merged["PERIODO"].apply(_periodo_sort_key)
-    merged = merged.sort_values("_sort").drop(columns=["_sort"])
-    merged["MES_LABEL"] = merged["PERIODO"].apply(_periodo_label)
-    merged["DELTA"] = merged["ESC_2"] - merged["ESC_1"]
-    merged["DELTA_%"] = np.where(
-        merged["ESC_1"] != 0,
-        merged["DELTA"] / merged["ESC_1"].abs() * 100,
-        0.0,
-    )
+    # ── Build DataFrame and display ──────────────────────────────────────
+    matrix_df = pd.DataFrame(all_rows)
 
-    # ── KPI totals ───────────────────────────────────────────────────────
-    total1 = merged["ESC_1"].sum()
-    total2 = merged["ESC_2"].sum()
-    delta_total = total2 - total1
-    delta_pct = (delta_total / abs(total1) * 100) if total1 != 0 else 0
+    # ── KPIs (from TOTAL row) ────────────────────────────────────────────
+    # Compute totals from raw data
+    _t1_raw = df1_f[metric_col].sum() if metric_col in df1_f.columns else 0
+    _t2_raw = df2_f[metric_col].sum() if metric_col in df2_f.columns else 0
+    _td_raw = _t2_raw - _t1_raw
+    _tp_raw = (_td_raw / abs(_t1_raw) * 100) if _t1_raw != 0 else 0
 
     _k1, _k2, _k3 = st.columns(3)
-    _fmt = _fmt_cl if is_monetary else lambda v: f"{v:,.0f}"
-    _k1.metric(f"📌 {label1}", _fmt(total1))
-    _k2.metric(f"📌 {label2}", _fmt(total2))
-    _k3.metric("Δ Diferencia", _fmt(delta_total), f"{delta_pct:+.1f}%")
+    _k1.metric(f"📌 {label1}", _fmt(_t1_raw))
+    _k2.metric(f"📌 {label2}", _fmt(_t2_raw))
+    _k3.metric("Δ Diferencia", _fmt(_td_raw), f"{_tp_raw:+.1f}%")
 
-    # ── Grouped bar chart ────────────────────────────────────────────────
+    # ── Chart (total level) ──────────────────────────────────────────────
+    e1_chart = [df1_f.loc[df1_f["PERIODO"] == p, metric_col].sum()
+                if metric_col in df1_f.columns else 0 for p in all_periods]
+    e2_chart = [df2_f.loc[df2_f["PERIODO"] == p, metric_col].sum()
+                if metric_col in df2_f.columns else 0 for p in all_periods]
+
     fig = go.Figure()
     fig.add_trace(go.Bar(
-        x=merged["MES_LABEL"], y=merged["ESC_1"], name=label1,
+        x=month_labels, y=e1_chart, name=label1,
         marker_color="#065E8B",
-        text=[_fmt(v) for v in merged["ESC_1"]],
+        text=[_fmt(v) for v in e1_chart],
         textposition="outside", textfont=dict(size=10),
     ))
     fig.add_trace(go.Bar(
-        x=merged["MES_LABEL"], y=merged["ESC_2"], name=label2,
+        x=month_labels, y=e2_chart, name=label2,
         marker_color="#23CED3",
-        text=[_fmt(v) for v in merged["ESC_2"]],
+        text=[_fmt(v) for v in e2_chart],
         textposition="outside", textfont=dict(size=10),
     ))
     fig.update_layout(**dorel_layout(
@@ -5578,64 +5711,24 @@ def _render_comparison_results(df1, df2, label1, label2):
     ))
     st.plotly_chart(fig, use_container_width=True)
 
-    # ── Monthly matrix table ─────────────────────────────────────────────
-    st.markdown("#### 📋 Matriz Mensual")
-
-    # Build a wide table: rows = [Esc1, Esc2, Δ, Δ%], cols = months + TOTAL
-    months = merged["MES_LABEL"].tolist()
-    row_esc1 = {m: v for m, v in zip(months, merged["ESC_1"])}
-    row_esc2 = {m: v for m, v in zip(months, merged["ESC_2"])}
-    row_delta = {m: v for m, v in zip(months, merged["DELTA"])}
-    row_delta_pct = {m: v for m, v in zip(months, merged["DELTA_%"])}
-
-    row_esc1["TOTAL"] = total1
-    row_esc2["TOTAL"] = total2
-    row_delta["TOTAL"] = delta_total
-    row_delta_pct["TOTAL"] = delta_pct
-
-    matrix = pd.DataFrame([
-        {"Concepto": f"📌 {label1}", **row_esc1},
-        {"Concepto": f"📌 {label2}", **row_esc2},
-        {"Concepto": "Δ Diferencia", **row_delta},
-        {"Concepto": "Δ %", **row_delta_pct},
-    ])
-
-    # Format for display
-    col_cfg_matrix = {"Concepto": st.column_config.TextColumn(width="medium")}
-    for c in matrix.columns:
-        if c == "Concepto":
-            continue
-        col_cfg_matrix[c] = st.column_config.NumberColumn(
-            format="$%,.0f" if is_monetary else "%,.0f",
-        )
-    # Override Δ % row formatting — we show the whole df with one config,
-    # so format the % row values as strings for display
-    matrix_display = matrix.copy()
-    for c in [c for c in matrix_display.columns if c != "Concepto"]:
-        vals = matrix_display[c].tolist()
-        formatted = []
-        for i, v in enumerate(vals):
-            if i == 3:  # Δ % row
-                formatted.append(f"{v:+.1f}%")
-            elif is_monetary:
-                formatted.append(_fmt_cl(v))
-            else:
-                try:
-                    formatted.append(f"{v:,.0f}")
-                except (ValueError, TypeError):
-                    formatted.append(str(v))
-        matrix_display[c] = formatted
+    # ── Matrix table ─────────────────────────────────────────────────────
+    st.markdown(f"#### 📋 Matriz: {sel_metric_label}")
+    if sel_agg != "Total":
+        st.caption(f"Apertura por: **{sel_agg}**")
 
     st.dataframe(
-        matrix_display,
+        matrix_df,
         use_container_width=True,
         hide_index=True,
-        column_config={"Concepto": st.column_config.TextColumn(width="medium")},
+        height=min(40 + len(matrix_df) * 35, 800),
+        column_config={
+            "": st.column_config.TextColumn(width="large"),
+        },
     )
 
-    # ── Download matrix as Excel ─────────────────────────────────────────
+    # ── Download ─────────────────────────────────────────────────────────
     buf_matrix = io.BytesIO()
-    matrix.to_excel(buf_matrix, index=False, engine="openpyxl", sheet_name="Comparación")
+    matrix_df.to_excel(buf_matrix, index=False, engine="openpyxl", sheet_name="Comparación")
     st.download_button(
         "📥 Descargar Matriz (Excel)",
         data=buf_matrix.getvalue(),
