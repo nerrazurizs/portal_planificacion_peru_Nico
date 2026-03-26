@@ -2,6 +2,7 @@
 
 import io
 import re
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -5484,11 +5485,17 @@ def _render_comparison_results(df1, df2, label1, label2):
             merged["DELTA"] / merged["ESC_1"] * 100,
             0.0,
         )
-        merged["MES_LABEL"] = merged["PERIODO"].apply(
-            lambda p: f"{MESES_CORTO.get(int(str(p)[4:6]), '?')} {str(p)[:4]}"
-            if pd.notna(p) and len(str(int(p))) >= 6
-            else str(p)
-        )
+        def _periodo_label(p):
+            if pd.isna(p):
+                return str(p)
+            if isinstance(p, (pd.Timestamp, datetime)):
+                return f"{MESES_CORTO.get(p.month, '?')} {p.year}"
+            s = str(int(p)) if not isinstance(p, str) else str(p)
+            if len(s) >= 6:
+                return f"{MESES_CORTO.get(int(s[4:6]), '?')} {s[:4]}"
+            return s
+
+        merged["MES_LABEL"] = merged["PERIODO"].apply(_periodo_label)
 
         st.markdown(f"#### {metric_label}")
 
