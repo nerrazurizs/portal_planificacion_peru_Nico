@@ -5871,28 +5871,67 @@ def _render_scenario_mode(conn):
 
         _render_comparison_results(df_a, df_b, lbl_a, lbl_b)
 
-        # ── Download both scenarios ──────────────────────────────────
+        # ── Download both scenarios (detail + CSV/Excel) ────────────
         st.markdown("---")
-        st.markdown("### 📥 Descargar Escenarios")
-        _d1, _d2 = st.columns(2)
+        st.markdown("### 📥 Descargar Detalle Completo")
+        st.caption("Descarga el resultado completo de cada escenario (todas las columnas, todos los SKUs).")
+
+        _d1, _d2, _d3, _d4 = st.columns(4)
+        _fname_a = lbl_a.replace(" ", "_")
+        _fname_b = lbl_b.replace(" ", "_")
+
         with _d1:
-            buf_a = io.BytesIO()
-            df_a.to_excel(buf_a, index=False, engine="openpyxl")
+            buf_a_xl = io.BytesIO()
+            df_a.to_excel(buf_a_xl, index=False, engine="openpyxl")
             st.download_button(
-                f"📥 Descargar {lbl_a} (Excel)",
-                data=buf_a.getvalue(),
-                file_name=f"{lbl_a.replace(' ', '_')}.xlsx",
+                f"📥 {lbl_a} (Excel)",
+                data=buf_a_xl.getvalue(),
+                file_name=f"{_fname_a}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.spreadsheet",
+                key="dl_esc_a_xlsx",
             )
         with _d2:
-            buf_b = io.BytesIO()
-            df_b.to_excel(buf_b, index=False, engine="openpyxl")
+            csv_a = df_a.to_csv(index=False).encode("utf-8")
             st.download_button(
-                f"📥 Descargar {lbl_b} (Excel)",
-                data=buf_b.getvalue(),
-                file_name=f"{lbl_b.replace(' ', '_')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.spreadsheet",
+                f"📥 {lbl_a} (CSV)",
+                data=csv_a,
+                file_name=f"{_fname_a}.csv",
+                mime="text/csv",
+                key="dl_esc_a_csv",
             )
+        with _d3:
+            buf_b_xl = io.BytesIO()
+            df_b.to_excel(buf_b_xl, index=False, engine="openpyxl")
+            st.download_button(
+                f"📥 {lbl_b} (Excel)",
+                data=buf_b_xl.getvalue(),
+                file_name=f"{_fname_b}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.spreadsheet",
+                key="dl_esc_b_xlsx",
+            )
+        with _d4:
+            csv_b = df_b.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                f"📥 {lbl_b} (CSV)",
+                data=csv_b,
+                file_name=f"{_fname_b}.csv",
+                mime="text/csv",
+                key="dl_esc_b_csv",
+            )
+
+        # Combined file: both scenarios in one Excel with 2 sheets
+        st.markdown("")
+        buf_combined = io.BytesIO()
+        with pd.ExcelWriter(buf_combined, engine="openpyxl") as writer:
+            df_a.to_excel(writer, index=False, sheet_name=lbl_a[:31])
+            df_b.to_excel(writer, index=False, sheet_name=lbl_b[:31])
+        st.download_button(
+            "📥 Ambos Escenarios en 1 Excel (2 hojas)",
+            data=buf_combined.getvalue(),
+            file_name=f"Comparacion_{_fname_a}_vs_{_fname_b}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.spreadsheet",
+            key="dl_esc_combined",
+        )
 
 
 # ============================================================================
