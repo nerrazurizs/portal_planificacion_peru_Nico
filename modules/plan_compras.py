@@ -12,11 +12,13 @@ Inventario financiero (para CCC):
 """
 
 import io
+import calendar
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from datetime import datetime
+from pathlib import Path
 from pandas.tseries.offsets import MonthEnd
 
 from db.queries import QUERY_PLAN_COMPRAS, QUERY_VENTA_COSTO_HIST
@@ -1239,6 +1241,264 @@ def _render_otb_tab(df_inv):
         download_buttons(piv, "otb_por_linea")
 
 
+# ─── Exportar Plan de Compra ───────────────────────────────────────────────────
+
+def _generar_plan_compra(conn, factor_file):
+    """Combina FT_COMPRAS pendiente + proy_result.parquet y devuelve DataFrame."""
+    MESES_FULL = {
+        1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril",
+        5: "Mayo", 6: "Junio", 7: "Julio", 8: "Agosto",
+        9: "Setiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre",
+    }
+    AREAS_VALIDAS = ["Bebe", "Jugueteria", "Tiempo Libre", "Vestuario"]
+    TC = 3.6
+
+    hoy = datetime.today()
+    anio_actual = hoy.year
+    mes_actual = hoy.month
+    ultimo_dia_mes = calendar.monthrange(anio_actual, mes_actual)[1]
+
+    def _gcol(df, name):
+        for c in df.columns:
+            if c.lower() == name.lower():
+                return df[c]
+        return pd.Series([""] * len(df))
+
+    # ── Proyección ──────────────────────────────────────────────────────────
+    parquet_path = Path(__file__).resolve().parent.parent / "data" / "inputs" / "proy_result.parquet"
+    if not parquet_path.exists():
+        st.error(f"No se encontró proy_result.parquet en: {parquet_path}")
+        return None
+
+    df_pq = pd.read_parquet(parquet_path)
+    df_pq.columns = df_pq.columns.str.lower()
+    df_pq["sku_producto"] = df_pq["sku_producto"].astype(str).str.upper().str.strip()
+    df_pq["forecast_compra"] = pd.to_numeric(df_pq["forecast_compra"], errors="coerce").fillna(0)
+    df_pq = df_pq[df_pq["forecast_compra"] > 0].copy()
+    df_pq["Sku_producto"] = df_pq["sku_producto"]
+    df_pq["Status_PO"] = "Compra Proy"
+    df_pq["N_PO"] = "-"
+    df_pq["Origen Data"] = "proy_result.parquet"
+    df_pq["eta"] = pd.to_datetime(df_pq["periodo"], errors="coerce")
+    df_pq = df_pq[df_pq["eta"].dt.year == 2026].copy()
+
+    # ── Snowflake ───────────────────────────────────────────────────────────
+    query_ft = """
+        SELECT
+            numero_oc, codigo_producto_oc, codigo_proveedor_oc,
+            estatus, situacion,
+            (cantidad_oc - cantidad_ingresada) AS qty_pendiente,
+            monto_total_oc,
+            COALESCE(fecha_embarque, fecha_emision_oc) AS etd,
+            fecha_eta AS eta
+        FROM db_supply.fct.ft_compras
+        WHERE (cantidad_oc - cantidad_ingresada) > 0
+    """
+    query_prod = """
+        SELECT
+            cod_producto, proveedor, cod_proveedor, descripcion_producto,
+            mix_oficial, grupo, linea, familia, marca, procedencia, costo, precio_fob
+        FROM db_dimensiones.dim.vw_producto
+    """
+    df_ft = pd.read_sql(query_ft, conn)
+    df_prod = pd.read_sql(query_prod, conn)
+
+    df_ft.columns = df_ft.columns.str.lower()
+    df_prod.columns = df_prod.columns.str.lower()
+    df_ft["codigo_producto_oc"] = df_ft["codigo_producto_oc"].astype(str).str.upper().str.strip()
+    df_prod["cod_producto"] = df_prod["cod_producto"].astype(str).str.upper().str.strip()
+
+    # ── Merge con producto ──────────────────────────────────────────────────
+    df_ft = df_ft.merge(df_prod, left_on="codigo_producto_oc", right_on="cod_producto", how="left")
+    df_pq = df_pq.merge(df_prod, left_on="sku_producto", right_on="cod_producto", how="left")
+    df_ft["Sku_producto"] = df_ft["codigo_producto_oc"]
+
+    # Lookup proyección
+    map_linea = dict(zip(df_prod["cod_producto"], df_prod["linea"]))
+    map_marca = dict(zip(df_prod["cod_producto"], df_prod["marca"]))
+    map_mix = dict(zip(df_prod["cod_producto"], df_prod["mix_oficial"]))
+    map_prov = dict(zip(df_prod["cod_producto"], df_prod["proveedor"]))
+    map_cod_prov = dict(zip(df_prod["cod_producto"], df_prod["cod_proveedor"]))
+    map_origen = dict(zip(df_prod["cod_producto"], df_prod["procedencia"]))
+
+    df_pq["LINEA"] = df_pq["sku_producto"].map(map_linea)
+    df_pq["marca"] = df_pq["sku_producto"].map(map_marca)
+    df_pq["MIX"] = df_pq["sku_producto"].map(map_mix)
+    df_pq["NOM_PROVEEDOR"] = df_pq["sku_producto"].map(map_prov)
+    df_pq["COD_PROVEEDOR"] = df_pq["sku_producto"].map(map_cod_prov)
+    df_pq["Origen"] = df_pq["sku_producto"].map(map_origen)
+
+    # ── Factor de Importación ───────────────────────────────────────────────
+    df_factor = pd.read_excel(factor_file)
+    df_factor["key"] = df_factor.iloc[:, 0].astype(str).str.upper().str.strip()
+    df_factor["factor"] = pd.to_numeric(df_factor.iloc[:, 4], errors="coerce")
+
+    def _aplicar_factor(df):
+        grupo = _gcol(df, "grupo").astype(str).str.upper()
+        linea = _gcol(df, "linea").astype(str).str.upper()
+        marca = _gcol(df, "marca").astype(str).str.upper()
+        df = df.copy()
+        df["key"] = grupo + linea + marca
+        df = df.merge(df_factor[["key", "factor"]], on="key", how="left")
+        df["FACTOR_IMPORTACION"] = df["factor"].fillna(1.3)
+        df.drop(columns=["factor"], inplace=True)
+        return df
+
+    df_ft = _aplicar_factor(df_ft)
+    df_pq = _aplicar_factor(df_pq)
+
+    # Origen y ajuste nacional
+    df_ft["Origen"] = _gcol(df_ft, "procedencia")
+    df_pq["Origen"] = _gcol(df_pq, "Origen")
+    for _df in [df_ft, df_pq]:
+        _df.loc[_df["Origen"].astype(str).str.upper() == "NACIONAL", "FACTOR_IMPORTACION"] = 1
+
+    # ── Campos FT ──────────────────────────────────────────────────────────
+    df_ft["COD_PROVEEDOR"] = df_ft["codigo_proveedor_oc"]
+    df_ft["NOM_PROVEEDOR"] = _gcol(df_ft, "proveedor")
+    df_ft["Producto"] = _gcol(df_ft, "descripcion_producto")
+    df_pq["Producto"] = _gcol(df_pq, "descripcion_producto")
+    df_ft["MIX"] = _gcol(df_ft, "mix_oficial")
+    df_ft["Status_PO"] = df_ft["situacion"]
+    df_ft["N_PO"] = df_ft["numero_oc"]
+    df_ft["LINEA"] = _gcol(df_ft, "linea")
+    df_ft["marca"] = _gcol(df_ft, "marca")
+    df_ft["Origen"] = _gcol(df_ft, "procedencia")
+    df_ft.loc[df_ft["Origen"].astype(str).str.upper() == "NACIONAL", "FACTOR_IMPORTACION"] = 1
+
+    # ── Fechas ──────────────────────────────────────────────────────────────
+    df_ft["etd"] = pd.to_datetime(df_ft["etd"], errors="coerce")
+    df_ft["eta"] = pd.to_datetime(df_ft["eta"], errors="coerce")
+
+    # Filtro pendientes
+    df_ft = df_ft[df_ft["estatus"].astype(str).str.upper().str.contains("PENDIENTE", na=False)].copy()
+
+    mask_imp_ft = df_ft["Origen"].astype(str).str.upper() == "IMPORTADO"
+    df_ft_imp = df_ft[mask_imp_ft].copy()
+    df_ft_nac = df_ft[~mask_imp_ft].copy()
+
+    df_ft_imp["eta"] = pd.to_datetime(df_ft_imp["eta"], errors="coerce")
+    df_ft_imp = df_ft_imp[df_ft_imp["eta"].dt.year == 2026].copy()
+    df_ft_imp.loc[df_ft_imp["eta"].dt.month < mes_actual, "eta"] = datetime(
+        anio_actual, mes_actual, ultimo_dia_mes
+    )
+    df_ft = pd.concat([df_ft_imp, df_ft_nac], ignore_index=True)
+    df_ft["eta"] = pd.to_datetime(df_ft["eta"], errors="coerce")
+
+    mask_nac_sin_eta = (
+        (df_ft["Origen"].astype(str).str.upper().str.strip() == "NACIONAL")
+        & df_ft["eta"].isna()
+    )
+    df_ft.loc[mask_nac_sin_eta, "eta"] = datetime(anio_actual, mes_actual, ultimo_dia_mes)
+
+    df_ft["ETD"] = df_ft["etd"].dt.strftime("%d/%m/%Y")
+    df_ft["ETA"] = df_ft["eta"].dt.strftime("%d/%m/%Y")
+    df_pq["ETD"] = ""
+    df_pq["ETA"] = df_pq["eta"].dt.strftime("%d/%m/%Y")
+    df_ft["MES ETA"] = df_ft["eta"].dt.month.map(MESES_FULL)
+    df_pq["MES ETA"] = df_pq["eta"].dt.month.map(MESES_FULL)
+    df_ft["Días agua"] = (df_ft["eta"] - df_ft["etd"]).dt.days
+    df_pq["Días agua"] = ""
+
+    # ── Cálculos montos ─────────────────────────────────────────────────────
+    df_pq["Compra Unds Proy"] = df_pq["forecast_compra"]
+    mask_imp_pq = df_pq["Origen"].astype(str).str.upper() == "IMPORTADO"
+
+    df_pq["Amount SOLES incluye factor import"] = (
+        _gcol(df_pq, "costo") * df_pq["Compra Unds Proy"]
+    )
+    df_pq.loc[mask_imp_pq, "Amount SOLES incluye factor import"] = (
+        _gcol(df_pq, "precio_fob") * df_pq["FACTOR_IMPORTACION"] * TC * df_pq["Compra Unds Proy"]
+    )
+    df_pq["Amount"] = df_pq["Amount SOLES incluye factor import"].copy()
+    df_pq.loc[mask_imp_pq, "Amount"] = (
+        df_pq.loc[mask_imp_pq, "Amount SOLES incluye factor import"]
+        / (df_pq.loc[mask_imp_pq, "FACTOR_IMPORTACION"] * TC)
+    )
+    df_pq["Currency"] = df_pq["Origen"].apply(
+        lambda x: "USD" if str(x).upper() == "IMPORTADO" else "PEN"
+    )
+
+    df_ft["Compra Unds Proy"] = df_ft["qty_pendiente"]
+    mask_imp_ft2 = df_ft["Origen"].astype(str).str.upper() == "IMPORTADO"
+    df_ft["Amount"] = df_ft["monto_total_oc"]
+    df_ft["Amount SOLES incluye factor import"] = df_ft["monto_total_oc"].copy()
+    df_ft.loc[mask_imp_ft2, "Amount SOLES incluye factor import"] = (
+        df_ft.loc[mask_imp_ft2, "monto_total_oc"]
+        * df_ft.loc[mask_imp_ft2, "FACTOR_IMPORTACION"]
+        * TC
+    )
+    df_ft["Currency"] = df_ft["Origen"].apply(
+        lambda x: "USD" if str(x).upper() == "IMPORTADO" else "PEN"
+    )
+    df_ft["Origen Data"] = "ft_compras"
+
+    # ── Concat final ────────────────────────────────────────────────────────
+    df = pd.concat([df_ft, df_pq], ignore_index=True).fillna("")
+    df = df.rename(columns={"grupo": "AREA", "familia": "SUBLINEA"})
+    df = df[df["AREA"].isin(AREAS_VALIDAS)]
+
+    columnas = [
+        "Origen", "Status_PO", "N_PO", "NOM_PROVEEDOR", "COD_PROVEEDOR",
+        "Amount", "Currency", "FACTOR_IMPORTACION", "Amount SOLES incluye factor import",
+        "ETD", "ETA", "MES ETA", "Días agua", "FACTURA", "Especificaciones de Pago",
+        "AREA", "LINEA", "SUBLINEA", "marca", "MIX", "Sku_producto", "Producto",
+        "Compra Unds Proy", "Origen Data",
+        "M3 Unit", "M3 Total", "TAMAÑO", "CANT x PALLET", "PALLETS",
+    ]
+    for col in columnas:
+        if col not in df.columns:
+            df[col] = ""
+    return df[columnas]
+
+
+def _render_exportar_plan_compra(conn):
+    """Tab: carga Factor de Importación y genera resumen Plan de Compra."""
+    st.markdown("#### Resumen Plan de Compra")
+    st.caption(
+        "Combina las OC pendientes de **FT_COMPRAS** con las compras proyectadas "
+        "de **proy_result.parquet**. Sube el archivo de factores para calcular montos en soles."
+    )
+
+    uploaded = st.file_uploader(
+        "📂 Cargar FactordeImportacion.xlsx",
+        type=["xlsx"],
+        key="uploader_factor_importacion",
+        help=(
+            "El archivo debe tener en la columna 1 la clave (GRUPO+LINEA+MARCA en mayúsculas) "
+            "y en la columna 5 (índice 4) el factor numérico. "
+            "Si un SKU no tiene match, se usa factor 1.3 por defecto."
+        ),
+    )
+
+    if uploaded is None:
+        st.info("Sube el archivo **FactordeImportacion.xlsx** para habilitar la generación.")
+        return
+
+    if st.button("🚀 Generar Resumen", key="btn_gen_plan_compra", type="primary"):
+        with st.spinner("Consultando Snowflake y procesando datos..."):
+            try:
+                df_result = _generar_plan_compra(conn, uploaded)
+            except Exception as e:
+                st.error(f"Error al generar el resumen: {e}")
+                return
+
+        if df_result is None or df_result.empty:
+            st.warning("No se generaron datos. Verifica los filtros y el parquet.")
+            return
+
+        ft_rows = int((df_result["Origen Data"] == "ft_compras").sum())
+        pq_rows = int((df_result["Origen Data"] == "proy_result.parquet").sum())
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total filas", f"{len(df_result):,}")
+        col2.metric("OC FT_COMPRAS", f"{ft_rows:,}")
+        col3.metric("Compras Proyectadas", f"{pq_rows:,}")
+
+        st.dataframe(df_result, use_container_width=True, height=420)
+        download_buttons(df_result, "resumen_plan_compra")
+
+
 # ─── Entry point ───────────────────────────────────────────────────────────────
 
 def render_plan_compras(conn):
@@ -1406,11 +1666,12 @@ def render_plan_compras(conn):
         df_inv = df_inv[df_inv["PERIODO"].dt.year == _ano_sel]
 
     # ── Tabs ───────────────────────────────────────────────────────────────
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "📦 Inventario & Tránsito",
         "🎯 Open to Buy",
         "📊 Resumen Financiero",
         "🗂️ Detalle POs",
+        "📥 Exportar Plan Compra",
     ])
 
     with tab1:
@@ -1531,3 +1792,6 @@ def render_plan_compras(conn):
 
     with tab4:
         _render_detalle_pos(df_filt)
+
+    with tab5:
+        _render_exportar_plan_compra(conn)
