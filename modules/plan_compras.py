@@ -178,6 +178,7 @@ def _enrich_pos(df_pos, maestra):
     m_dedup = maestra[maestra_cols].drop_duplicates("SKU_PRODUCTO")
     df = df_pos.merge(m_dedup, on="SKU_PRODUCTO", how="left")
 
+    # Fallback: completar AREA/LINEA/SUBLINEA/MARCA desde db_dimensiones.dim.dt_producto
     # Aplicar árbol comercial para factor faltante
     df = _apply_factor_fallback(df, maestra)
 
@@ -1259,6 +1260,7 @@ def _generar_plan_compra(df_pos, maestra, factor_file):
     STATUS_CERRADOS = {
         "Cerrada", "PO Recepcionada", "CERRADA", "RECEPCIONADA",
         "Cancelada", "CANCELADA",
+        "Cerrado", "Recibido",  # valores reales de Snowflake Peru
     }
     tc = _get_tc()
 
@@ -1317,17 +1319,19 @@ def _generar_plan_compra(df_pos, maestra, factor_file):
     etd_dt = pd.to_datetime(df_ft["ETD_CALC"], errors="coerce")
     eta_dt = pd.to_datetime(df_ft["ETA_CALC"], errors="coerce")
 
-    # Importados: filtrar año actual; adelantar ETA pasada al cierre del mes
-    keep = ~(mask_imp_ft & (eta_dt.dt.year.fillna(0).astype(int) > anio_actual))
+    # Filtrar solo año actual; filas sin ETA se conservan (se les asignará ETA al cierre del mes)
+    keep = (eta_dt.dt.year.fillna(0).astype(int) == anio_actual) | eta_dt.isna()
     df_ft = df_ft[keep].copy()
     etd_dt = etd_dt[keep]
     eta_dt = eta_dt[keep]
     mask_imp_ft = mask_imp_ft[keep]
 
-    late = mask_imp_ft & (eta_dt.dt.month.fillna(0).astype(int) < mes_actual)
+    # Meses anteriores al actual (dentro del año) → forzar al último día del mes actual
+    late = eta_dt.dt.month.fillna(0).astype(int) < mes_actual
     eta_dt = eta_dt.copy()
     eta_dt[late] = pd.Timestamp(datetime(anio_actual, mes_actual, ultimo_dia_mes))
-    no_eta = ~mask_imp_ft & eta_dt.isna()
+    # Filas sin ETA → último día del mes actual
+    no_eta = eta_dt.isna()
     eta_dt[no_eta] = pd.Timestamp(datetime(anio_actual, mes_actual, ultimo_dia_mes))
 
     df_ft["ETD"] = etd_dt.dt.strftime("%d/%m/%Y").fillna("")
@@ -1336,12 +1340,44 @@ def _generar_plan_compra(df_pos, maestra, factor_file):
     df_ft["Días agua"] = (eta_dt - etd_dt).dt.days
     df_ft["COMPRA_UNDS"] = df_ft["QTY_PENDIENTE"]
     df_ft["FUENTE"] = "ft_compras"
-    df_ft["SKU"] = df_ft["SKU_PRODUTO"]
-    nom_col = "NOM_PRODUTO" if "NOM_PRODUTO" in df_ft.columns else "SKU_NOM_PRODUTO"
+    df_ft["SKU"] = df_ft["SKU_PRODUCTO"]
+    nom_col = "NOM_PRODUCTO" if "NOM_PRODUCTO" in df_ft.columns else "SKU_NOM_PRODUCTO"
     df_ft["PRODUCTO"] = df_ft.get(nom_col, pd.Series("", index=df_ft.index)).fillna("")
-    mix_map = dict(zip(maestra["SKU_PRODUTO"], maestra.get("MIX_OFICIAL", pd.Series(dtype=str))))
-    df_ft["MIX"] = df_ft["SKU_PRODUTO"].map(mix_map).fillna("")
+    mix_map = dict(zip(maestra["SKU_PRODUCTO"], maestra.get("MIX_OFICIAL", pd.Series(dtype=str))))
+    df_ft["MIX"] = df_ft["SKU_PRODUCTO"].map(mix_map).fillna("")
     df_ft["ORIGEN"] = proc_ft[keep].values
+
+    # ── Lookup AREA/LINEA/SUBLINEA/MARCA desde vw_producto (maestra) ────────
+    # Forzar re-lookup aquí porque _enrich_pos puede traer NULLs si el SKU
+    # no estaba en maestra en el momento de la carga inicial.
+    _dim_src_cols = [c for c in ["AREA", "LINEA", "SUBLINEA", "MARCA"] if c in maestra.columns]
+    if _dim_src_cols and "SKU_PRODUCTO" in maestra.columns:
+        _m_dim = (
+            maestra[["SKU_PRODUCTO"] + _dim_src_cols]
+            .drop_duplicates("SKU_PRODUCTO")
+        )
+        # Quitar columnas de dims en df_ft que estén todas vacías/NULL para merge limpio
+        for _c in _dim_src_cols:
+            if _c in df_ft.columns:
+                _all_empty = df_ft[_c].replace("", pd.NA).isna().all()
+                if _all_empty:
+                    df_ft = df_ft.drop(columns=[_c])
+        df_ft = df_ft.merge(_m_dim, on="SKU_PRODUCTO", how="left")
+
+    # ── Completar NOM_PROVEEDOR vacío desde vw_producto (maestra) ───────────
+    if "PROVEEDOR" in maestra.columns:
+        _prov_map = (
+            maestra[["SKU_PRODUCTO", "PROVEEDOR"]]
+            .drop_duplicates("SKU_PRODUCTO")
+            .set_index("SKU_PRODUCTO")["PROVEEDOR"]
+        )
+        if "NOM_PROVEEDOR" not in df_ft.columns:
+            df_ft["NOM_PROVEEDOR"] = pd.NA
+        _mask_prov = df_ft["NOM_PROVEEDOR"].replace("", pd.NA).isna()
+        if _mask_prov.any():
+            df_ft.loc[_mask_prov, "NOM_PROVEEDOR"] = (
+                df_ft.loc[_mask_prov, "SKU_PRODUCTO"].map(_prov_map)
+            )
 
     # ── Proyección desde proy_result.parquet ───────────────────────────────
     parquet_path = Path(__file__).resolve().parent.parent / "data" / "inputs" / "proy_result.parquet"
@@ -1360,23 +1396,15 @@ def _generar_plan_compra(df_pos, maestra, factor_file):
         errors="coerce",
     ).fillna(0)
     df_pq = df_pq[df_pq["FORECAST_COMPRA"] > 0].copy()
-    eta_pq = pd.to_datetime(df_pq.get("PERIODO", None), errors="coerce")
-    df_pq = df_pq[eta_pq.dt.year == anio_actual].copy()
-    eta_pq = eta_pq[eta_pq.dt.year == anio_actual]
+    _periodo_pq = df_pq["PERIODO"] if "PERIODO" in df_pq.columns else pd.Series(dtype="datetime64[ns]")
+    eta_pq = pd.to_datetime(_periodo_pq, errors="coerce")
+    mask_ano_pq = eta_pq.dt.year == anio_actual
+    df_pq = df_pq[mask_ano_pq].copy()
+    eta_pq = eta_pq[mask_ano_pq]
 
-    # Enriquecer proyección con maestra (misma lógica que _enrich_pos)
-    m_cols = ["SKU_PRODUTO"]
-    for c in ["NOM_PRODUTO", "SKU_NOM_PRODUTO", "AREA", "LINEA", "SUBLINEA", "MARCA",
-              "NOM_PROVEEDOR", "COD_PROVEEDOR", "MIX_OFICIAL", "PROCEDENCIA",
-              "COSTO_FOB_USD", "ULTIMO_COSTO"]:
-        if c in maestra.columns:
-            m_cols.append(c)
-    df_pq = df_pq.merge(
-        maestra[m_cols].drop_duplicates("SKU_PRODUTO"),
-        on="SKU_PRODUTO", how="left",
-    )
-
-    proc_pq = df_pq.get("PROCEDENCIA", pd.Series("", index=df_pq.index)).fillna("")
+    # El parquet ya trae AREA, LINEA, SUBLINEA, MARCA, PROCEDENCIA,
+    # MIX_OFICIAL, COSTO_FOB_USD, ULTIMO_COSTO — no se necesita merge con maestra.
+    proc_pq = df_pq["PROCEDENCIA"].fillna("") if "PROCEDENCIA" in df_pq.columns else pd.Series("", index=df_pq.index)
     df_pq["_FACTOR"] = [
         _lookup_factor(r.get("AREA", ""), r.get("LINEA", ""), r.get("MARCA", ""), p)
         for r, p in zip(df_pq.to_dict("records"), proc_pq)
@@ -1407,10 +1435,29 @@ def _generar_plan_compra(df_pos, maestra, factor_file):
     df_pq["FUENTE"] = "proy_result.parquet"
     df_pq["STATUS_PO"] = "Compra Proy"
     df_pq["N_PO"] = "-"
-    df_pq["SKU"] = df_pq["SKU_PRODUTO"]
-    nom_col_pq = "NOM_PRODUTO" if "NOM_PRODUTO" in df_pq.columns else "SKU_NOM_PRODUTO"
-    df_pq["PRODUCTO"] = df_pq.get(nom_col_pq, pd.Series("", index=df_pq.index)).fillna("")
-    df_pq["MIX"] = df_pq["SKU_PRODUTO"].map(mix_map).fillna("")
+    df_pq["SKU"] = df_pq["SKU_PRODUCTO"]
+    nom_col_pq = "SKU_NOM_PRODUCTO" if "SKU_NOM_PRODUCTO" in df_pq.columns else "SKU_PRODUCTO"
+    df_pq["PRODUCTO"] = df_pq[nom_col_pq].fillna("")
+    df_pq["MIX"] = df_pq["MIX_OFICIAL"].fillna("") if "MIX_OFICIAL" in df_pq.columns else ""
+    # ── Lookup NOM_PROVEEDOR, COD_PROVEEDOR y SUBLINEA desde vw_producto ────
+    _pq_sku = df_pq["SKU_PRODUCTO"]
+    _maestra_idx = maestra.drop_duplicates("SKU_PRODUCTO").set_index("SKU_PRODUCTO")
+
+    df_pq["NOM_PROVEEDOR"] = (
+        _pq_sku.map(_maestra_idx["PROVEEDOR"]).fillna("")
+        if "PROVEEDOR" in maestra.columns else ""
+    )
+    df_pq["COD_PROVEEDOR"] = (
+        _pq_sku.map(_maestra_idx["COD_PROVEEDOR"]).fillna("")
+        if "COD_PROVEEDOR" in maestra.columns else ""
+    )
+    if "SUBLINEA" in maestra.columns:
+        if "SUBLINEA" not in df_pq.columns:
+            df_pq["SUBLINEA"] = pd.NA
+        _mask_sl = df_pq["SUBLINEA"].replace("", pd.NA).isna()
+        if _mask_sl.any():
+            df_pq.loc[_mask_sl, "SUBLINEA"] = _pq_sku[_mask_sl].map(_maestra_idx["SUBLINEA"])
+
     df_pq["ORIGEN"] = proc_pq.values
 
     # ── Concat final ────────────────────────────────────────────────────────
