@@ -95,6 +95,7 @@ from db.queries import (
     QUERY_VENTAS_DIARIAS_HIST,
     QUERY_VENTAS_SEMANAL_SUCURSAL_12M,
     QUERY_DDMRP_ADU_TIENDA,
+    QUERY_VTA_MTD_RETAIL,
 )
 from utils.filters import norm_cols
 
@@ -352,6 +353,12 @@ def ventas_mtd_diaria(_conn_id, _conn=None) -> pd.DataFrame:
 def dashboard_ventas_mtd(_conn_id, _conn=None) -> pd.DataFrame:
     """Aggregated MTD sales by canal (dashboard KPI)."""
     return _run(QUERY_DASHBOARD_VENTAS_MTD, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def vta_mtd_retail(_conn_id, _conn=None) -> pd.DataFrame:
+    """MTD sales by SKU × Sucursal for RETAIL/MINORISTA canal only."""
+    return _run(QUERY_VTA_MTD_RETAIL, _conn)
 
 
 # ---------------------------------------------------------------------------
@@ -805,7 +812,7 @@ _ALL_CACHED = [
     event_boosts, event_boosts_sku,
     stock_onhand, stock_proyeccion, stock_critico_metrics, stock_higiene, instock_store_detail,
     ventas_diarias_90d, tienda_dim,
-    ventas_mtd, ventas_mtd_diaria, dashboard_ventas_mtd,
+    ventas_mtd, ventas_mtd_diaria, dashboard_ventas_mtd, vta_mtd_retail,
     instock_hist_tienda, instock_hist_cd,
     instock_daily_tienda, instock_daily_cd,
     abc_xyz_fsn,
@@ -961,6 +968,10 @@ class cached_query:
     @staticmethod
     def dashboard_ventas_mtd(conn):
         return dashboard_ventas_mtd(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def vta_mtd_retail(conn):
+        return vta_mtd_retail(cached_query._cid(conn), _conn=conn)
 
     # -- InStock Historico (24h) --
     @staticmethod

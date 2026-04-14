@@ -2449,3 +2449,88 @@ WHERE fecha >= DATEADD('day', -90, CURRENT_DATE())
   AND stock_unidades > 0
 GROUP BY 1, 2
 """
+
+# Ventas MTD por SKU x Sucursal — canales TIENDA y MINORISTA.
+# Usa {_SUCURSAL} para consistencia con el resto del portal
+# (normaliza RETAIL→TIENDA igual que todas las demás queries).
+# CAST en ambos lados del JOIN evita mismatch de tipos.
+# Fallback a cod_ccosto cuando no hay match en maestro sucursal.
+QUERY_VTA_MTD_RETAIL = f"""
+SELECT
+    a.sku_producto,
+    COALESCE(CAST(b.id_sucursal AS VARCHAR),
+             CAST(a.cod_ccosto  AS VARCHAR))                             AS id_sucursal,
+    COALESCE(b.descripcion_sucursal,
+             CAST(a.cod_ccosto  AS VARCHAR))                             AS descripcion_sucursal,
+    COALESCE(b.canal_de_distribucion, 'TIENDA')                         AS canal,
+    SUM(a.cantidad)                                                      AS vta_actual_und
+FROM {_VCM} a
+LEFT JOIN {_SUCURSAL} b
+    ON CAST(a.cod_ccosto AS VARCHAR) = CAST(b.id_sucursal AS VARCHAR)
+WHERE a.fecha >= date_trunc('month', current_date())
+  AND a.fecha <  current_date()
+  AND a.cantidad > 0
+  AND TRIM(a.cod_canal) = '03'
+GROUP BY 1, 2, 3, 4
+"""
+
+# Queries de diagnóstico — solo se ejecutan desde el panel admin del módulo
+# Fcst vs Vta Retail; no forman parte del flujo normal de datos.
+QUERY_DIAG_VCM_CANALES_MTD = """
+SELECT
+    TRIM(cod_canal)   AS cod_canal,
+    COUNT(*)          AS n_registros,
+    SUM(unidades)     AS total_unidades
+FROM db_finanzas.fct.ft_vcm
+WHERE TRY_TO_DATE(CAST(id_periodo AS VARCHAR), 'YYYYMMDD')
+          >= date_trunc('month', current_date())
+  AND TRY_TO_DATE(CAST(id_periodo AS VARCHAR), 'YYYYMMDD')
+          <  current_date()
+  AND unidades > 0
+GROUP BY 1
+ORDER BY 2 DESC
+"""
+
+QUERY_DIAG_VCM_CCOSTO_RETAIL = """
+SELECT
+    TRIM(CAST(cod_ccosto AS VARCHAR)) AS cod_ccosto,
+    SUM(unidades)                     AS total_unidades
+FROM db_finanzas.fct.ft_vcm
+WHERE TRY_TO_DATE(CAST(id_periodo AS VARCHAR), 'YYYYMMDD')
+          >= date_trunc('month', current_date())
+  AND TRY_TO_DATE(CAST(id_periodo AS VARCHAR), 'YYYYMMDD')
+          <  current_date()
+  AND unidades > 0
+  AND TRIM(cod_canal) = '03'
+GROUP BY 1
+ORDER BY 2 DESC
+LIMIT 30
+"""
+
+QUERY_DIAG_MAESTRO_SUCURSAL = """
+SELECT id_sucursal, descripcion_sucursal, canal_de_distribucion
+FROM db_syncros.public.coo_maestro_sucursal
+ORDER BY canal_de_distribucion, id_sucursal
+LIMIT 50
+"""
+
+QUERY_DIAG_JOIN_VCM_SUCURSAL = """
+SELECT
+    CAST(a.cod_ccosto AS VARCHAR)  AS cod_ccosto_vcm,
+    b.id_sucursal                  AS id_sucursal_maestro,
+    b.descripcion_sucursal,
+    b.canal_de_distribucion,
+    SUM(a.unidades)                AS unidades
+FROM db_finanzas.fct.ft_vcm a
+LEFT JOIN db_syncros.public.coo_maestro_sucursal b
+    ON CAST(a.cod_ccosto AS VARCHAR) = CAST(b.id_sucursal AS VARCHAR)
+WHERE TRY_TO_DATE(CAST(a.id_periodo AS VARCHAR), 'YYYYMMDD')
+          >= date_trunc('month', current_date())
+  AND TRY_TO_DATE(CAST(a.id_periodo AS VARCHAR), 'YYYYMMDD')
+          <  current_date()
+  AND a.unidades > 0
+  AND TRIM(a.cod_canal) = '03'
+GROUP BY 1, 2, 3, 4
+ORDER BY 5 DESC
+LIMIT 30
+"""

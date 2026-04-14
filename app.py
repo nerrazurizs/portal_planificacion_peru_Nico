@@ -49,6 +49,7 @@ from modules.stock_critico_v2 import render_stock_dashboard_v2
 from modules.business_case import render_business_case
 from modules.listado_oe import render_listado_oe
 from modules.ddmrp import render_ddmrp
+from modules.fcst_vs_vta_retail import render_fcst_vs_vta_retail
 from db.cache import cached_query as cq, clear_all as clear_query_cache, last_refresh_label, auto_refresh_if_new_day
 from utils.ui_animations import lottie_spinner, show_lottie, animated_kpi_row
 
@@ -307,6 +308,7 @@ def main_app():
             ("🚢", "Analisis Transitos"),
             ("📧", "Alertas Email"),
             ("🏭", "Operaciones Supply"),
+            ("📊", "Fcst vs Vta Retail"),
         ],
     }
 
@@ -505,6 +507,7 @@ def main_app():
         "Operaciones Supply": None,
         "Venta Perdida": render_venta_perdida,
         "Ventas Forecast 2+10": render_ventas_forecast_210,
+        "Fcst vs Vta Retail": render_fcst_vs_vta_retail,
         "Diagnostico Tablas": render_diagnostico,
     }
 
