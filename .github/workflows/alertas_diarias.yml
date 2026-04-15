@@ -2,8 +2,8 @@ name: Alertas Supply Chain Diarias
 
 on:
   schedule:
-    # ── PRODUCCIÓN: 09:00 Chile (UTC-3 verano = 12:00 UTC) Lun-Vie ──
-    - cron: '0 12 * * 1-5'
+    # ── PRODUCCIÓN: 08:40 Perú (UTC-5 fijo, sin horario de verano = 13:40 UTC) Lun-Vie ──
+    - cron: '40 13 * * 1-5'
 
   # Permite disparar el workflow manualmente desde GitHub → Actions → Run workflow
   workflow_dispatch:
