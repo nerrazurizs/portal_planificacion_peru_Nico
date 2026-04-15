@@ -270,6 +270,7 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
         FROM db_dimensiones.dim.dt_almacen
         WHERE cod_tipoalmacen = '9'
           AND cod_ccosto IS NOT NULL
+          AND cod_ccosto NOT IN ('0229', '1290')  -- Benavides (ambas tiendas cerradas)
           AND UPPER(COALESCE(nom_almacen, ''))
               NOT LIKE '%%BELLAVISTA%%'
           AND UPPER(COALESCE(nom_almacen, ''))
