@@ -8,6 +8,9 @@ La clasificacion se calcula centralizadamente en db/cache.abc_xyz_fsn()
 y se actualiza automaticamente 1x/dia (cache 24 h).
 """
 
+import datetime
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -18,6 +21,9 @@ from db.cache import cached_query as cq
 from utils.filters import norm_cols, human_format
 from utils.export import download_buttons
 from config import COLORS, dorel_layout, apply_pm_filter
+
+# Directorio donde el workflow de GitHub Actions guarda los snapshots diarios
+_SNAPSHOT_DIR = Path(__file__).resolve().parent.parent / "data" / "abc_xyz_snapshots"
 
 
 # ============================================================================
@@ -57,6 +63,44 @@ FSN_DESCRIPTIONS = {
 # ============================================================================
 # HELPERS
 # ============================================================================
+
+def _available_snapshot_dates() -> list[datetime.date]:
+    """Retorna lista ordenada de fechas con snapshot guardado en disco."""
+    if not _SNAPSHOT_DIR.exists():
+        return []
+    dates = []
+    for f in _SNAPSHOT_DIR.glob("abc_xyz_*.parquet"):
+        try:
+            d = datetime.date.fromisoformat(f.stem.replace("abc_xyz_", ""))
+            dates.append(d)
+        except ValueError:
+            pass
+    return sorted(dates)
+
+
+@st.cache_data(ttl=3_600, show_spinner=False)
+def _load_snapshots_range(fecha_ini: str, fecha_fin: str) -> pd.DataFrame:
+    """Lee y concatena todos los snapshots Parquet en el rango [fecha_ini, fecha_fin].
+
+    Parámetros en formato 'YYYY-MM-DD'. Cacheado 1 hora para evitar I/O repetido.
+    """
+    d_ini = datetime.date.fromisoformat(fecha_ini)
+    d_fin = datetime.date.fromisoformat(fecha_fin)
+    frames = []
+    for f in sorted(_SNAPSHOT_DIR.glob("abc_xyz_*.parquet")):
+        try:
+            d = datetime.date.fromisoformat(f.stem.replace("abc_xyz_", ""))
+        except ValueError:
+            continue
+        if d_ini <= d <= d_fin:
+            frames.append(pd.read_parquet(f))
+    if not frames:
+        return pd.DataFrame()
+    df = pd.concat(frames, ignore_index=True)
+    if "FECHA_SNAPSHOT" in df.columns:
+        df["FECHA_SNAPSHOT"] = pd.to_datetime(df["FECHA_SNAPSHOT"]).dt.date
+    return df
+
 
 def _load_classified_data(conn):
     """Load centralized ABC-XYZ-FSN + enrich with maestra dimensions."""
@@ -648,7 +692,7 @@ def render_abc_xyz(conn):
 
     # ── Filters ──────────────────────────────────────────────────────
     st.markdown("### Filtros")
-    fc1, fc2, fc3, fc4 = st.columns(4)
+    fc1, fc2, fc3, fc4, fc5, fc6 = st.columns(6)
 
     areas = sorted(df["AREA"].dropna().unique()) if "AREA" in df.columns else []
     lineas_all = sorted(df["LINEA"].dropna().unique()) if "LINEA" in df.columns else []
@@ -668,7 +712,45 @@ def render_abc_xyz(conn):
         marcas_filt = sorted(_m["MARCA"].dropna().unique()) if "MARCA" in _m.columns else marcas_all
         sel_marca = st.multiselect("Marca", marcas_filt, key="abc_marca")
     with fc4:
+        sel_abc = st.multiselect("ABC", ["A", "B", "C"], default=[], key="abc_clase_abc")
+    with fc5:
+        sel_xyz = st.multiselect("XYZ", ["X", "Y", "Z"], default=[], key="abc_clase_xyz")
+    with fc6:
         sel_fsn = st.multiselect("FSN", ["F", "S", "N"], default=[], key="abc_fsn")
+
+    # ── Filtro de periodo histórico ───────────────────────────────────
+    _snap_dates = _available_snapshot_dates()
+    _has_history = len(_snap_dates) > 0
+    _today = datetime.date.today()
+
+    st.markdown("**Periodo Histórico** *(para la sección de evolución al final)*")
+    _hc1, _hc2, _hc3 = st.columns([2, 2, 4])
+    _ini_default = _snap_dates[0]  if _has_history else _today
+    _fin_default = _snap_dates[-1] if _has_history else _today
+    _min_date    = _snap_dates[0]  if _has_history else _today
+    _max_date    = _snap_dates[-1] if _has_history else _today
+    with _hc1:
+        sel_hist_ini = st.date_input(
+            "Desde", value=_ini_default,
+            min_value=_min_date, max_value=_max_date,
+            key="abc_hist_ini",
+            disabled=not _has_history,
+        )
+    with _hc2:
+        sel_hist_fin = st.date_input(
+            "Hasta", value=_fin_default,
+            min_value=_min_date, max_value=_max_date,
+            key="abc_hist_fin",
+            disabled=not _has_history,
+        )
+    with _hc3:
+        if _has_history:
+            st.caption(
+                f"📅 {len(_snap_dates)} snapshots disponibles "
+                f"({_snap_dates[0]} → {_snap_dates[-1]})"
+            )
+        else:
+            st.caption("📅 Aún no hay snapshots. Usa el botón al final para guardar el de hoy.")
 
     # Apply filters
     mask = pd.Series(True, index=df.index)
@@ -678,6 +760,10 @@ def render_abc_xyz(conn):
         mask &= df["LINEA"].isin(sel_linea)
     if sel_marca:
         mask &= df["MARCA"].isin(sel_marca)
+    if sel_abc and "CLASE_ABC" in df.columns:
+        mask &= df["CLASE_ABC"].isin(sel_abc)
+    if sel_xyz and "CLASE_XYZ" in df.columns:
+        mask &= df["CLASE_XYZ"].isin(sel_xyz)
     if sel_fsn and "CLASE_FSN" in df.columns:
         mask &= df["CLASE_FSN"].isin(sel_fsn)
     df_filt = df[mask]
@@ -748,3 +834,115 @@ def render_abc_xyz(conn):
     st.markdown("### 🔴 Analisis SKUs CZ — Bajo aporte, demanda impredecible")
     st.caption("Segmentacion por Area, Linea y antiguedad (ultimo ingreso a CD) para entender la naturaleza de los SKUs CZ.")
     _render_cz_analysis(df_filt)
+
+    # =========================================================================
+    # SECCIÓN HISTÓRICA — snapshots diarios guardados por el workflow de Actions
+    # =========================================================================
+    st.markdown("---")
+    st.markdown("### 📅 Evolución Histórica de Clasificaciones")
+    st.caption(
+        "El workflow de GitHub Actions guarda un snapshot cada día a las 09:00 (hora Perú). "
+        "También puedes guardar el snapshot de hoy manualmente con el botón de abajo."
+    )
+
+    # ── Botón para guardar snapshot de hoy manualmente ────────────────
+    _snap_dir = Path(__file__).resolve().parent.parent / "data" / "abc_xyz_snapshots"
+    _today_path = _snap_dir / f"abc_xyz_{_today}.parquet"
+
+    _btn_col, _status_col = st.columns([2, 5])
+    with _btn_col:
+        _save_clicked = st.button(
+            "💾 Guardar snapshot de hoy",
+            key="abc_save_snapshot",
+            disabled=_today_path.exists(),
+            help="Genera y guarda el snapshot de la clasificación de hoy en disco.",
+        )
+    with _status_col:
+        if _today_path.exists():
+            st.success(f"✅ Snapshot de hoy ya guardado ({_today})")
+        elif _save_clicked:
+            with st.spinner("Guardando snapshot..."):
+                try:
+                    # Reutilizar el df ya cargado del módulo (evita re-query a Snowflake)
+                    _snap_dir.mkdir(parents=True, exist_ok=True)
+                    _df_snap = df.copy()
+                    _df_snap.insert(0, "FECHA_SNAPSHOT", _today.isoformat())
+                    _df_snap.to_parquet(_today_path, index=False, compression="snappy")
+                    st.success(f"✅ Snapshot guardado: {_today} ({len(_df_snap):,} SKUs)")
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"Error al guardar snapshot: {_e}")
+
+    # Recargar lista de fechas por si se acaba de guardar
+    _snap_dates = _available_snapshot_dates()
+    _has_history = len(_snap_dates) > 0
+
+    if not _has_history:
+        st.info("Aún no hay snapshots. Guarda el de hoy con el botón de arriba.")
+        return
+
+    if sel_hist_ini > sel_hist_fin:
+        st.warning("La fecha de inicio debe ser anterior o igual a la fecha de fin.")
+        return
+
+    with st.spinner("Cargando historial..."):
+        df_hist = _load_snapshots_range(str(sel_hist_ini), str(sel_hist_fin))
+
+    if df_hist.empty:
+        st.warning(f"No hay snapshots entre {sel_hist_ini} y {sel_hist_fin}.")
+        return
+
+    # Aplicar los mismos filtros de dimensión (Area, Linea, Marca, FSN)
+    _hmask = pd.Series(True, index=df_hist.index)
+    if sel_area and "AREA" in df_hist.columns:
+        _hmask &= df_hist["AREA"].isin(sel_area)
+    if sel_linea and "LINEA" in df_hist.columns:
+        _hmask &= df_hist["LINEA"].isin(sel_linea)
+    if sel_marca and "MARCA" in df_hist.columns:
+        _hmask &= df_hist["MARCA"].isin(sel_marca)
+    if sel_fsn and "CLASE_FSN" in df_hist.columns:
+        _hmask &= df_hist["CLASE_FSN"].isin(sel_fsn)
+    df_hist_filt = df_hist[_hmask].copy()
+
+    if df_hist_filt.empty:
+        st.warning("Sin datos históricos para los filtros seleccionados.")
+        return
+
+    _n_dias  = df_hist_filt["FECHA_SNAPSHOT"].nunique() if "FECHA_SNAPSHOT" in df_hist_filt.columns else 0
+    _n_filas = len(df_hist_filt)
+    st.caption(f"{_n_dias} días · {_n_filas:,} registros ({sel_hist_ini} → {sel_hist_fin})")
+
+    # Columnas a mostrar (orden legible)
+    _hist_display_cols = [
+        "FECHA_SNAPSHOT", "SKU_PRODUCTO", "SKU_NOM_PRODUCTO",
+        "AREA", "LINEA", "SUBLINEA", "MARCA",
+        "CLASE_ABC", "CLASE_XYZ", "CLASE_FSN", "CLASE_COMBINADA",
+        "APORTE_TOTAL", "APORTE_PCT", "APORTE_CUM_PCT",
+        "VN_TOTAL", "UNIDADES_TOTAL", "RANK_ABC",
+        "CV", "VENTA_SEMANAL_PROM", "SEMANAS_CON_VENTA",
+        "MIX_OFICIAL", "PROCEDENCIA",
+    ]
+    _hist_display_cols = [c for c in _hist_display_cols if c in df_hist_filt.columns]
+    df_hist_show = (
+        df_hist_filt[_hist_display_cols]
+        .sort_values(
+            ["FECHA_SNAPSHOT", "RANK_ABC"] if "RANK_ABC" in _hist_display_cols else ["FECHA_SNAPSHOT"]
+        )
+        .reset_index(drop=True)
+    )
+
+    # Vista previa + descarga CSV completa
+    _PREVIEW = 200
+    st.dataframe(df_hist_show.head(_PREVIEW), use_container_width=True, height=450)
+    if len(df_hist_show) > _PREVIEW:
+        st.caption(f"Vista previa: {_PREVIEW} filas de {_n_filas:,}. Descarga el CSV para el dataset completo.")
+
+    _csv_bytes = df_hist_show.to_csv(index=False).encode("utf-8")
+    _fname = f"abc_xyz_historico_{sel_hist_ini}_{sel_hist_fin}.csv"
+    st.download_button(
+        label=f"⬇ Descargar CSV ({_n_filas:,} filas)",
+        data=_csv_bytes,
+        file_name=_fname,
+        mime="text/csv",
+        key="abc_hist_download_csv",
+    )
