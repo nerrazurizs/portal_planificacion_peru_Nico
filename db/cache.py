@@ -96,6 +96,7 @@ from db.queries import (
     QUERY_VENTAS_SEMANAL_SUCURSAL_12M,
     QUERY_DDMRP_ADU_TIENDA,
     QUERY_VTA_MTD_RETAIL,
+    QUERY_PERFIL_SKU,
 )
 from utils.filters import norm_cols
 
@@ -359,6 +360,12 @@ def dashboard_ventas_mtd(_conn_id, _conn=None) -> pd.DataFrame:
 def vta_mtd_retail(_conn_id, _conn=None) -> pd.DataFrame:
     """MTD sales by SKU × Sucursal for RETAIL/MINORISTA canal only."""
     return _run(QUERY_VTA_MTD_RETAIL, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def perfil_sku(_conn_id, _conn=None) -> pd.DataFrame:
+    """SKU-level perfil flag (SI/NO) from db_supply, latest available date."""
+    return _run(QUERY_PERFIL_SKU, _conn)
 
 
 # ---------------------------------------------------------------------------
@@ -812,7 +819,7 @@ _ALL_CACHED = [
     event_boosts, event_boosts_sku,
     stock_onhand, stock_proyeccion, stock_critico_metrics, stock_higiene, instock_store_detail,
     ventas_diarias_90d, tienda_dim,
-    ventas_mtd, ventas_mtd_diaria, dashboard_ventas_mtd, vta_mtd_retail,
+    ventas_mtd, ventas_mtd_diaria, dashboard_ventas_mtd, vta_mtd_retail, perfil_sku,
     instock_hist_tienda, instock_hist_cd,
     instock_daily_tienda, instock_daily_cd,
     abc_xyz_fsn,
@@ -972,6 +979,10 @@ class cached_query:
     @staticmethod
     def vta_mtd_retail(conn):
         return vta_mtd_retail(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def perfil_sku(conn):
+        return perfil_sku(cached_query._cid(conn), _conn=conn)
 
     # -- InStock Historico (24h) --
     @staticmethod

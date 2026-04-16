@@ -29,6 +29,7 @@ from db.queries import (
     QUERY_DIAG_VCM_CANALES_MTD,
     QUERY_DIAG_VCM_CCOSTO_RETAIL,
 )
+from modules.ddmrp import VCM_CCOSTO_TO_SYNCRO
 from utils.auth import require_role
 from utils.export import download_buttons
 from utils.file_persistence import (
@@ -37,6 +38,12 @@ from utils.file_persistence import (
     load_projection_results,
 )
 from utils.filters import norm_cols
+
+# Dict normalizado: cod_almacen (4 dígitos SAP) → id_sucursal Syncro (sin ceros a la izquierda)
+_CCOSTO_TO_SYNCRO = {
+    k: str(int(v)) if v.lstrip("0").isdigit() or v == "0" else v
+    for k, v in VCM_CCOSTO_TO_SYNCRO.items()
+}
 
 # ── FCST column candidates in proy_result.parquet ──────────────────────────────
 _FCST_PROY_CANDIDATES = [
@@ -92,6 +99,20 @@ def _detect_fcst_col_generic(cols: list[str]) -> str | None:
 
 def _detect_suc_col(cols: list[str]) -> str | None:
     return _first_match(cols, _SUC_PATTERNS)
+
+
+def _norm_id_sucursal(s: "pd.Series") -> "pd.Series":
+    """Normaliza código de almacén a string entero sin ceros a la izquierda.
+
+    Convierte "0218" → "218", "218" → "218", "218.0" → "218".
+    Usa .apply() para evitar bugs de Copy-on-Write en pandas 2.x.
+    """
+    def _one(v):
+        try:
+            return str(int(float(str(v).strip())))
+        except (ValueError, TypeError):
+            return str(v).strip()
+    return s.apply(_one)
 
 
 # ── FCST loaders ────────────────────────────────────────────────────────────────
@@ -222,13 +243,15 @@ def _load_fcst_from_file(uploaded_file) -> pd.DataFrame | None:
         )
         return None
 
-    # Detect DESCRIPCION_SUCURSAL column in file — clave de join con ventas
+    # ── Clave de join: ID_SUCURSAL (código de almacén) ───────────────────────────
+    id_suc_col = _first_match(cols, ["ID_SUCURSAL", "COD_SUCURSAL", "COD_TIENDA"])
+
+    # Nombre del almacén — para mostrar en la columna descripcion_sucursal
     desc_suc_col = _first_match(
         cols, ["DESCRIPCION_SUCURSAL", "DESC_SUCURSAL", "NOM_SUCURSAL", "NOMBRE_SUCURSAL"]
     )
-    # Fallback: buscar por contenido
     if desc_suc_col is None:
-        desc_suc_col = _first_contains(cols, ["DESCRIPCION_SUC", "DESC_SUC", "ALMACEN", "TIENDA"])
+        desc_suc_col = _first_contains(cols, ["DESCRIPCION_SUC", "DESC_SUC", "ALMACEN"])
 
     # Filter by current period if PERIODO column present (non-pivot format)
     if "PERIODO" in cols and fcst_col != _detect_pivot_period_col(cols, periodo):
@@ -241,14 +264,19 @@ def _load_fcst_from_file(uploaded_file) -> pd.DataFrame | None:
     result["SKU_PRODUCTO"] = df[sku_col].astype(str).str.strip().str.upper()
     result["FCST_SYNCRO"]  = pd.to_numeric(df[fcst_col], errors="coerce").fillna(0)
 
-    if desc_suc_col is not None:
-        # Normalizar nombre de sucursal para el join (mayúsculas + sin espacios extra)
-        result["DESCRIPCION_SUCURSAL"] = (
-            df[desc_suc_col].astype(str).str.strip().str.upper()
+    if id_suc_col is not None:
+        # Normalizar a entero-string para evitar mismatch "001" vs "1"
+        result["ID_SUCURSAL"] = _norm_id_sucursal(df[id_suc_col])
+        group_keys = ["SKU_PRODUCTO", "ID_SUCURSAL"]
+
+        if desc_suc_col is not None:
+            # El archivo es la fuente de verdad del nombre de almacén
+            result["DESCRIPCION_SUCURSAL"] = df[desc_suc_col].astype(str).str.strip().str.upper()
+            group_keys = ["SKU_PRODUCTO", "ID_SUCURSAL", "DESCRIPCION_SUCURSAL"]
+
+        result = result.groupby(group_keys, as_index=False).agg(
+            FCST_SYNCRO=("FCST_SYNCRO", "sum")
         )
-        result = result.groupby(
-            ["SKU_PRODUCTO", "DESCRIPCION_SUCURSAL"], as_index=False
-        ).agg(FCST_SYNCRO=("FCST_SYNCRO", "sum"))
     else:
         # Sin columna de sucursal: FCST a nivel SKU
         result = result.groupby("SKU_PRODUCTO", as_index=False)["FCST_SYNCRO"].sum()
@@ -329,8 +357,10 @@ def render_fcst_vs_vta_retail(conn):
 
     # ── 2. Load data ──────────────────────────────────────────────────────────
     with st.spinner("Cargando datos de Snowflake y archivo de forecast..."):
-        df_vta = cq.vta_mtd_retail(conn)
+        df_vta      = cq.vta_mtd_retail(conn)
         maestra_raw = cq.maestra(conn)
+        df_perfil   = cq.perfil_sku(conn)
+        df_tiendas  = cq.tienda_dim(conn)      # maestro Syncro: id_sucursal → descripcion
 
         if "proy_result" in fuente:
             df_fcst = _load_fcst_from_proy(periodo)
@@ -420,24 +450,64 @@ def render_fcst_vs_vta_retail(conn):
     )
 
     # ── 4. Build report ───────────────────────────────────────────────────────
-    # Normalizar DESCRIPCION_SUCURSAL en ventas para el join
+    # Traducir cod_almacen (SAP, e.g. "0248") → id_sucursal Syncro (e.g. "1480")
     df_vta["SKU_PRODUCTO"] = df_vta["SKU_PRODUCTO"].astype(str).str.strip().str.upper()
-    df_vta["DESCRIPCION_SUCURSAL"] = (
-        df_vta["DESCRIPCION_SUCURSAL"].astype(str).str.strip().str.upper()
+    df_vta["ID_SUCURSAL"]  = df_vta["COD_ALMACEN"].map(_CCOSTO_TO_SYNCRO)
+
+    # Nombre del almacén desde el maestro Syncro (tienda_dim) por ID_SUCURSAL
+    store_desc = (
+        norm_cols(df_tiendas)[["ID_SUCURSAL", "DESCRIPCION_SUCURSAL"]]
+        .drop_duplicates("ID_SUCURSAL")
     )
+    df_vta = df_vta.merge(store_desc, on="ID_SUCURSAL", how="left")
 
     # Merge actual sales with product master
     df = df_vta.merge(maestra, on="SKU_PRODUCTO", how="left")
 
-    # Determinar estrategia de join con FCST
-    fcst_by_desc_suc = "DESCRIPCION_SUCURSAL" in df_fcst.columns
+    # Merge perfil (SI/NO) por SKU desde db_supply
+    df_perfil["SKU_PRODUCTO"] = df_perfil["SKU_PRODUCTO"].astype(str).str.strip().str.upper()
+    df = df.merge(df_perfil[["SKU_PRODUCTO", "PERFIL"]], on="SKU_PRODUCTO", how="left")
 
-    if fcst_by_desc_suc:
-        # Join por SKU + DESCRIPCION_SUCURSAL (nombre del almacén del archivo)
+    # Canal: todas las ventas de cod_canal='03' son TIENDA
+    df["CANAL"] = "TIENDA"
+
+    # Determinar estrategia de join con FCST
+    fcst_by_id_suc   = "ID_SUCURSAL" in df_fcst.columns
+    fcst_by_desc_suc = "DESCRIPCION_SUCURSAL" in df_fcst.columns and not fcst_by_id_suc
+
+    if fcst_by_id_suc:
+        # Join por ID_SUCURSAL Syncro: archivo usa 1480, BD tiene "1480" vía _CCOSTO_TO_SYNCRO
         df_fcst["SKU_PRODUCTO"] = df_fcst["SKU_PRODUCTO"].astype(str).str.strip().str.upper()
-        df_fcst["DESCRIPCION_SUCURSAL"] = (
-            df_fcst["DESCRIPCION_SUCURSAL"].astype(str).str.strip().str.upper()
+        df_fcst["ID_SUCURSAL"]  = _norm_id_sucursal(df_fcst["ID_SUCURSAL"])
+
+        # Columnas del archivo que vienen al join
+        fcst_cols = ["SKU_PRODUCTO", "ID_SUCURSAL", "FCST_SYNCRO"]
+        if "DESCRIPCION_SUCURSAL" in df_fcst.columns:
+            fcst_cols.append("DESCRIPCION_SUCURSAL")
+
+        df = df.merge(
+            df_fcst[fcst_cols],
+            on=["SKU_PRODUCTO", "ID_SUCURSAL"],
+            how="left",
+            suffixes=("_MAESTRO", "_ARCH"),   # MAESTRO = tienda_dim, ARCH = archivo
         )
+
+        # Preferir nombre del archivo; fallback al maestro Syncro
+        if "DESCRIPCION_SUCURSAL_ARCH" in df.columns:
+            df["DESCRIPCION_SUCURSAL"] = (
+                df["DESCRIPCION_SUCURSAL_ARCH"]
+                .fillna(df.get("DESCRIPCION_SUCURSAL_MAESTRO", ""))
+            )
+            df.drop(
+                columns=["DESCRIPCION_SUCURSAL_ARCH", "DESCRIPCION_SUCURSAL_MAESTRO"],
+                errors="ignore", inplace=True,
+            )
+
+    elif fcst_by_desc_suc:
+        # Fallback: join por nombre de sucursal (solo si no hay columna de código)
+        df_fcst["SKU_PRODUCTO"]         = df_fcst["SKU_PRODUCTO"].astype(str).str.strip().str.upper()
+        df_fcst["DESCRIPCION_SUCURSAL"] = df_fcst["DESCRIPCION_SUCURSAL"].astype(str).str.strip().str.upper()
+        df["DESCRIPCION_SUCURSAL"]      = df["DESCRIPCION_SUCURSAL"].astype(str).str.strip().str.upper()
         df = df.merge(
             df_fcst[["SKU_PRODUCTO", "DESCRIPCION_SUCURSAL", "FCST_SYNCRO"]],
             on=["SKU_PRODUCTO", "DESCRIPCION_SUCURSAL"],
@@ -446,6 +516,25 @@ def render_fcst_vs_vta_retail(conn):
     else:
         # Sin sucursal en FCST: join solo por SKU
         df = df.merge(df_fcst[["SKU_PRODUCTO", "FCST_SYNCRO"]], on="SKU_PRODUCTO", how="left")
+
+    # ── Diagnóstico de match (visible siempre) ───────────────────────────────
+    if fcst_by_id_suc and "FCST_SYNCRO" in df.columns:
+        matched = df["FCST_SYNCRO"].notna().sum()
+        total   = len(df)
+        if matched == 0:
+            ids_vta  = sorted(df["ID_SUCURSAL"].unique().tolist())[:10]
+            ids_fcst = sorted(df_fcst["ID_SUCURSAL"].unique().tolist())[:10]
+            skus_vta  = sorted(df["SKU_PRODUCTO"].unique().tolist())[:5]
+            skus_fcst = sorted(df_fcst["SKU_PRODUCTO"].unique().tolist())[:5]
+            st.error(
+                "⚠️ **El archivo no generó ningún match con las ventas Snowflake.**  \n"
+                f"**ID_SUCURSAL en ventas (BD):** `{ids_vta}`  \n"
+                f"**ID_SUCURSAL en archivo:** `{ids_fcst}`  \n"
+                f"**SKU muestra BD:** `{skus_vta}`  \n"
+                f"**SKU muestra archivo:** `{skus_fcst}`"
+            )
+        elif matched < total * 0.5:
+            st.warning(f"⚠️ Solo {matched}/{total} filas con FCST matched. Verifica los códigos de almacén.")
 
     # Fcst Syncro vacíos → 0
     df["FCST_SYNCRO"] = pd.to_numeric(df.get("FCST_SYNCRO", np.nan), errors="coerce").fillna(0)
@@ -504,7 +593,7 @@ def render_fcst_vs_vta_retail(conn):
         st.stop()
 
     # ── 6. KPI summary ────────────────────────────────────────────────────────
-    if fcst_by_desc_suc:
+    if fcst_by_id_suc or fcst_by_desc_suc:
         total_fcst = df_f["FCST_SYNCRO"].sum()
     else:
         total_fcst = df_f.drop_duplicates("SKU_PRODUCTO")["FCST_SYNCRO"].sum()
@@ -527,8 +616,10 @@ def render_fcst_vs_vta_retail(conn):
         delta_color="normal" if desv_global >= 0 else "inverse",
     )
 
-    if fcst_by_desc_suc:
-        st.caption("✅ Match por **SKU + Descripción Sucursal** — nombre del almacén desde el archivo.")
+    if fcst_by_id_suc:
+        st.caption("✅ Match por **SKU + ID Sucursal** — código de almacén (más confiable).")
+    elif fcst_by_desc_suc:
+        st.caption("⚠️ Match por **SKU + Descripción Sucursal** — nombre de almacén (fallback).")
     else:
         st.caption("ℹ️ Fcst Syncro a nivel SKU total. Desv% compara cada tienda vs el forecast total del SKU.")
 
@@ -538,8 +629,8 @@ def render_fcst_vs_vta_retail(conn):
     # Orden de columnas exacto (igual al screenshot + Comentario al final)
     COL_ORDER = [
         "SKU_PRODUCTO", "NOM_PRODUCTO", "AREA", "LINEA", "SUBLINEA",
-        "MARCA", "MIX_OFICIAL", "PROCEDENCIA",
-        "ID_SUCURSAL", "DESCRIPCION_SUCURSAL", "CANAL",
+        "MARCA", "MIX_OFICIAL", "PROCEDENCIA", "PERFIL",
+        "ID_SUCURSAL", "COD_ALMACEN", "DESCRIPCION_SUCURSAL", "CANAL",
         "FCST_SYNCRO", "VTA_ACTUAL", "DESV_PCT", "COMENTARIO",
     ]
     COL_RENAME = {
@@ -551,7 +642,9 @@ def render_fcst_vs_vta_retail(conn):
         "MARCA":                "MARCA",
         "MIX_OFICIAL":          "MIX",
         "PROCEDENCIA":          "PROCEDENCIA",
+        "PERFIL":               "Perfil",
         "ID_SUCURSAL":          "id_sucursal",
+        "COD_ALMACEN":          "cod_almacen",
         "DESCRIPCION_SUCURSAL": "descripcion_sucursal",
         "CANAL":                "canal",
         "FCST_SYNCRO":          "Fcst Syncro",
@@ -578,7 +671,9 @@ def render_fcst_vs_vta_retail(conn):
         "MARCA":                st.column_config.TextColumn("MARCA", width="medium"),
         "MIX":                  st.column_config.TextColumn("MIX", width="small"),
         "PROCEDENCIA":          st.column_config.TextColumn("PROCEDENCIA", width="small"),
+        "Perfil":               st.column_config.TextColumn("Perfil", width="small"),
         "id_sucursal":          st.column_config.TextColumn("id_sucursal", width="small"),
+        "cod_almacen":          st.column_config.TextColumn("cod_almacen", width="small"),
         "descripcion_sucursal": st.column_config.TextColumn("descripcion_sucursal", width="large"),
         "canal":                st.column_config.TextColumn("canal", width="small"),
         "Fcst Syncro":          st.column_config.NumberColumn("Fcst Syncro", format="%.2f", width="small"),

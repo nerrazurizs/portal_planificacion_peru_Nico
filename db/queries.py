@@ -2450,28 +2450,34 @@ WHERE fecha >= DATEADD('day', -90, CURRENT_DATE())
 GROUP BY 1, 2
 """
 
-# Ventas MTD por SKU x Sucursal — canales TIENDA y MINORISTA.
-# Usa {_SUCURSAL} para consistencia con el resto del portal
-# (normaliza RETAIL→TIENDA igual que todas las demás queries).
-# CAST en ambos lados del JOIN evita mismatch de tipos.
-# Fallback a cod_ccosto cuando no hay match en maestro sucursal.
+# Perfil por SKU — último snapshot disponible en ht_in_stock.
+# Devuelve SI si el SKU tiene perfil en alguna tienda, NO en caso contrario.
+QUERY_PERFIL_SKU = """
+SELECT
+    sku_producto,
+    MAX(perfil) AS perfil
+FROM db_supply.hst.ht_in_stock
+WHERE fecha = (SELECT MAX(fecha) FROM db_supply.hst.ht_in_stock)
+GROUP BY 1
+"""
+
+# Ventas MTD por SKU x Sucursal — canal RETAIL (cod_canal='03').
+# Devuelve cod_almacen = cod_ccosto zero-padded a 4 dígitos (formato SAP).
+# El módulo fcst_vs_vta_retail usa VCM_CCOSTO_TO_SYNCRO (de ddmrp.py) para
+# traducir cod_almacen → id_sucursal del sistema Syncro, y tienda_dim para
+# obtener descripcion_sucursal.  La maestro-sucursal no se une aquí porque
+# cod_ccosto no coincide con id_sucursal en las tiendas RETAIL de Perú.
 QUERY_VTA_MTD_RETAIL = f"""
 SELECT
     a.sku_producto,
-    COALESCE(CAST(b.id_sucursal AS VARCHAR),
-             CAST(a.cod_ccosto  AS VARCHAR))                             AS id_sucursal,
-    COALESCE(b.descripcion_sucursal,
-             CAST(a.cod_ccosto  AS VARCHAR))                             AS descripcion_sucursal,
-    COALESCE(b.canal_de_distribucion, 'TIENDA')                         AS canal,
-    SUM(a.cantidad)                                                      AS vta_actual_und
+    LPAD(CAST(a.cod_ccosto AS VARCHAR), 4, '0')  AS cod_almacen,
+    SUM(a.cantidad)                               AS vta_actual_und
 FROM {_VCM} a
-LEFT JOIN {_SUCURSAL} b
-    ON CAST(a.cod_ccosto AS VARCHAR) = CAST(b.id_sucursal AS VARCHAR)
 WHERE a.fecha >= date_trunc('month', current_date())
   AND a.fecha <  current_date()
   AND a.cantidad > 0
   AND TRIM(a.cod_canal) = '03'
-GROUP BY 1, 2, 3, 4
+GROUP BY 1, 2
 """
 
 # Queries de diagnóstico — solo se ejecutan desde el panel admin del módulo
