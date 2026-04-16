@@ -1682,24 +1682,41 @@ def render_instock_historico(conn):
         "Datos diarios completos desde mayo 2024."
     )
 
-    # ── Date range + aggregation (top-level, before data load) ───────────
-    _rc1, _rc2, _rc3 = st.columns([1, 1, 1])
-    with _rc1:
-        _min_date = date(2024, 5, 7)
-        _max_date = date.today()
-        _default_start = _max_date - timedelta(days=90)
+    # ── 1. Vista selector (siempre primero, sin datos) ───────────────────
+    sel_vista = st.radio(
+        "Vista",
+        ["Tiendas & CD", "Instock por CC"],
+        horizontal=True,
+        key="is_vista_selector",
+    )
+
+    st.markdown("---")
+
+    # ── 2. Opciones de filtros desde maestro (cacheado, sin costo) ──────────
+    _maestra = cq.maestra(conn)
+    _opt_areas  = sorted(_maestra["AREA"].dropna().unique().tolist()) if "AREA" in _maestra.columns else []
+    _opt_lineas = sorted(_maestra["LINEA"].dropna().unique().tolist()) if "LINEA" in _maestra.columns else []
+    _opt_marcas = sorted(_maestra["MARCA"].dropna().unique().tolist()) if "MARCA" in _maestra.columns else []
+
+    # ── 3. Filtros de consulta (fechas + ventana + toggles + dimension) ──
+    _min_date = date(2024, 5, 7)
+    _max_date = date.today()
+    _default_start = _max_date - timedelta(days=90)
+
+    _fc1, _fc2, _fc3 = st.columns([1, 1, 1])
+    with _fc1:
         fecha_inicio = st.date_input(
             "Fecha Desde", value=_default_start,
             min_value=_min_date, max_value=_max_date,
             key="is_fecha_ini",
         )
-    with _rc2:
+    with _fc2:
         fecha_fin = st.date_input(
             "Fecha Hasta", value=_max_date,
             min_value=_min_date, max_value=_max_date,
             key="is_fecha_fin",
         )
-    with _rc3:
+    with _fc3:
         _AGG_OPTIONS = {"Diario": "D", "Semanal": "W", "Mensual": "M", "Trimestral": "Q"}
         sel_agg_label = st.selectbox(
             "Nivel de Agregacion",
@@ -1707,9 +1724,113 @@ def render_instock_historico(conn):
         )
         sel_agg_period = _AGG_OPTIONS[sel_agg_label]
 
-    # ── Load data for selected date range ─────────────────────────────────
-    _fi = str(fecha_inicio)
-    _ff = str(fecha_fin)
+    _fw1, _fw2 = st.columns([2, 1])
+    with _fw1:
+        sel_window_label = st.radio(
+            "Ventana de Venta Promedio",
+            list(_WINDOW_OPTIONS.keys()), index=0, horizontal=True,
+            key="is_window_label",
+        )
+        sel_window = _WINDOW_OPTIONS[sel_window_label]
+    with _fw2:
+        filter_cd_toggle = st.toggle(
+            "Solo SKUs con InStock CD 90 = 1", value=True,
+            key="is_filter_cd",
+            help="Filtra solo SKUs donde el CD tenia stock suficiente "
+                 "para cubrir 1 dia de venta promedio (ventana 90 dias).",
+        )
+        solo_perfil_toggle = st.toggle(
+            "Solo con Perfil de Reposicion", value=True,
+            key="is_solo_perfil",
+            help="Solo cuenta combinaciones SKU-tienda con PERFIL configurado.",
+        )
+
+    with st.expander("Filtros", expanded=True):
+        _fd1, _fd2, _fd3, _fd4 = st.columns(4)
+        with _fd1:
+            sel_areas = st.multiselect("Area", _opt_areas, default=[], key="is_areas_filt")
+        with _fd2:
+            sel_lineas = st.multiselect("Linea", _opt_lineas, default=[], key="is_lineas_filt")
+        with _fd3:
+            sel_marcas = st.multiselect("Marca", _opt_marcas, default=[], key="is_marcas_filt")
+        with _fd4:
+            sel_mix = st.multiselect(
+                "Mix Oficial", ["MIX", "IN & OUT", "FUERA MIX"],
+                default=["MIX"], key="is_mix_filt",
+            )
+        _fd5, _fd6, _fd7 = st.columns(3)
+        with _fd5:
+            sel_abc = st.multiselect("ABC", ["A", "B", "C"], default=[], key="is_abc_filt")
+        with _fd6:
+            sel_xyz = st.multiselect("XYZ", ["X", "Y", "Z"], default=[], key="is_xyz_filt")
+        with _fd7:
+            sel_fsn = st.multiselect("FSN", ["F", "S", "N"], default=[], key="is_fsn_filt")
+
+    # ── 4. Boton ejecutar ─────────────────────────────────────────────────
+    if st.button("▶ Ejecutar consulta", type="primary", key="btn_exec_instock"):
+        st.session_state["_is_exec"] = {
+            "fi": str(fecha_inicio),
+            "ff": str(fecha_fin),
+            "agg_label": sel_agg_label,
+            "agg_period": sel_agg_period,
+            "window": sel_window,
+            "window_label": sel_window_label,
+            "filter_cd": filter_cd_toggle,
+            "solo_perfil": solo_perfil_toggle,
+            "areas": sel_areas,
+            "lineas": sel_lineas,
+            "marcas": sel_marcas,
+            "mix": sel_mix,
+            "abc": sel_abc,
+            "xyz": sel_xyz,
+            "fsn": sel_fsn,
+        }
+
+    _exec = st.session_state.get("_is_exec")
+
+    if not _exec:
+        st.info(
+            "Selecciona la vista, configura los filtros y pulsa "
+            "**▶ Ejecutar consulta** para cargar los datos."
+        )
+        st.stop()
+
+    # Aviso si los filtros cambiaron desde la ultima ejecucion
+    _cur_sig = (
+        f"{fecha_inicio}|{fecha_fin}|{sel_agg_period}|{sel_window}|"
+        f"{filter_cd_toggle}|{solo_perfil_toggle}|"
+        f"{sorted(sel_areas)}|{sorted(sel_lineas)}|{sorted(sel_marcas)}|"
+        f"{sorted(sel_mix)}|{sorted(sel_abc)}|{sorted(sel_xyz)}|{sorted(sel_fsn)}"
+    )
+    _exec_sig = (
+        f"{_exec['fi']}|{_exec['ff']}|{_exec['agg_period']}|{_exec['window']}|"
+        f"{_exec['filter_cd']}|{_exec['solo_perfil']}|"
+        f"{sorted(_exec['areas'])}|{sorted(_exec['lineas'])}|{sorted(_exec['marcas'])}|"
+        f"{sorted(_exec['mix'])}|{sorted(_exec['abc'])}|{sorted(_exec['xyz'])}|{sorted(_exec['fsn'])}"
+    )
+    if _cur_sig != _exec_sig:
+        st.warning(
+            "Los filtros han cambiado desde la ultima ejecucion. "
+            "Pulsa **▶ Ejecutar consulta** para actualizar los datos."
+        )
+
+    # ── 5. Cargar datos con los parametros ejecutados ─────────────────────
+    _fi              = _exec["fi"]
+    _ff              = _exec["ff"]
+    sel_agg_label    = _exec["agg_label"]
+    sel_agg_period   = _exec["agg_period"]
+    sel_window       = _exec["window"]
+    sel_window_label = _exec["window_label"]
+    filter_cd_toggle   = _exec["filter_cd"]
+    solo_perfil_toggle = _exec["solo_perfil"]
+    sel_areas  = _exec["areas"]
+    sel_lineas = _exec["lineas"]
+    sel_marcas = _exec["marcas"]
+    sel_mix    = _exec["mix"]
+    sel_abc    = _exec["abc"]
+    sel_xyz    = _exec["xyz"]
+    sel_fsn    = _exec["fsn"]
+
     with lottie_spinner("snowflake"):
         df_tienda_raw = cq.instock_rango_tienda(conn, _fi, _ff)
         df_cd_raw = cq.instock_rango_cd(conn, _fi, _ff)
@@ -1768,62 +1889,6 @@ def render_instock_historico(conn):
     # ── PM filter ─────────────────────────────────────────────────────
     df_tienda_raw = apply_pm_filter(df_tienda_raw)
     df_cd_raw = apply_pm_filter(df_cd_raw)
-
-    # ── Dimension + toggle filters ────────────────────────────────────
-    combined_areas = sorted(
-        set(df_tienda_raw["AREA"].dropna().unique() if "AREA" in df_tienda_raw.columns else [])
-        | set(df_cd_raw["AREA"].dropna().unique() if "AREA" in df_cd_raw.columns else [])
-    )
-    combined_lineas = sorted(
-        set(df_tienda_raw["LINEA"].dropna().unique() if "LINEA" in df_tienda_raw.columns else [])
-        | set(df_cd_raw["LINEA"].dropna().unique() if "LINEA" in df_cd_raw.columns else [])
-    )
-    combined_marcas = sorted(
-        set(df_tienda_raw["MARCA"].dropna().unique() if "MARCA" in df_tienda_raw.columns else [])
-        | set(df_cd_raw["MARCA"].dropna().unique() if "MARCA" in df_cd_raw.columns else [])
-    )
-
-    with st.expander("Filtros", expanded=True):
-        _fc1, _fc2 = st.columns(2)
-        with _fc1:
-            sel_window_label = st.radio(
-                "Ventana de Venta Promedio",
-                list(_WINDOW_OPTIONS.keys()), index=0, horizontal=True,
-            )
-            sel_window = _WINDOW_OPTIONS[sel_window_label]
-        with _fc2:
-            filter_cd_toggle = st.toggle(
-                "Solo SKUs con InStock CD 90 = 1", value=True,
-                help="Filtra solo SKUs donde el CD tenia stock suficiente "
-                     "para cubrir 1 dia de venta promedio (ventana 90 dias).",
-            )
-            solo_perfil_toggle = st.toggle(
-                "Solo con Perfil de Reposicion", value=True,
-                help="Solo cuenta combinaciones SKU-tienda con PERFIL configurado.",
-            )
-
-        _fc3, _fc4, _fc5, _fc6 = st.columns(4)
-        with _fc3:
-            sel_areas = st.multiselect("Area", combined_areas, default=[])
-        with _fc4:
-            sel_lineas = st.multiselect("Linea", combined_lineas, default=[])
-        with _fc5:
-            sel_marcas = st.multiselect("Marca", combined_marcas, default=[])
-        with _fc6:
-            sel_mix = st.multiselect("Mix Oficial", ["MIX", "IN & OUT", "FUERA MIX"],
-                                     default=["MIX"], key="is_mix_filt")
-
-        _has_abc = "CLASE_ABC" in df_tienda_raw.columns or "CLASE_ABC" in df_cd_raw.columns
-        if _has_abc:
-            _fc7, _fc8, _fc9 = st.columns(3)
-            with _fc7:
-                sel_abc = st.multiselect("ABC", ["A", "B", "C"], default=[], key="is_abc_filt")
-            with _fc8:
-                sel_xyz = st.multiselect("XYZ", ["X", "Y", "Z"], default=[], key="is_xyz_filt")
-            with _fc9:
-                sel_fsn = st.multiselect("FSN", ["F", "S", "N"], default=[], key="is_fsn_filt")
-        else:
-            sel_abc, sel_xyz, sel_fsn = [], [], []
 
     def _apply_filters(df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()
@@ -2433,157 +2498,224 @@ def render_instock_historico(conn):
 
     # ── Detail table: SKU × Periodo (aggregated, with download) ─────────
     st.markdown("---")
-    st.markdown(f"### Detalle por SKU — Agregacion {sel_agg_label}")
 
-    with st.expander("Ver tabla detalle SKU (con descarga)", expanded=False):
-        _cols_map = _COL_MAP_TIENDA[sel_window]
+    if sel_vista == "Tiendas & CD":
+        st.markdown(f"### Detalle por SKU — Agregacion {sel_agg_label}")
+        with st.expander("Ver tabla detalle SKU (con descarga)", expanded=False):
+            _cols_map = _COL_MAP_TIENDA[sel_window]
 
-        # Determine IS cols
-        if (solo_perfil_toggle
-                and _cols_map["is_perfil"] in df_tienda.columns
-                and _cols_map["n_perfil"] in df_tienda.columns):
-            _is_col, _n_col = _cols_map["is_perfil"], _cols_map["n_perfil"]
-        elif _cols_map["n"] in df_tienda.columns:
-            _is_col, _n_col = _cols_map["is"], _cols_map["n"]
-        else:
-            _is_col, _n_col = _cols_map["is"], "N_TIENDAS"
-
-        # ── Build detail per SKU × Periodo (tienda) ───────────────────
-        if not df_tienda.empty:
-            _det_t = df_tienda.copy()
-            if filter_cd_toggle:
-                _det_t = _det_t[_det_t[_CD_FILTER_COL] >= 1]
-
-            # Bucket dates
-            if sel_agg_period == "D":
-                _det_t["PERIODO"] = _det_t["FECHA"]
+            # Determine IS cols
+            if (solo_perfil_toggle
+                    and _cols_map["is_perfil"] in df_tienda.columns
+                    and _cols_map["n_perfil"] in df_tienda.columns):
+                _is_col, _n_col = _cols_map["is_perfil"], _cols_map["n_perfil"]
+            elif _cols_map["n"] in df_tienda.columns:
+                _is_col, _n_col = _cols_map["is"], _cols_map["n"]
             else:
-                _det_t["PERIODO"] = _det_t["FECHA"].dt.to_period(sel_agg_period).dt.start_time
+                _is_col, _n_col = _cols_map["is"], "N_TIENDAS"
 
-            _dim_cols = ["SKU_PRODUCTO", "AREA", "LINEA", "SUBLINEA", "MARCA", "MIX_OFICIAL"]
-            _dim_cols = [c for c in _dim_cols if c in _det_t.columns]
-            _grp_cols = ["PERIODO"] + _dim_cols
+            # ── Build detail per SKU × Periodo (tienda) ───────────────────
+            if not df_tienda.empty:
+                _det_t = df_tienda.copy()
+                if filter_cd_toggle:
+                    _det_t = _det_t[_det_t[_CD_FILTER_COL] >= 1]
 
-            _agg_dict = {
-                "IS_NUMERADOR": (_is_col, "sum"),
-                "IS_DENOMINADOR": (_n_col, "sum"),
-            }
-            for _sc in ["STOCK_UND_TIENDA", "STOCK_COSTO_TIENDA"]:
-                if _sc in _det_t.columns:
-                    _agg_dict[_sc] = (_sc, "mean")
-            for _pc in [_cols_map.get("n_perfil"), _cols_map.get("is_perfil")]:
-                if _pc and _pc in _det_t.columns:
-                    _agg_dict[f"{_pc}_SUM"] = (_pc, "sum")
-            if _cols_map["cd"] in _det_t.columns:
-                _agg_dict["INSTOCK_CD"] = (_cols_map["cd"], "mean")
-            # ABC-XYZ (take first, they're static per SKU)
-            for _ac in ["CLASE_ABC", "CLASE_XYZ", "CLASE_FSN"]:
-                if _ac in _det_t.columns:
-                    _agg_dict[_ac] = (_ac, "first")
+                # Bucket dates
+                if sel_agg_period == "D":
+                    _det_t["PERIODO"] = _det_t["FECHA"]
+                else:
+                    _det_t["PERIODO"] = _det_t["FECHA"].dt.to_period(sel_agg_period).dt.start_time
 
-            _det_agg = _det_t.groupby(_grp_cols, dropna=False).agg(**_agg_dict).reset_index()
-            _det_agg["IS_PCT_TIENDA"] = np.where(
-                _det_agg["IS_DENOMINADOR"] > 0,
-                _det_agg["IS_NUMERADOR"] / _det_agg["IS_DENOMINADOR"],
-                0.0,
-            )
-            _det_agg = _det_agg.rename(columns={"PERIODO": "FECHA"})
-        else:
-            _det_agg = pd.DataFrame()
+                _dim_cols = ["SKU_PRODUCTO", "AREA", "LINEA", "SUBLINEA", "MARCA", "MIX_OFICIAL"]
+                _dim_cols = [c for c in _dim_cols if c in _det_t.columns]
+                _grp_cols = ["PERIODO"] + _dim_cols
 
-        # ── CD detail per SKU × Periodo ───────────────────────────────
-        if not df_cd.empty:
-            _det_cd = df_cd.copy()
-            if sel_agg_period == "D":
-                _det_cd["PERIODO"] = _det_cd["FECHA"]
+                _agg_dict = {
+                    "IS_NUMERADOR": (_is_col, "sum"),
+                    "IS_DENOMINADOR": (_n_col, "sum"),
+                }
+                for _sc in ["STOCK_UND_TIENDA", "STOCK_COSTO_TIENDA"]:
+                    if _sc in _det_t.columns:
+                        _agg_dict[_sc] = (_sc, "mean")
+                for _pc in [_cols_map.get("n_perfil"), _cols_map.get("is_perfil")]:
+                    if _pc and _pc in _det_t.columns:
+                        _agg_dict[f"{_pc}_SUM"] = (_pc, "sum")
+                if _cols_map["cd"] in _det_t.columns:
+                    _agg_dict["INSTOCK_CD"] = (_cols_map["cd"], "mean")
+                # ABC-XYZ (take first, they're static per SKU)
+                for _ac in ["CLASE_ABC", "CLASE_XYZ", "CLASE_FSN"]:
+                    if _ac in _det_t.columns:
+                        _agg_dict[_ac] = (_ac, "first")
+
+                _det_agg = _det_t.groupby(_grp_cols, dropna=False).agg(**_agg_dict).reset_index()
+                _det_agg["IS_PCT_TIENDA"] = np.where(
+                    _det_agg["IS_DENOMINADOR"] > 0,
+                    _det_agg["IS_NUMERADOR"] / _det_agg["IS_DENOMINADOR"],
+                    0.0,
+                )
+                _det_agg = _det_agg.rename(columns={"PERIODO": "FECHA"})
             else:
-                _det_cd["PERIODO"] = _det_cd["FECHA"].dt.to_period(sel_agg_period).dt.start_time
+                _det_agg = pd.DataFrame()
 
-            _cd_agg_dict = {}
-            for _cc in ["STOCK_UND_CD", "STOCK_COSTO_CD"]:
-                if _cc in _det_cd.columns:
-                    _cd_agg_dict[_cc] = (_cc, "mean")
-            if "INSTOCK_CD_90" in _det_cd.columns:
-                _cd_agg_dict["INSTOCK_CD_90"] = ("INSTOCK_CD_90", "mean")
-            if "CANTIDAD_PROM_90_CIA" in _det_cd.columns:
-                _cd_agg_dict["CANTIDAD_PROM_90_CIA"] = ("CANTIDAD_PROM_90_CIA", "mean")
+            # ── CD detail per SKU × Periodo ───────────────────────────────
+            if not df_cd.empty:
+                _det_cd = df_cd.copy()
+                if sel_agg_period == "D":
+                    _det_cd["PERIODO"] = _det_cd["FECHA"]
+                else:
+                    _det_cd["PERIODO"] = _det_cd["FECHA"].dt.to_period(sel_agg_period).dt.start_time
 
-            if _cd_agg_dict:
-                _det_cd_agg = _det_cd.groupby(["PERIODO", "SKU_PRODUCTO"], dropna=False).agg(
-                    **_cd_agg_dict
-                ).reset_index().rename(columns={"PERIODO": "FECHA"})
+                _cd_agg_dict = {}
+                for _cc in ["STOCK_UND_CD", "STOCK_COSTO_CD"]:
+                    if _cc in _det_cd.columns:
+                        _cd_agg_dict[_cc] = (_cc, "mean")
+                if "INSTOCK_CD_90" in _det_cd.columns:
+                    _cd_agg_dict["INSTOCK_CD_90"] = ("INSTOCK_CD_90", "mean")
+                if "CANTIDAD_PROM_90_CIA" in _det_cd.columns:
+                    _cd_agg_dict["CANTIDAD_PROM_90_CIA"] = ("CANTIDAD_PROM_90_CIA", "mean")
+
+                if _cd_agg_dict:
+                    _det_cd_agg = _det_cd.groupby(["PERIODO", "SKU_PRODUCTO"], dropna=False).agg(
+                        **_cd_agg_dict
+                    ).reset_index().rename(columns={"PERIODO": "FECHA"})
+                else:
+                    _det_cd_agg = pd.DataFrame()
             else:
                 _det_cd_agg = pd.DataFrame()
-        else:
-            _det_cd_agg = pd.DataFrame()
 
-        # ── Merge tienda + CD ─────────────────────────────────────────
-        if not _det_agg.empty:
-            if not _det_cd_agg.empty:
-                _cd_new = [c for c in _det_cd_agg.columns
-                           if c not in _det_agg.columns or c in ("SKU_PRODUCTO", "FECHA")]
-                _det_agg = _det_agg.merge(
-                    _det_cd_agg[_cd_new], on=["FECHA", "SKU_PRODUCTO"], how="left",
+            # ── Merge tienda + CD ─────────────────────────────────────────
+            if not _det_agg.empty:
+                if not _det_cd_agg.empty:
+                    _cd_new = [c for c in _det_cd_agg.columns
+                               if c not in _det_agg.columns or c in ("SKU_PRODUCTO", "FECHA")]
+                    _det_agg = _det_agg.merge(
+                        _det_cd_agg[_cd_new], on=["FECHA", "SKU_PRODUCTO"], how="left",
+                    )
+                _det_agg = _det_agg.sort_values(["FECHA", "IS_PCT_TIENDA"], ascending=[True, True])
+
+                st.caption(
+                    f"{len(_det_agg):,} filas — {_det_agg['SKU_PRODUCTO'].nunique():,} SKUs "
+                    f"x {_det_agg['FECHA'].nunique()} periodos"
                 )
-            _det_agg = _det_agg.sort_values(["FECHA", "IS_PCT_TIENDA"], ascending=[True, True])
+                st.dataframe(_det_agg, use_container_width=True, height=500)
+                download_buttons(_det_agg, prefix="instock_detalle_sku")
 
-            st.caption(
-                f"{len(_det_agg):,} filas — {_det_agg['SKU_PRODUCTO'].nunique():,} SKUs "
-                f"x {_det_agg['FECHA'].nunique()} periodos"
-            )
-            st.dataframe(_det_agg, use_container_width=True, height=500)
-            download_buttons(_det_agg, prefix="instock_detalle_sku")
+            elif not _det_cd_agg.empty:
+                st.dataframe(_det_cd_agg, use_container_width=True, height=500)
+                download_buttons(_det_cd_agg, prefix="instock_detalle_sku")
+            else:
+                st.info("Sin datos para el rango seleccionado.")
 
-        elif not _det_cd_agg.empty:
-            st.dataframe(_det_cd_agg, use_container_width=True, height=500)
-            download_buttons(_det_cd_agg, prefix="instock_detalle_sku")
-        else:
+    else:
+        # ── Instock por CC: tabla detalle SKU × Centro de Costo ───────────
+        st.markdown("### Detalle SKU × Centro de Costo")
+        st.caption(
+            f"Datos diarios a nivel fecha × SKU × tienda para el rango seleccionado. "
+            f"Ventana: **{sel_window_label}**. Se aplican todos los filtros activos."
+        )
+        with lottie_spinner("snowflake"):
+            _df_sku_cc = cq.instock_sku_cc(conn, _fi, _ff)
+
+        if _df_sku_cc.empty:
             st.info("Sin datos para el rango seleccionado.")
+        else:
+            for _cc_num in [
+                "STOCK_UNIDADES", "STOCK_COSTO",
+                "CANTIDAD_PROM_90", "CANTIDAD_PROM_180", "CANTIDAD_PROM_365",
+                "INSTOCK_90", "INSTOCK_180", "INSTOCK_365", "INSTOCK_90_PERFIL",
+                "STOCK_UND_CD", "STOCK_COSTO_CD",
+                "INSTOCK_CD_90", "INSTOCK_CD_180", "INSTOCK_CD_365",
+            ]:
+                if _cc_num in _df_sku_cc.columns:
+                    _df_sku_cc[_cc_num] = pd.to_numeric(
+                        _df_sku_cc[_cc_num], errors="coerce"
+                    ).fillna(0)
+            if "FECHA" in _df_sku_cc.columns:
+                _df_sku_cc["FECHA"] = pd.to_datetime(_df_sku_cc["FECHA"], errors="coerce")
 
-    # ── InStock Proyectado + Venta Perdida (tabs) ─────────────────────────
-    st.markdown("---")
+            # Apply same dimension filters
+            if sel_areas and "AREA" in _df_sku_cc.columns:
+                _df_sku_cc = _df_sku_cc[_df_sku_cc["AREA"].isin(sel_areas)]
+            if sel_lineas and "LINEA" in _df_sku_cc.columns:
+                _df_sku_cc = _df_sku_cc[_df_sku_cc["LINEA"].isin(sel_lineas)]
+            if sel_marcas and "MARCA" in _df_sku_cc.columns:
+                _df_sku_cc = _df_sku_cc[_df_sku_cc["MARCA"].isin(sel_marcas)]
+            if sel_mix and "MIX_OFICIAL" in _df_sku_cc.columns:
+                _df_sku_cc = _df_sku_cc[_df_sku_cc["MIX_OFICIAL"].isin(sel_mix)]
+            if sel_abc and "CLASE_ABC" in _df_sku_cc.columns:
+                _df_sku_cc = _df_sku_cc[_df_sku_cc["CLASE_ABC"].isin(sel_abc)]
+            if sel_xyz and "CLASE_XYZ" in _df_sku_cc.columns:
+                _df_sku_cc = _df_sku_cc[_df_sku_cc["CLASE_XYZ"].isin(sel_xyz)]
+            if sel_fsn and "CLASE_FSN" in _df_sku_cc.columns:
+                _df_sku_cc = _df_sku_cc[_df_sku_cc["CLASE_FSN"].isin(sel_fsn)]
+            if filter_cd_toggle and "INSTOCK_CD_90" in _df_sku_cc.columns:
+                _df_sku_cc = _df_sku_cc[_df_sku_cc["INSTOCK_CD_90"] >= 1]
+            if solo_perfil_toggle and "PERFIL" in _df_sku_cc.columns:
+                _df_sku_cc = _df_sku_cc[_df_sku_cc["PERFIL"] == "SI"]
 
-    # Build a filter function that mirrors the current dashboard filters
-    def _proy_filter(df):
-        out = df.copy()
-        if sel_areas and "AREA" in out.columns:
-            out = out[out["AREA"].isin(sel_areas)]
-        if sel_lineas and "LINEA" in out.columns:
-            out = out[out["LINEA"].isin(sel_lineas)]
-        if sel_marcas and "MARCA" in out.columns:
-            out = out[out["MARCA"].isin(sel_marcas)]
-        if sel_mix and "MIX_OFICIAL" in out.columns:
-            out = out[out["MIX_OFICIAL"].isin(sel_mix)]
-        if sel_abc and "CLASE_ABC" in out.columns:
-            out = out[out["CLASE_ABC"].isin(sel_abc)]
-        if sel_xyz and "CLASE_XYZ" in out.columns:
-            out = out[out["CLASE_XYZ"].isin(sel_xyz)]
-        if sel_fsn and "CLASE_FSN" in out.columns:
-            out = out[out["CLASE_FSN"].isin(sel_fsn)]
-        return out
+            _df_sku_cc = _df_sku_cc.sort_values(
+                ["FECHA", "SKU_PRODUCTO", "COD_CENTRO_COSTO"], ascending=True,
+            )
+            _n_rows = len(_df_sku_cc)
+            _n_skus = _df_sku_cc["SKU_PRODUCTO"].nunique()
+            _n_cc = _df_sku_cc["COD_CENTRO_COSTO"].nunique()
+            _n_dias = _df_sku_cc["FECHA"].nunique()
+            st.caption(
+                f"{_n_rows:,} filas — {_n_skus:,} SKUs × {_n_cc:,} centros de costo × {_n_dias} dias"
+            )
+            download_buttons(_df_sku_cc, prefix="instock_sku_cc")
+            _PREVIEW_ROWS = 40
+            st.info(
+                f"Vista previa: primeras {min(_PREVIEW_ROWS, _n_rows):,} filas de {_n_rows:,}. "
+                f"Usa los botones de descarga para el dataset completo."
+            )
+            st.dataframe(_df_sku_cc.head(_PREVIEW_ROWS), use_container_width=True, height=400)
 
-    _tab_proy, _tab_brechas, _tab_vp = st.tabs([
-        "\U0001F4E6 InStock Proyectado",
-        "\U0001F534 Brechas InStock",
-        "\U0001F4B0 Venta Perdida",
-    ])
+    # ── InStock Proyectado + Venta Perdida (tabs) — solo Tiendas & CD ───────
+    if sel_vista == "Tiendas & CD":
+        st.markdown("---")
 
-    with _tab_proy:
-        _render_projected_instock_tab(
-            conn, _proy_filter, figures_export, filter_cd=filter_cd_toggle,
-        )
+        # Build a filter function that mirrors the current dashboard filters
+        def _proy_filter(df):
+            out = df.copy()
+            if sel_areas and "AREA" in out.columns:
+                out = out[out["AREA"].isin(sel_areas)]
+            if sel_lineas and "LINEA" in out.columns:
+                out = out[out["LINEA"].isin(sel_lineas)]
+            if sel_marcas and "MARCA" in out.columns:
+                out = out[out["MARCA"].isin(sel_marcas)]
+            if sel_mix and "MIX_OFICIAL" in out.columns:
+                out = out[out["MIX_OFICIAL"].isin(sel_mix)]
+            if sel_abc and "CLASE_ABC" in out.columns:
+                out = out[out["CLASE_ABC"].isin(sel_abc)]
+            if sel_xyz and "CLASE_XYZ" in out.columns:
+                out = out[out["CLASE_XYZ"].isin(sel_xyz)]
+            if sel_fsn and "CLASE_FSN" in out.columns:
+                out = out[out["CLASE_FSN"].isin(sel_fsn)]
+            return out
 
-    with _tab_brechas:
-        _render_brechas_instock_tab(
-            conn, _proy_filter, figures_export, filter_cd=filter_cd_toggle,
-        )
+        _tab_proy, _tab_brechas, _tab_vp = st.tabs([
+            "\U0001F4E6 InStock Proyectado",
+            "\U0001F534 Brechas InStock",
+            "\U0001F4B0 Venta Perdida",
+        ])
 
-    with _tab_vp:
-        _render_venta_perdida_tab(
-            conn, sel_window, sel_window_label,
-            filter_cd_toggle, solo_perfil_toggle,
-            _proy_filter, figures_export,
-        )
+        with _tab_proy:
+            _render_projected_instock_tab(
+                conn, _proy_filter, figures_export, filter_cd=filter_cd_toggle,
+            )
+
+        with _tab_brechas:
+            _render_brechas_instock_tab(
+                conn, _proy_filter, figures_export, filter_cd=filter_cd_toggle,
+            )
+
+        with _tab_vp:
+            _render_venta_perdida_tab(
+                conn, sel_window, sel_window_label,
+                filter_cd_toggle, solo_perfil_toggle,
+                _proy_filter, figures_export,
+            )
 
     # ── Export PPT ────────────────────────────────────────────────────────
     if figures_export:

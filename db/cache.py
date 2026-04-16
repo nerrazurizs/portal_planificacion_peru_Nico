@@ -82,6 +82,7 @@ from db.queries import (
     QUERY_INSTOCK_RANGO_TIENDA,
     QUERY_INSTOCK_RANGO_CD,
     QUERY_INSTOCK_POR_TIENDA,
+    QUERY_INSTOCK_SKU_CC,
     QUERY_STOCK_CRITICO_METRICS_V2,
     QUERY_STOCK_CD_DIARIO_6M,
     QUERY_SKU_DASHBOARD,
@@ -405,21 +406,27 @@ def instock_daily_cd(_conn_id, _conn=None) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
-def instock_rango_tienda(_conn_id, _fecha_ini: str, _fecha_fin: str, _conn=None) -> pd.DataFrame:
+def instock_rango_tienda(_conn_id, fecha_ini: str, fecha_fin: str, _conn=None) -> pd.DataFrame:
     """InStock tienda daily for a custom date range. All days, no Monday sampling."""
-    return _run_params(QUERY_INSTOCK_RANGO_TIENDA, _conn, (_fecha_ini, _fecha_fin))
+    return _run_params(QUERY_INSTOCK_RANGO_TIENDA, _conn, (fecha_ini, fecha_fin))
 
 
 @st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
-def instock_rango_cd(_conn_id, _fecha_ini: str, _fecha_fin: str, _conn=None) -> pd.DataFrame:
+def instock_rango_cd(_conn_id, fecha_ini: str, fecha_fin: str, _conn=None) -> pd.DataFrame:
     """InStock CD daily for a custom date range. All days."""
-    return _run_params(QUERY_INSTOCK_RANGO_CD, _conn, (_fecha_ini, _fecha_fin))
+    return _run_params(QUERY_INSTOCK_RANGO_CD, _conn, (fecha_ini, fecha_fin))
 
 
 @st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
-def instock_por_tienda(_conn_id, _fecha_ini: str, _fecha_fin: str, _conn=None) -> pd.DataFrame:
+def instock_por_tienda(_conn_id, fecha_ini: str, fecha_fin: str, _conn=None) -> pd.DataFrame:
     """InStock aggregated at fecha × store × (area,linea,marca,mix) level."""
-    return _run_params(QUERY_INSTOCK_POR_TIENDA, _conn, (_fecha_ini, _fecha_fin))
+    return _run_params(QUERY_INSTOCK_POR_TIENDA, _conn, (fecha_ini, fecha_fin))
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def instock_sku_cc(_conn_id, fecha_ini: str, fecha_fin: str, _conn=None) -> pd.DataFrame:
+    """InStock at SKU × Centro de Costo (tienda) × date level. One row per fecha×sku×tienda."""
+    return _run_params(QUERY_INSTOCK_SKU_CC, _conn, (fecha_ini, fecha_fin))
 
 
 # ---------------------------------------------------------------------------
@@ -1014,6 +1021,10 @@ class cached_query:
     @staticmethod
     def instock_por_tienda(conn, fecha_ini: str, fecha_fin: str):
         return instock_por_tienda(cached_query._cid(conn), fecha_ini, fecha_fin, _conn=conn)
+
+    @staticmethod
+    def instock_sku_cc(conn, fecha_ini: str, fecha_fin: str):
+        return instock_sku_cc(cached_query._cid(conn), fecha_ini, fecha_fin, _conn=conn)
 
     # -- ABC-XYZ-FSN (24h) --
     @staticmethod
