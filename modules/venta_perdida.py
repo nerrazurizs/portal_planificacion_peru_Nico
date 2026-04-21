@@ -265,7 +265,7 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
     # Double %% to escape %-formatting used by Snowflake connector
     valid_stores_cte = f"""valid_stores AS (
         SELECT cod_almacen,
-               cod_ccosto,
+               LPAD(TRIM(CAST(cod_ccosto AS VARCHAR)), 4, '0') AS cod_ccosto,
                nom_almacen
         FROM db_dimensiones.dim.dt_almacen
         WHERE cod_tipoalmacen = '9'
@@ -315,7 +315,7 @@ def _build_tienda_ctes(dias_ventana, mix_values=None, perfil_only=True,
                  ELSE 0 END AS avg_price
         FROM {_VCM} v
         INNER JOIN valid_stores vs
-            ON v.cod_ccosto = vs.cod_ccosto
+            ON LPAD(TRIM(CAST(v.cod_ccosto AS VARCHAR)), 4, '0') = vs.cod_ccosto
         {mix_join_v}
         WHERE v.fecha >= %s AND v.fecha <= %s
           AND v.cantidad > 0
@@ -682,7 +682,9 @@ def _compute_vp_range(conn, stock_start, stock_end,
             try:
                 _diag_sql = f"""
                 WITH vs AS (
-                    SELECT cod_almacen, cod_ccosto, nom_almacen
+                    SELECT cod_almacen,
+                           LPAD(TRIM(CAST(cod_ccosto AS VARCHAR)), 4, '0') AS cod_ccosto,
+                           nom_almacen
                     FROM db_dimensiones.dim.dt_almacen
                     WHERE cod_tipoalmacen = '9'
                       AND cod_ccosto IS NOT NULL
@@ -690,21 +692,22 @@ def _compute_vp_range(conn, stock_start, stock_end,
                 SELECT
                     'demand (tipo=9)' AS src,
                     COUNT(*) AS n_rows,
-                    COUNT(DISTINCT CAST(vs.cod_ccosto AS VARCHAR)) AS n_stores,
-                    LISTAGG(DISTINCT CAST(vs.cod_ccosto AS VARCHAR), ', ')
-                        WITHIN GROUP (ORDER BY CAST(vs.cod_ccosto AS VARCHAR))
+                    COUNT(DISTINCT vs.cod_ccosto) AS n_stores,
+                    LISTAGG(DISTINCT vs.cod_ccosto, ', ')
+                        WITHIN GROUP (ORDER BY vs.cod_ccosto)
                         AS sample_ids
                 FROM {_VCM} v
-                INNER JOIN vs ON v.cod_ccosto = vs.cod_ccosto
+                INNER JOIN vs
+                    ON LPAD(TRIM(CAST(v.cod_ccosto AS VARCHAR)), 4, '0') = vs.cod_ccosto
                 WHERE v.fecha >= %s AND v.fecha <= %s
                   AND v.cantidad > 0
                 UNION ALL
                 SELECT
                     'stock (tipo=9)' AS src,
                     COUNT(*) AS n_rows,
-                    COUNT(DISTINCT CAST(vs.cod_ccosto AS VARCHAR)) AS n_stores,
-                    LISTAGG(DISTINCT CAST(vs.cod_ccosto AS VARCHAR), ', ')
-                        WITHIN GROUP (ORDER BY CAST(vs.cod_ccosto AS VARCHAR))
+                    COUNT(DISTINCT vs.cod_ccosto) AS n_stores,
+                    LISTAGG(DISTINCT vs.cod_ccosto, ', ')
+                        WITHIN GROUP (ORDER BY vs.cod_ccosto)
                         AS sample_ids
                 FROM {_INSTOCK} a
                 INNER JOIN vs ON a.cod_bodega = vs.cod_almacen
@@ -1096,7 +1099,8 @@ def _run_diagnostics(conn, stock_start, stock_end, demand_start, demand_end):
             f"       SUM(v.cantidad) AS total_qty "
             f"FROM {_VCM} v "
             f"INNER JOIN db_dimensiones.dim.dt_almacen al "
-            f"    ON v.cod_ccosto = al.cod_ccosto "
+            f"    ON LPAD(TRIM(CAST(v.cod_ccosto AS VARCHAR)), 4, '0') "
+            f"     = LPAD(TRIM(CAST(al.cod_ccosto AS VARCHAR)), 4, '0') "
             f"WHERE v.fecha >= %s AND v.fecha <= %s "
             f"  AND v.cantidad > 0 "
             f"  AND al.cod_tipoalmacen = '9'",
