@@ -2,8 +2,8 @@ name: ABC-XYZ Snapshot Diario
 
 on:
   schedule:
-    # ── 09:00 Perú (UTC-5 fijo, sin horario de verano) = 14:00 UTC — todos los días ──
-    - cron: '0 14 * * *'
+    # ── 07:00 Perú (UTC-5 fijo, sin horario de verano) = 12:00 UTC — todos los días ──
+    - cron: '0 12 * * *'
 
   # Permite disparar manualmente desde GitHub → Actions → Run workflow
   workflow_dispatch:
