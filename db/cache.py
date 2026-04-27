@@ -98,6 +98,8 @@ from db.queries import (
     QUERY_DDMRP_ADU_TIENDA,
     QUERY_VTA_MTD_RETAIL,
     QUERY_PERFIL_SKU,
+    QUERY_ALERTA_FORECAST_VENTAS,
+    QUERY_ALERTA_VTA_SEMANAL,
 )
 from utils.filters import norm_cols
 
@@ -871,6 +873,22 @@ def last_refresh_label() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Alerta Forecast helpers
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def alerta_forecast_ventas(_conn_id, _conn=None) -> pd.DataFrame:
+    """Ventas reales ultimos 4 meses cerrados por SKU x COD_CCOSTO (para alertas)."""
+    return norm_cols(_run(QUERY_ALERTA_FORECAST_VENTAS, _conn))
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def alerta_vta_semanal(_conn_id, _conn=None) -> pd.DataFrame:
+    """Ventas semanales ultimas 8 semanas por SKU x COD_CCOSTO (para VENTA_SEMANAL_PROMEDIO)."""
+    return norm_cols(_run(QUERY_ALERTA_VTA_SEMANAL, _conn))
+
+
+# ---------------------------------------------------------------------------
 # Convenience namespace
 # ---------------------------------------------------------------------------
 
@@ -1148,3 +1166,12 @@ class cached_query:
     @staticmethod
     def ddmrp_dias_con_stock(conn):
         return ddmrp_dias_con_stock(cached_query._cid(conn), _conn=conn)
+
+    # -- Alerta Forecast (diario) --
+    @staticmethod
+    def alerta_forecast_ventas(conn):
+        return alerta_forecast_ventas(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def alerta_vta_semanal(conn):
+        return alerta_vta_semanal(cached_query._cid(conn), _conn=conn)

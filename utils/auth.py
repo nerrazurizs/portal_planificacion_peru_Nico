@@ -60,6 +60,7 @@ PLANNER_MODULES = [
     "Dashboard Stock 2.0",
     "Listado O&E",
     "DDMRP Reposicion",
+    "Alerta Forecast",
     "Fcst vs Vta Retail",
 ]
 

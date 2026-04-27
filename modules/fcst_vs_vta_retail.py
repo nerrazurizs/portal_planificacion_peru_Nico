@@ -38,6 +38,7 @@ from utils.file_persistence import (
     load_projection_results,
 )
 from utils.filters import norm_cols
+from modules.alerta_forecast import render_alerta_forecast, render_convertir_forecast
 
 # Dict normalizado: cod_almacen (4 dígitos SAP) → id_sucursal Syncro (sin ceros a la izquierda)
 _CCOSTO_TO_SYNCRO = {
@@ -298,7 +299,7 @@ def _color_desv(val):
 
 # ── Main render ─────────────────────────────────────────────────────────────────
 
-def render_fcst_vs_vta_retail(conn):
+def _render_retail_tab(conn):
     st.html("<h2 class='sub-header'>Fcst Syncro vs Venta Actual — Retail / Minorista</h2>")
 
     periodo = pd.Timestamp.now().to_period("M")
@@ -350,10 +351,10 @@ def render_fcst_vs_vta_retail(conn):
 
     # Guard: stop if no source available
     if "proy_result" in fuente and not has_proy:
-        st.stop()
+        return
     if "Subir" in fuente and uploaded_file is None:
         st.info("Sube el archivo de Fcst Syncro para continuar.")
-        st.stop()
+        return
 
     # ── 2. Load data ──────────────────────────────────────────────────────────
     with st.spinner("Cargando datos de Snowflake y archivo de forecast..."):
@@ -430,10 +431,10 @@ def render_fcst_vs_vta_retail(conn):
 
     if df_fcst is None or df_fcst.empty:
         st.error("No se pudo cargar el forecast. Revisa la fuente seleccionada.")
-        st.stop()
+        return
 
     if df_vta is None or df_vta.empty:
-        st.stop()
+        return
 
     # ── 3. Normalise columns ──────────────────────────────────────────────────
     df_vta      = norm_cols(df_vta)
@@ -590,7 +591,7 @@ def render_fcst_vs_vta_retail(conn):
 
     if df_f.empty:
         st.info("Sin resultados para los filtros seleccionados.")
-        st.stop()
+        return
 
     # ── 6. KPI summary ────────────────────────────────────────────────────────
     if fcst_by_id_suc or fcst_by_desc_suc:
@@ -703,3 +704,23 @@ def render_fcst_vs_vta_retail(conn):
             lambda v: f"{v:.0f}%" if pd.notna(v) else ""
         )
     download_buttons(df_export, prefix="fcst_vs_vta_retail")
+
+
+# ── Entry point: three-tab layout ────────────────────────────────────────────
+
+def render_fcst_vs_vta_retail(conn):
+    """Entry point con tres pestanas: Retail + Alerta Forecast + Convertir."""
+    tab_retail, tab_alerta, tab_conv = st.tabs([
+        "📊 Fcst vs Vta Retail",
+        "🔴 Alerta Forecast",
+        "🔄 Convertir a Forecast",
+    ])
+
+    with tab_retail:
+        _render_retail_tab(conn)
+
+    with tab_alerta:
+        render_alerta_forecast(conn)
+
+    with tab_conv:
+        render_convertir_forecast()

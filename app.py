@@ -50,6 +50,7 @@ from modules.business_case import render_business_case
 from modules.listado_oe import render_listado_oe
 from modules.ddmrp import render_ddmrp
 from modules.fcst_vs_vta_retail import render_fcst_vs_vta_retail
+from modules.alerta_forecast import render_alerta_forecast
 from db.cache import cached_query as cq, clear_all as clear_query_cache, last_refresh_label, auto_refresh_if_new_day
 from utils.ui_animations import lottie_spinner, show_lottie, animated_kpi_row
 
@@ -303,6 +304,7 @@ def main_app():
         "OPERACION Y ALERTAS": [
             ("🗼", "Torre Control S&OP"),
             ("🚨", "Alertas Quiebre"),
+            ("📊", "Alerta Forecast"),
             ("🩺", "Higiene Abast."),
             ("🛒", "Resumen Compra"),
             ("🚢", "Analisis Transitos"),
@@ -485,6 +487,7 @@ def main_app():
         "Tablas Syncro": render_syncro,
         "Generador Forecast": render_forecast_generator,
         "Alertas Quiebre": render_alertas_quiebre,
+        "Alerta Forecast": render_alerta_forecast,
         "ABC-XYZ": render_abc_xyz,
         "Elasticidad": render_elasticidad,
         "Higiene Abast.": render_higiene,

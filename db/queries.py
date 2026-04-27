@@ -2597,3 +2597,62 @@ GROUP BY 1, 2, 3, 4
 ORDER BY 5 DESC
 LIMIT 30
 """
+
+# ============================================================
+# ALERTA FORECAST — ventas reales ultimos 4 meses cerrados
+# por SKU x centro de costo x canal (para calculo 2-sigma)
+# ============================================================
+
+QUERY_ALERTA_FORECAST_VENTAS = f"""
+SELECT
+    a.sku_producto,
+    CASE
+        WHEN TRIM(a.cod_canal) IN ('02', '06')
+            THEN LPAD(CAST(a.cod_ccosto  AS VARCHAR), 4, '0')
+        ELSE LPAD(CAST(a.cod_agencia AS VARCHAR), 4, '0')
+    END                                                            AS cod_ccosto,
+    COALESCE(b.descripcion_sucursal,
+             CASE
+                 WHEN TRIM(a.cod_canal) IN ('02', '06')
+                     THEN LPAD(CAST(a.cod_ccosto  AS VARCHAR), 4, '0')
+                 ELSE LPAD(CAST(a.cod_agencia AS VARCHAR), 4, '0')
+             END)                                                  AS centro_costo,
+    TRIM(a.cod_canal)                                              AS cod_canal,
+    DATE_TRUNC('month', a.fecha)                                   AS periodo,
+    SUM(a.cantidad)                                                AS unidades,
+    SUM(a.neto)                                                    AS neto
+FROM {_VCM} a
+LEFT JOIN {_SUCURSAL} b
+    ON  CASE
+            WHEN TRIM(a.cod_canal) IN ('02', '06')
+                THEN CAST(a.cod_ccosto  AS VARCHAR)
+            ELSE CAST(a.cod_agencia AS VARCHAR)
+        END = CAST(b.id_sucursal AS VARCHAR)
+WHERE a.fecha >= DATEADD('month', -4, DATE_TRUNC('month', CURRENT_DATE()))
+  AND a.fecha <  CURRENT_DATE()
+  AND a.cantidad > 0
+GROUP BY 1, 2, 3, 4, 5
+"""
+
+# ============================================================
+# ALERTA FORECAST — ventas semanales ultimas 8 semanas
+# para calcular Venta Semanal Promedio (5 semanas con venta > 0)
+# Misma logica de join key por canal que QUERY_ALERTA_FORECAST_VENTAS
+# ============================================================
+
+QUERY_ALERTA_VTA_SEMANAL = f"""
+SELECT
+    a.sku_producto,
+    CASE
+        WHEN TRIM(a.cod_canal) IN ('02', '06')
+            THEN LPAD(CAST(a.cod_ccosto  AS VARCHAR), 4, '0')
+        ELSE LPAD(CAST(a.cod_agencia AS VARCHAR), 4, '0')
+    END                                  AS cod_ccosto,
+    DATE_TRUNC('week', a.fecha)          AS semana,
+    SUM(a.cantidad)                      AS unidades
+FROM {_VCM} a
+WHERE a.fecha >= DATEADD('week', -8, DATE_TRUNC('week', CURRENT_DATE()))
+  AND a.fecha <  DATE_TRUNC('week', CURRENT_DATE())
+  AND a.cantidad > 0
+GROUP BY 1, 2, 3
+"""
