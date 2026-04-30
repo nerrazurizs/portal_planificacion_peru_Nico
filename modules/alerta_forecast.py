@@ -83,7 +83,6 @@ _SPANISH_MONTHS = {
 _SNAPSHOTS_DIR = Path(__file__).resolve().parent.parent / "data" / "forecast_snapshots"
 _META_FILE = _SNAPSHOTS_DIR / "metadata.json"
 
-
 # ============================================================================
 # SNAPSHOT READER (comparte parquets con modules/forecast_accuracy.py)
 # ============================================================================

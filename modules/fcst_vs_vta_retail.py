@@ -40,11 +40,8 @@ from utils.file_persistence import (
 from utils.filters import norm_cols
 from modules.alerta_forecast import render_alerta_forecast, render_convertir_forecast
 
-# Dict normalizado: cod_almacen (4 dígitos SAP) → id_sucursal Syncro (sin ceros a la izquierda)
-_CCOSTO_TO_SYNCRO = {
-    k: str(int(v)) if v.lstrip("0").isdigit() or v == "0" else v
-    for k, v in VCM_CCOSTO_TO_SYNCRO.items()
-}
+# Dict cod_almacen SAP → id_sucursal Syncro (4 dígitos, mismo formato que coo_maestro_sucursal)
+_CCOSTO_TO_SYNCRO = dict(VCM_CCOSTO_TO_SYNCRO)
 
 # ── FCST column candidates in proy_result.parquet ──────────────────────────────
 _FCST_PROY_CANDIDATES = [
@@ -103,14 +100,14 @@ def _detect_suc_col(cols: list[str]) -> str | None:
 
 
 def _norm_id_sucursal(s: "pd.Series") -> "pd.Series":
-    """Normaliza código de almacén a string entero sin ceros a la izquierda.
+    """Normaliza código de almacén a 4 dígitos con ceros a la izquierda.
 
-    Convierte "0218" → "218", "218" → "218", "218.0" → "218".
-    Usa .apply() para evitar bugs de Copy-on-Write en pandas 2.x.
+    Convierte "9" → "0009", "9.0" → "0009", "0009" → "0009", "1480" → "1480".
+    Mismo formato que coo_maestro_sucursal.id_sucursal en Syncro.
     """
     def _one(v):
         try:
-            return str(int(float(str(v).strip())))
+            return str(int(float(str(v).strip()))).zfill(4)
         except (ValueError, TypeError):
             return str(v).strip()
     return s.apply(_one)

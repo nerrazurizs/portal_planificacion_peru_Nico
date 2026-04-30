@@ -2599,60 +2599,121 @@ LIMIT 30
 """
 
 # ============================================================
+# ALERTA FORECAST — mapeo VCM cod_ccosto → Syncro id_sucursal
+#
+# Para TIENDA (canal 03) el cod_ccosto en VCM es un codigo interno
+# (ej. 0209) que NO coincide con el id_sucursal de Syncro (ej. 0009).
+# Para MAYORISTA (02) y ETAIL (06) el cod_ccosto ya es el id_sucursal.
+# Este CASE se embebe en una CTE para calcular el id_sucursal correcto
+# una sola vez y usarlo tanto en el SELECT como en el LEFT JOIN.
+# Fuente del mapeo: PE - DB_Canal_Tienda.xlsx (VCM_CCOSTO_TO_SYNCRO).
+# ============================================================
+
+_VCM_TO_SYNCRO_CASE = """\
+CASE LPAD(CAST(a.cod_ccosto AS VARCHAR), 4, '0')
+            WHEN '0206' THEN '0005'
+            WHEN '0207' THEN '0002'
+            WHEN '0209' THEN '0009'
+            WHEN '0212' THEN '1090'
+            WHEN '0213' THEN '1110'
+            WHEN '0216' THEN '1710'
+            WHEN '0217' THEN '1170'
+            WHEN '0218' THEN '1180'
+            WHEN '0219' THEN '1690'
+            WHEN '0224' THEN '1240'
+            WHEN '0226' THEN '1260'
+            WHEN '0227' THEN '1270'
+            WHEN '0229' THEN '1290'
+            WHEN '0230' THEN '1300'
+            WHEN '0231' THEN '1310'
+            WHEN '0232' THEN '1320'
+            WHEN '0233' THEN '1330'
+            WHEN '0234' THEN '1340'
+            WHEN '0238' THEN '1380'
+            WHEN '0240' THEN '1400'
+            WHEN '0241' THEN '1410'
+            WHEN '0242' THEN '1420'
+            WHEN '0248' THEN '1480'
+            WHEN '0250' THEN '1500'
+            WHEN '0252' THEN '1520'
+            WHEN '0255' THEN '1550'
+            WHEN '0259' THEN '1590'
+            WHEN '0260' THEN '1600'
+            WHEN '0261' THEN '1610'
+            WHEN '0265' THEN '1650'
+            WHEN '0266' THEN '1680'
+            WHEN '0267' THEN '1670'
+            WHEN '0268' THEN '1700'
+            WHEN '0269' THEN '1720'
+            ELSE LPAD(CAST(a.cod_ccosto AS VARCHAR), 4, '0')
+        END"""
+
+# ============================================================
 # ALERTA FORECAST — ventas reales ultimos 4 meses cerrados
-# por SKU x centro de costo x canal (para calculo 2-sigma)
+# por SKU x centro de costo x canal
 # ============================================================
 
 QUERY_ALERTA_FORECAST_VENTAS = f"""
+WITH vcm_mapped AS (
+    SELECT
+        a.sku_producto,
+        TRIM(a.cod_canal)  AS cod_canal,
+        a.fecha,
+        a.cantidad,
+        a.neto,
+        -- Para MAYORISTA/ETAIL cod_ccosto ya es el id_sucursal Syncro.
+        -- Para TIENDA se traduce via mapeo VCM -> Syncro.
+        CASE TRIM(a.cod_canal)
+            WHEN '02' THEN LPAD(CAST(a.cod_ccosto AS VARCHAR), 4, '0')
+            WHEN '06' THEN LPAD(CAST(a.cod_ccosto AS VARCHAR), 4, '0')
+            ELSE {_VCM_TO_SYNCRO_CASE}
+        END AS id_sucursal
+    FROM {_VCM} a
+)
 SELECT
-    a.sku_producto,
-    CASE
-        WHEN TRIM(a.cod_canal) IN ('02', '06')
-            THEN LPAD(CAST(a.cod_ccosto  AS VARCHAR), 4, '0')
-        ELSE LPAD(CAST(a.cod_agencia AS VARCHAR), 4, '0')
-    END                                                            AS cod_ccosto,
-    COALESCE(b.descripcion_sucursal,
-             CASE
-                 WHEN TRIM(a.cod_canal) IN ('02', '06')
-                     THEN LPAD(CAST(a.cod_ccosto  AS VARCHAR), 4, '0')
-                 ELSE LPAD(CAST(a.cod_agencia AS VARCHAR), 4, '0')
-             END)                                                  AS centro_costo,
-    TRIM(a.cod_canal)                                              AS cod_canal,
-    DATE_TRUNC('month', a.fecha)                                   AS periodo,
-    SUM(a.cantidad)                                                AS unidades,
-    SUM(a.neto)                                                    AS neto
-FROM {_VCM} a
+    v.sku_producto,
+    v.id_sucursal                                    AS cod_ccosto,
+    COALESCE(b.descripcion_sucursal, v.id_sucursal)  AS centro_costo,
+    v.cod_canal,
+    DATE_TRUNC('month', v.fecha)                     AS periodo,
+    SUM(v.cantidad)                                  AS unidades,
+    SUM(v.neto)                                      AS neto
+FROM vcm_mapped v
 LEFT JOIN {_SUCURSAL} b
-    ON  CASE
-            WHEN TRIM(a.cod_canal) IN ('02', '06')
-                THEN CAST(a.cod_ccosto  AS VARCHAR)
-            ELSE CAST(a.cod_agencia AS VARCHAR)
-        END = CAST(b.id_sucursal AS VARCHAR)
-WHERE a.fecha >= DATEADD('month', -4, DATE_TRUNC('month', CURRENT_DATE()))
-  AND a.fecha <  CURRENT_DATE()
-  AND a.cantidad > 0
+    ON v.id_sucursal = CAST(b.id_sucursal AS VARCHAR)
+WHERE v.fecha >= DATEADD('month', -4, DATE_TRUNC('month', CURRENT_DATE()))
+  AND v.fecha <  CURRENT_DATE()
+  AND v.cantidad > 0
 GROUP BY 1, 2, 3, 4, 5
 """
 
 # ============================================================
 # ALERTA FORECAST — ventas semanales ultimas 8 semanas
 # para calcular Venta Semanal Promedio (5 semanas con venta > 0)
-# Misma logica de join key por canal que QUERY_ALERTA_FORECAST_VENTAS
 # ============================================================
 
 QUERY_ALERTA_VTA_SEMANAL = f"""
+WITH vcm_mapped AS (
+    SELECT
+        a.sku_producto,
+        TRIM(a.cod_canal)  AS cod_canal,
+        a.fecha,
+        a.cantidad,
+        CASE TRIM(a.cod_canal)
+            WHEN '02' THEN LPAD(CAST(a.cod_ccosto AS VARCHAR), 4, '0')
+            WHEN '06' THEN LPAD(CAST(a.cod_ccosto AS VARCHAR), 4, '0')
+            ELSE {_VCM_TO_SYNCRO_CASE}
+        END AS id_sucursal
+    FROM {_VCM} a
+)
 SELECT
-    a.sku_producto,
-    CASE
-        WHEN TRIM(a.cod_canal) IN ('02', '06')
-            THEN LPAD(CAST(a.cod_ccosto  AS VARCHAR), 4, '0')
-        ELSE LPAD(CAST(a.cod_agencia AS VARCHAR), 4, '0')
-    END                                  AS cod_ccosto,
-    DATE_TRUNC('week', a.fecha)          AS semana,
-    SUM(a.cantidad)                      AS unidades
-FROM {_VCM} a
-WHERE a.fecha >= DATEADD('week', -8, DATE_TRUNC('week', CURRENT_DATE()))
-  AND a.fecha <  DATE_TRUNC('week', CURRENT_DATE())
-  AND a.cantidad > 0
+    v.sku_producto,
+    v.id_sucursal          AS cod_ccosto,
+    DATE_TRUNC('week', v.fecha) AS semana,
+    SUM(v.cantidad)        AS unidades
+FROM vcm_mapped v
+WHERE v.fecha >= DATEADD('week', -8, DATE_TRUNC('week', CURRENT_DATE()))
+  AND v.fecha <  DATE_TRUNC('week', CURRENT_DATE())
+  AND v.cantidad > 0
 GROUP BY 1, 2, 3
 """
