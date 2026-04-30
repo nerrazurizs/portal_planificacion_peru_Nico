@@ -100,6 +100,7 @@ from db.queries import (
     QUERY_PERFIL_SKU,
     QUERY_ALERTA_FORECAST_VENTAS,
     QUERY_ALERTA_VTA_SEMANAL,
+    QUERY_VENTAS_HIST_PROY,
 )
 from utils.filters import norm_cols
 
@@ -146,6 +147,12 @@ def ventas_aa(_conn_id, _conn=None) -> pd.DataFrame:
 def ventas_mes_anterior(_conn_id, _conn=None) -> pd.DataFrame:
     """Last-month sales (complete month).  Historical once month ends."""
     return _run(QUERY_VENTAS_MES_ANTERIOR, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def ventas_hist_proyeccion(_conn_id, _conn=None) -> pd.DataFrame:
+    """Monthly sales from Jan 2025 through previous month, for Proyeccion de Stock historic rows."""
+    return _run(QUERY_VENTAS_HIST_PROY, _conn)
 
 
 @st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
@@ -821,7 +828,7 @@ def unified_transit(_conn_id, _conn=None) -> pd.DataFrame:
 
 # Registry of all cached functions for batch clearing
 _ALL_CACHED = [
-    maestra, ventas_aa, ventas_mes_anterior, ventas_semanales,
+    maestra, ventas_aa, ventas_mes_anterior, ventas_hist_proyeccion, ventas_semanales,
     ventas_historicas, ventas_ytd, ventas_ytd_aa,
     ventas_mensual_precio, ventas_semanal_tendencia,
     ventas_diarias_patron, pesos_diarios, pesos_diarios_canal,
@@ -912,6 +919,10 @@ class cached_query:
     @staticmethod
     def ventas_mes_anterior(conn):
         return ventas_mes_anterior(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def ventas_hist_proyeccion(conn):
+        return ventas_hist_proyeccion(cached_query._cid(conn), _conn=conn)
 
     @staticmethod
     def ventas_semanales(conn):

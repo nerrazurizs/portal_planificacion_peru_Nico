@@ -1021,7 +1021,7 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
         comex = cq.comex_full(conn)
         maestra = cq.maestra(conn)
         ventas_mtd = cq.ventas_mtd(conn)
-        ventas_hist = cq.ventas_mes_anterior(conn)
+        ventas_hist = cq.ventas_hist_proyeccion(conn)
         ventas_aa = cq.ventas_aa(conn)
 
     # =========================
@@ -1255,6 +1255,29 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
     if excluir_plan_compra and "FORECAST_COMPRA" in df_main.columns:
         df_main["FORECAST_COMPRA"] = 0
         st.info("Plan de compras excluido: simulación solo con stock actual + COMEX confirmado.")
+
+    # Fill empty SUBLINEA/MODELO in maestra using product hierarchy before merging
+    if all(c in maestra.columns for c in ["SUBLINEA", "LINEA"]):
+        _m_valid_sub = maestra[maestra["SUBLINEA"].notna() & (maestra["SUBLINEA"].astype(str).str.strip() != "")]
+        _sub_by_linea = _m_valid_sub.groupby("LINEA")["SUBLINEA"].agg(
+            lambda x: x.mode().iloc[0] if not x.empty else np.nan
+        )
+        _mask_sub = maestra["SUBLINEA"].isna() | (maestra["SUBLINEA"].astype(str).str.strip() == "")
+        maestra.loc[_mask_sub, "SUBLINEA"] = maestra.loc[_mask_sub, "LINEA"].map(_sub_by_linea)
+
+    if all(c in maestra.columns for c in ["MODELO", "LINEA", "MARCA"]):
+        _m_valid_mod = maestra[maestra["MODELO"].notna() & (maestra["MODELO"].astype(str).str.strip() != "")]
+        if not _m_valid_mod.empty:
+            _mod_lookup = (
+                _m_valid_mod.groupby(["LINEA", "MARCA"])["MODELO"]
+                .agg(lambda x: x.mode().iloc[0] if not x.empty else np.nan)
+                .reset_index()
+                .rename(columns={"MODELO": "_MODELO_FILL"})
+            )
+            _mask_mod = maestra["MODELO"].isna() | (maestra["MODELO"].astype(str).str.strip() == "")
+            if _mask_mod.any():
+                _m_to_fill = maestra[_mask_mod].merge(_mod_lookup, on=["LINEA", "MARCA"], how="left")
+                maestra.loc[_mask_mod, "MODELO"] = _m_to_fill["_MODELO_FILL"].values
 
     cols_maestra = ["SKU_PRODUCTO"]
     for c in ["SKU_NOM_PRODUCTO", "LINEA", "SUBLINEA", "AREA", "MARCA",
@@ -1679,44 +1702,42 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
     else:
         df_sim["WARNING_FC_REAL"] = ""
 
-    # Column ordering
+    # Column ordering — matches ejemplo.xlsx reference
     cols_order = [
-        "SKU_PRODUCTO", "PERIODO", "PERIODO_ANO", "PERIODO_MES", "ID_MES", "TIPO_DATO",
+        "TIPO_DATO", "SKU_PRODUCTO", "SKU_NOM_PRODUCTO",
+        "AREA", "LINEA", "SUBLINEA", "MARCA", "MODELO", "PROCEDENCIA", "MIX_OFICIAL",
+        "ID_MES",
+        "STOCK_INICIAL_TOTAL", "STOCK_FINAL_TOTAL", "STOCK_DISPONIBLE",
         "FORECAST_COMPRA", "ETA",
-        "STOCK_INICIAL_CD", "STOCK_INICIAL_TIENDA", "STOCK_INICIAL_TOTAL", "STOCK_DISPONIBLE",
-        "STOCK_FINAL_CD", "STOCK_FINAL_TIENDA", "STOCK_FINAL_TOTAL",
-        "MOI_COBERTURA", "MES_QUIEBRE", "MESES_HASTA_QUIEBRE",
-        "PERFIL_TIENDAS", "NECESIDAD_TIENDA", "CARGA_REAL",
-        "DEFICIT_PERFIL_UND", "QUIEBRE_POR_PERFIL", "AJUSTE_COMPRA_SUGERIDO_UND", "VN_INCREMENTAL_PERFIL",
         "DEMANDA_SIM_TIENDA", "DEMANDA_SIM_ETAIL", "DEMANDA_SIM_MAYOR", "DEMANDA_TOTAL",
-        "VENTA_FUL_TIENDA_UND", "VENTA_FUL_ETAIL_UND", "VENTA_FUL_MAYOR_UND",
-        "LOST_SALES_TIENDA", "LOST_SALES_ETAIL", "LOST_SALES_MAYOR", "LOST_SALES_CD", "LOST_SALES_TOTAL",
+        "PERFIL_TIENDAS",
+        "PRECIO_USADO_TIENDA",
+        "LOST_SALES_TIENDA", "LOST_SALES_CD", "LOST_SALES_ETAIL", "LOST_SALES_MAYOR",
+        "NECESIDAD_TIENDA", "CARGA_REAL", "DEFICIT_PERFIL_UND",
         "INSTOCK_CD", "INSTOCK_TIENDA", "INSTOCK_CIA",
         "INSTOCK_DIAS_CD", "INSTOCK_DIAS_TIENDA", "INSTOCK_DIAS_CIA", "DIAS_MES",
-        "COSTO_UNITARIO",
-        "PRECIO_NETO_TIENDA", "PRECIO_NETO_ETAIL", "PRECIO_NETO_MAYOR",
-        "PRECIO_MTD_TIENDA", "PRECIO_MTD_ETAIL", "PRECIO_MTD_MAYORISTA",
-        "PRECIO_USADO_TIENDA", "PRECIO_USADO_ETAIL", "PRECIO_USADO_MAYOR",
-        "ORIGEN_PRECIO_TIENDA", "ORIGEN_PRECIO_ETAIL", "ORIGEN_PRECIO_MAYOR",
-        # Financiero restricto por canal
+        "PERIODO_ANO", "PERIODO_MES",
+        "ORIGEN_COSTO", "FLAG_SIN_COSTO",
+        "PRECIO_MTD_TIENDA", "PRECIO_MES_ANT_TIENDA", "ORIGEN_PRECIO_TIENDA",
+        "PRECIO_USADO_ETAIL", "ORIGEN_PRECIO_ETAIL",
+        "PRECIO_USADO_MAYOR", "ORIGEN_PRECIO_MAYOR",
         "VN_RES_TIENDA", "VN_RES_ETAIL", "VN_RES_MAYOR", "VN_RES_TOTAL",
-        "COGS_RES_TIENDA", "COGS_RES_ETAIL", "COGS_RES_MAYOR", "COGS_RES_TOTAL",
-        "APORTE_RES_TIENDA", "APORTE_RES_ETAIL", "APORTE_RES_MAYOR", "APORTE_RES_TOTAL",
-        "MARGEN_RES_TIENDA", "MARGEN_RES_ETAIL", "MARGEN_RES_MAYOR", "MARGEN_RES_TOTAL",
-        # Financiero irrestricto por canal (potencial)
-        "VN_IRR_TIENDA", "VN_IRR_ETAIL", "VN_IRR_MAYOR", "VN_IRR_TOTAL",
-        "COGS_IRR_TIENDA", "COGS_IRR_ETAIL", "COGS_IRR_MAYOR", "COGS_IRR_TOTAL",
-        "APORTE_IRR_TIENDA", "APORTE_IRR_ETAIL", "APORTE_IRR_MAYOR", "APORTE_IRR_TOTAL",
-        "MARGEN_IRR_TIENDA", "MARGEN_IRR_ETAIL", "MARGEN_IRR_MAYOR", "MARGEN_IRR_TOTAL",
-        # Financiero venta perdida (lost sales valorizado)
-        "VN_LOST_TIENDA", "VN_LOST_ETAIL", "VN_LOST_MAYOR", "VN_LOST_TOTAL",
-        "COGS_LOST_TIENDA", "COGS_LOST_ETAIL", "COGS_LOST_MAYOR", "COGS_LOST_TOTAL",
-        "APORTE_LOST_TIENDA", "APORTE_LOST_ETAIL", "APORTE_LOST_MAYOR", "APORTE_LOST_TOTAL",
-        "MARGEN_LOST_TIENDA", "MARGEN_LOST_ETAIL", "MARGEN_LOST_MAYOR", "MARGEN_LOST_TOTAL",
+        "COGS_RES_TIENDA", "APORTE_RES_TIENDA", "MARGEN_RES_TIENDA",
+        "COGS_RES_ETAIL", "APORTE_RES_ETAIL", "MARGEN_RES_ETAIL",
+        "COGS_RES_MAYOR", "APORTE_RES_MAYOR", "MARGEN_RES_MAYOR",
+        "COGS_RES_TOTAL", "APORTE_RES_TOTAL", "MARGEN_RES_TOTAL",
+        "VN_IRR_TIENDA", "COGS_IRR_TIENDA", "APORTE_IRR_TIENDA", "MARGEN_IRR_TIENDA",
+        "VN_IRR_ETAIL", "COGS_IRR_ETAIL", "APORTE_IRR_ETAIL", "MARGEN_IRR_ETAIL",
+        "VN_IRR_MAYOR", "COGS_IRR_MAYOR", "APORTE_IRR_MAYOR", "MARGEN_IRR_MAYOR",
+        "VN_IRR_TOTAL", "COGS_IRR_TOTAL", "APORTE_IRR_TOTAL", "MARGEN_IRR_TOTAL",
+        "LOST_SALES_TOTAL",
+        "VN_LOST_TIENDA", "COGS_LOST_TIENDA", "APORTE_LOST_TIENDA", "MARGEN_LOST_TIENDA",
+        "VN_LOST_ETAIL", "COGS_LOST_ETAIL", "APORTE_LOST_ETAIL", "MARGEN_LOST_ETAIL",
+        "VN_LOST_MAYOR", "COGS_LOST_MAYOR", "APORTE_LOST_MAYOR", "MARGEN_LOST_MAYOR",
+        "VN_LOST_TOTAL", "COGS_LOST_TOTAL", "APORTE_LOST_TOTAL", "MARGEN_LOST_TOTAL",
+        "QUIEBRE_POR_PERFIL", "DEMANDA_AVG_3M", "TIENE_QUIEBRE",
+        "MES_QUIEBRE", "MESES_HASTA_QUIEBRE",
         "WARNING_FC_REAL",
-        "SKU_NOM_PRODUCTO", "AREA", "LINEA", "SUBLINEA", "MARCA", "PROCEDENCIA",
-        "PROVEEDOR", "COD_PROVEEDOR", "MIX_OFICIAL", "MODELO",
-        "ORIGEN_COSTO", "FACTOR_IMPORTACION", "COSTO_FOB_USD", "ULTIMO_COSTO", "FLAG_SIN_COSTO",
     ]
 
     # ============================================================
@@ -1826,107 +1847,108 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
         except Exception as e:
             st.warning(f"No se pudo integrar datos ano anterior: {e}")
 
-    # Update cols_order with AA columns
+    # Update cols_order with AA columns — matches ejemplo.xlsx reference
     cols_order.extend([
-        "AA_VN_TIENDA", "AA_VN_ETAIL", "AA_VN_MAYOR", "AA_VN_TOTAL",
-        "AA_UND_TIENDA", "AA_UND_ETAIL", "AA_UND_MAYOR", "AA_UND_TOTAL",
-        "AA_APORTE_TIENDA", "AA_APORTE_ETAIL", "AA_APORTE_MAYOR", "AA_APORTE_TOTAL",
+        "AA_UND_TIENDA", "AA_VN_TIENDA", "AA_APORTE_TIENDA",
+        "AA_VN_TOTAL", "AA_UND_TOTAL", "AA_APORTE_TOTAL",
     ])
 
     final_cols = [c for c in cols_order if c in df_sim.columns]
     extra_cols = [c for c in df_sim.columns if c not in final_cols]
 
-    # --- Integrate historical sales as rows (mes anterior completo) ---
-    # ventas_hist already loaded at the top with the other Snowflake queries
-    if not ventas_hist.empty and "SKU_PRODUCTO" in ventas_hist.columns:
+    # --- Integrate historical sales as rows (desde enero 2025 hasta mes anterior) ---
+    if not ventas_hist.empty and "SKU_PRODUCTO" in ventas_hist.columns and "PERIODO" in ventas_hist.columns:
         try:
-            # Periodo historico = mes anterior (enero si hoy es febrero)
-            PERIODO_HISTORICO = PERIODO_ACTUAL - pd.DateOffset(months=1)
-
-            # Mapear canales
+            ventas_hist["PERIODO"] = pd.to_datetime(ventas_hist["PERIODO"])
             hist_mtd_map = {"MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL"}
             ventas_hist["CANAL_STD"] = ventas_hist["COD_CANAL"].map(hist_mtd_map).fillna("TIENDA")
 
-            hist_agg = ventas_hist.groupby("SKU_PRODUCTO").agg(
-                {"CANTIDAD_MES": "sum", "NETO_MES": "sum"}
-            ).reset_index()
+            all_hist_frames = []
+            for periodo_h, vh_period in ventas_hist.groupby("PERIODO"):
+                hist_agg = vh_period.groupby("SKU_PRODUCTO").agg(
+                    {"CANTIDAD_MES": "sum", "NETO_MES": "sum"}
+                ).reset_index()
 
-            hist_agg = hist_agg.merge(
-                maestra[cols_maestra].drop_duplicates("SKU_PRODUCTO"), on="SKU_PRODUCTO", how="left"
-            )
+                hist_agg = hist_agg.merge(
+                    maestra[cols_maestra].drop_duplicates("SKU_PRODUCTO"), on="SKU_PRODUCTO", how="left"
+                )
 
-            h_costo_col = "ULTIMO_COSTO" if "ULTIMO_COSTO" in hist_agg.columns else "COSTO_FOB_USD"
-            if h_costo_col in hist_agg.columns:
-                hist_agg["COSTO_UNITARIO"] = pd.to_numeric(hist_agg[h_costo_col], errors="coerce").fillna(0)
-            else:
-                hist_agg["COSTO_UNITARIO"] = 0.0
+                h_costo_col = "ULTIMO_COSTO" if "ULTIMO_COSTO" in hist_agg.columns else "COSTO_FOB_USD"
+                if h_costo_col in hist_agg.columns:
+                    hist_agg["COSTO_UNITARIO"] = pd.to_numeric(hist_agg[h_costo_col], errors="coerce").fillna(0)
+                else:
+                    hist_agg["COSTO_UNITARIO"] = 0.0
 
-            hist_rows = pd.DataFrame({
-                "SKU_PRODUCTO": hist_agg["SKU_PRODUCTO"],
-                "PERIODO": PERIODO_HISTORICO,
-                "TIPO_DATO": "HISTORICO",
-                "VENTA_FUL_TIENDA_UND": 0.0,
-                "VENTA_FUL_ETAIL_UND": 0.0,
-                "VENTA_FUL_MAYOR_UND": 0.0,
-                "VN_RES_TIENDA": 0.0,
-                "VN_RES_ETAIL": 0.0,
-                "VN_RES_MAYOR": 0.0,
-                "VN_RES_TOTAL": hist_agg["NETO_MES"],
-                "COSTO_UNITARIO": hist_agg["COSTO_UNITARIO"],
-            })
+                hist_rows = pd.DataFrame({
+                    "SKU_PRODUCTO": hist_agg["SKU_PRODUCTO"],
+                    "PERIODO": periodo_h,
+                    "TIPO_DATO": "HISTORICO",
+                    "VENTA_FUL_TIENDA_UND": 0.0,
+                    "VENTA_FUL_ETAIL_UND": 0.0,
+                    "VENTA_FUL_MAYOR_UND": 0.0,
+                    "VN_RES_TIENDA": 0.0,
+                    "VN_RES_ETAIL": 0.0,
+                    "VN_RES_MAYOR": 0.0,
+                    "VN_RES_TOTAL": hist_agg["NETO_MES"],
+                    "COSTO_UNITARIO": hist_agg["COSTO_UNITARIO"],
+                })
 
-            for col in ["SKU_NOM_PRODUCTO", "AREA", "LINEA", "SUBLINEA", "MARCA",
-                        "PROCEDENCIA", "MIX_OFICIAL", "MODELO", "PROVEEDOR", "COD_PROVEEDOR"]:
-                if col in hist_agg.columns:
-                    hist_rows[col] = hist_agg[col].values
+                for col in ["SKU_NOM_PRODUCTO", "AREA", "LINEA", "SUBLINEA", "MARCA",
+                            "PROCEDENCIA", "MIX_OFICIAL", "MODELO", "PROVEEDOR", "COD_PROVEEDOR"]:
+                    if col in hist_agg.columns:
+                        hist_rows[col] = hist_agg[col].values
 
-            # Desglosar por canal
-            for canal_std, col_suffix in [("TIENDA", "TIENDA"), ("ETAIL", "ETAIL"), ("MAYORISTA", "MAYOR")]:
-                canal_data = ventas_hist[ventas_hist["CANAL_STD"] == canal_std]
-                if not canal_data.empty:
-                    canal_agg = canal_data.groupby("SKU_PRODUCTO").agg(
-                        {"CANTIDAD_MES": "sum", "NETO_MES": "sum"}
-                    ).reset_index()
-                    hist_rows = hist_rows.merge(
-                        canal_agg.rename(columns={
-                            "CANTIDAD_MES": f"VENTA_FUL_{col_suffix}_UND_TEMP",
-                            "NETO_MES": f"VN_RES_{col_suffix}_TEMP",
-                        }),
-                        on="SKU_PRODUCTO",
-                        how="left",
-                    )
-                    hist_rows[f"VENTA_FUL_{col_suffix}_UND"] = hist_rows.get(
-                        f"VENTA_FUL_{col_suffix}_UND_TEMP", 0
-                    ).fillna(0)
-                    hist_rows[f"VN_RES_{col_suffix}"] = hist_rows.get(
-                        f"VN_RES_{col_suffix}_TEMP", 0
-                    ).fillna(0)
-                    hist_rows = hist_rows.drop(
-                        columns=[c for c in hist_rows.columns if "_TEMP" in c], errors="ignore"
-                    )
+                # Desglosar por canal
+                for canal_std, col_suffix in [("TIENDA", "TIENDA"), ("ETAIL", "ETAIL"), ("MAYORISTA", "MAYOR")]:
+                    canal_data = vh_period[vh_period["CANAL_STD"] == canal_std]
+                    if not canal_data.empty:
+                        canal_agg = canal_data.groupby("SKU_PRODUCTO").agg(
+                            {"CANTIDAD_MES": "sum", "NETO_MES": "sum"}
+                        ).reset_index()
+                        hist_rows = hist_rows.merge(
+                            canal_agg.rename(columns={
+                                "CANTIDAD_MES": f"VENTA_FUL_{col_suffix}_UND_TEMP",
+                                "NETO_MES": f"VN_RES_{col_suffix}_TEMP",
+                            }),
+                            on="SKU_PRODUCTO",
+                            how="left",
+                        )
+                        hist_rows[f"VENTA_FUL_{col_suffix}_UND"] = hist_rows.get(
+                            f"VENTA_FUL_{col_suffix}_UND_TEMP", 0
+                        ).fillna(0)
+                        hist_rows[f"VN_RES_{col_suffix}"] = hist_rows.get(
+                            f"VN_RES_{col_suffix}_TEMP", 0
+                        ).fillna(0)
+                        hist_rows = hist_rows.drop(
+                            columns=[c for c in hist_rows.columns if "_TEMP" in c], errors="ignore"
+                        )
 
-            hist_rows["COGS_RES_TOTAL"] = hist_agg["CANTIDAD_MES"] * hist_rows["COSTO_UNITARIO"]
-            hist_rows["APORTE_RES_TOTAL"] = hist_rows["VN_RES_TOTAL"] - hist_rows["COGS_RES_TOTAL"]
-            hist_rows["MARGEN_RES_TOTAL"] = np.where(
-                hist_rows["VN_RES_TOTAL"] > 0, hist_rows["APORTE_RES_TOTAL"] / hist_rows["VN_RES_TOTAL"], 0.0
-            )
+                hist_rows["COGS_RES_TOTAL"] = hist_agg["CANTIDAD_MES"] * hist_rows["COSTO_UNITARIO"]
+                hist_rows["APORTE_RES_TOTAL"] = hist_rows["VN_RES_TOTAL"] - hist_rows["COGS_RES_TOTAL"]
+                hist_rows["MARGEN_RES_TOTAL"] = np.where(
+                    hist_rows["VN_RES_TOTAL"] > 0, hist_rows["APORTE_RES_TOTAL"] / hist_rows["VN_RES_TOTAL"], 0.0
+                )
+                all_hist_frames.append(hist_rows)
 
-            # Align schema
-            for c in df_sim.columns:
-                if c not in hist_rows.columns:
+            if all_hist_frames:
+                hist_all = pd.concat(all_hist_frames, ignore_index=True)
+
+                # Align schema
+                for c in df_sim.columns:
+                    if c not in hist_all.columns:
+                        if pd.api.types.is_datetime64_any_dtype(df_sim[c]):
+                            hist_all[c] = pd.NaT
+                        elif pd.api.types.is_numeric_dtype(df_sim[c]):
+                            hist_all[c] = 0.0
+                        else:
+                            hist_all[c] = np.nan
+
+                hist_all = hist_all[df_sim.columns].copy()
+                for c in df_sim.columns:
                     if pd.api.types.is_datetime64_any_dtype(df_sim[c]):
-                        hist_rows[c] = pd.NaT
-                    elif pd.api.types.is_numeric_dtype(df_sim[c]):
-                        hist_rows[c] = 0.0
-                    else:
-                        hist_rows[c] = np.nan
+                        hist_all[c] = pd.to_datetime(hist_all[c], errors="coerce")
 
-            hist_rows = hist_rows[df_sim.columns].copy()
-            for c in df_sim.columns:
-                if pd.api.types.is_datetime64_any_dtype(df_sim[c]):
-                    hist_rows[c] = pd.to_datetime(hist_rows[c], errors="coerce")
-
-            df_sim = pd.concat([hist_rows, df_sim], ignore_index=True)
+                df_sim = pd.concat([hist_all, df_sim], ignore_index=True)
         except Exception as e:
             st.warning(f"No se pudo integrar ventas historicas: {e}")
 
@@ -2030,7 +2052,7 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
         maestra = cq.maestra(conn)
         ventas_mtd = cq.ventas_mtd(conn)
         ventas_mtd_diaria = cq.ventas_mtd_diaria(conn)
-        ventas_hist = cq.ventas_mes_anterior(conn)
+        ventas_hist = cq.ventas_hist_proyeccion(conn)
         ventas_aa = cq.ventas_aa(conn)
 
     # ── 3. Process Forecast → monthly f_piv ─────────────────────────────

@@ -592,6 +592,22 @@ where a.fecha >= date_trunc('month', dateadd('month', -1, current_date()))
 group by 1,2
 """
 
+# Ventas historicas para Proyeccion de Stock (desde enero 2025 hasta mes anterior, por mes)
+QUERY_VENTAS_HIST_PROY = f"""
+select
+    a.cod_canal,
+    a.sku_producto,
+    date_trunc('month', a.fecha) as periodo,
+    sum(a.cantidad) as cantidad_mes,
+    sum(a.neto)     as neto_mes,
+    sum(case when a.cantidad > 0 then a.neto else 0 end)
+      / nullif(sum(case when a.cantidad > 0 then a.cantidad else 0 end), 0) as precio_prom
+from {_VCM} a
+where a.fecha >= '2025-01-01'
+  and a.fecha <  date_trunc('month', current_date())
+group by 1,2,3
+"""
+
 # Ventas Ano Anterior completo
 QUERY_VENTAS_AA = f"""
 select
