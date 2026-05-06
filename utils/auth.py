@@ -78,6 +78,7 @@ JEFE_EXTRA_MODULES = [
     "Canasta Productos",
     "Alertas Email",
     "Capacidad Volumetrica",
+    "Flujo de Costos",
 ]
 
 ALL_MODULES = PLANNER_MODULES + JEFE_EXTRA_MODULES

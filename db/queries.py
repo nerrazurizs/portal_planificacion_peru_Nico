@@ -1027,6 +1027,7 @@ select
     c.paridad_moneda                                        as TC_PO,
     c.dolar_sistema                                         as TC_SISTEMA,
     c.factor_importacion,
+    c.procedencia,
     case
         when coalesce(c.cantidad_final_corregida, 0) > 0
         then greatest(0, coalesce(c.cantidad_final_corregida, 0)

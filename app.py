@@ -51,6 +51,7 @@ from modules.listado_oe import render_listado_oe
 from modules.ddmrp import render_ddmrp
 from modules.fcst_vs_vta_retail import render_fcst_vs_vta_retail
 from modules.alerta_forecast import render_alerta_forecast
+from modules.flujo_costos import render_flujo_costos
 from db.cache import cached_query as cq, clear_all as clear_query_cache, last_refresh_label, auto_refresh_if_new_day
 from utils.ui_animations import lottie_spinner, show_lottie, animated_kpi_row
 
@@ -284,6 +285,7 @@ def main_app():
             ("🔄", "Redistribucion Stock"),
             ("📊", "Ventas Forecast 2+10"),
             ("🚦", "DDMRP Reposicion"),
+            ("💸", "Flujo de Costos"),
         ],
         "ANALISIS": [
             ("📊", "Dashboard Stock"),
@@ -490,6 +492,7 @@ def main_app():
         "Forecast Diario": render_forecast_diario,
         "Resumen Compra": render_resumen_compra,
         "Plan de Compras & OTB": render_plan_compras,
+        "Flujo de Costos": render_flujo_costos,
         "InStock Historico": render_instock_historico,
         # Pasillo Infinito: pendiente validar tabla db_pos.fct.ft_venta_pasillo_infinito en Peru
         "Pasillo Infinito": None,
@@ -503,6 +506,7 @@ def main_app():
         "Venta Perdida": render_venta_perdida,
         "Ventas Forecast 2+10": render_ventas_forecast_210,
         "Fcst vs Vta Retail": render_fcst_vs_vta_retail,
+        "Flujo de Costos": render_flujo_costos,
         "Diagnostico Tablas": render_diagnostico,
     }
 
