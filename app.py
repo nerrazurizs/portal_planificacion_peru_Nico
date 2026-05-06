@@ -506,7 +506,6 @@ def main_app():
         "Venta Perdida": render_venta_perdida,
         "Ventas Forecast 2+10": render_ventas_forecast_210,
         "Fcst vs Vta Retail": render_fcst_vs_vta_retail,
-        "Flujo de Costos": render_flujo_costos,
         "Diagnostico Tablas": render_diagnostico,
     }
 

@@ -851,6 +851,7 @@ _ALL_CACHED = [
     ventas_diarias_patron, pesos_diarios, pesos_diarios_canal,
     event_boosts, event_boosts_sku,
     stock_onhand, stock_proyeccion, stock_critico_metrics, stock_higiene, instock_store_detail,
+    stock_hist_mensual, familia_modelo,
     ventas_diarias_90d, tienda_dim,
     ventas_mtd, ventas_mtd_diaria, dashboard_ventas_mtd, vta_mtd_retail, perfil_sku,
     instock_hist_tienda, instock_hist_cd,
