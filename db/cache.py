@@ -101,6 +101,8 @@ from db.queries import (
     QUERY_ALERTA_FORECAST_VENTAS,
     QUERY_ALERTA_VTA_SEMANAL,
     QUERY_VENTAS_HIST_PROY,
+    QUERY_FAMILIA_MODELO,
+    QUERY_STOCK_HIST_MENSUAL,
 )
 from utils.filters import norm_cols
 
@@ -153,6 +155,21 @@ def ventas_mes_anterior(_conn_id, _conn=None) -> pd.DataFrame:
 def ventas_hist_proyeccion(_conn_id, _conn=None) -> pd.DataFrame:
     """Monthly sales from Jan 2025 through previous month, for Proyeccion de Stock historic rows."""
     return _run(QUERY_VENTAS_HIST_PROY, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def stock_hist_mensual(_conn_id, _conn=None) -> pd.DataFrame:
+    """End-of-month total stock per SKU from Jan 2025 through previous month.
+
+    Columns: SKU_PRODUCTO, PERIODO, STOCK_FINAL_CD, STOCK_FINAL_TIENDA, STOCK_FINAL_TOTAL
+    """
+    return _run(QUERY_STOCK_HIST_MENSUAL, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def familia_modelo(_conn_id, _conn=None) -> pd.DataFrame:
+    """FAMILIA and MODELO from dt_producto for all SKUs — used to fill nulls not covered by vw_producto."""
+    return _run(QUERY_FAMILIA_MODELO, _conn)
 
 
 @st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
@@ -923,6 +940,14 @@ class cached_query:
     @staticmethod
     def ventas_hist_proyeccion(conn):
         return ventas_hist_proyeccion(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def stock_hist_mensual(conn):
+        return stock_hist_mensual(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def familia_modelo(conn):
+        return familia_modelo(cached_query._cid(conn), _conn=conn)
 
     @staticmethod
     def ventas_semanales(conn):

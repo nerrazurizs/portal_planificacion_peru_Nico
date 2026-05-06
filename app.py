@@ -461,15 +461,7 @@ def main_app():
     # ------------------------------------------------------------------
     auto_refresh_if_new_day()
 
-    # ------------------------------------------------------------------
-    # Auto-cargar ABC-XYZ-FSN (dato maestro, cacheado 24 h)
-    # ------------------------------------------------------------------
-    if conn and not st.session_state.get("abc_xyz_fsn_ready"):
-        try:
-            _ = cq.abc_xyz_fsn(conn)          # trigger cache population
-            st.session_state["abc_xyz_fsn_ready"] = True
-        except Exception:
-            pass  # silently skip — will retry next rerun
+    # abc_xyz_fsn loads on demand when the ABC-XYZ module is opened (not pre-loaded here)
 
     MODULE_DISPATCH = {
         "Inicio": None,
@@ -572,12 +564,15 @@ def main_app():
                 _data: dict = {}
                 _query_errors: dict = {}
                 with st.spinner("Consultando Snowflake..."):
-                    for _name, _fn in _loaders:
-                        try:
-                            _data[_name] = _fn()
-                        except Exception as _qe:
-                            _query_errors[_name] = str(_qe)
-                            _data[_name] = pd.DataFrame()
+                    with ThreadPoolExecutor(max_workers=len(_loaders)) as _executor:
+                        _futures = {_executor.submit(_fn): _name for _name, _fn in _loaders}
+                        for _future in as_completed(_futures):
+                            _name = _futures[_future]
+                            try:
+                                _data[_name] = _future.result()
+                            except Exception as _qe:
+                                _query_errors[_name] = str(_qe)
+                                _data[_name] = pd.DataFrame()
 
                 # Asignar siempre (queries fallidas entregan DataFrame vacío)
                 df_stock      = apply_pm_filter(_data["stock"])

@@ -676,6 +676,13 @@ def _expand_comex_to_daily(comex, maestra):
     comex["ETA_DISP"] = comex["ETA_ORIGINAL"] + pd.Timedelta(days=10)
     comex["FECHA"] = comex["ETA_DISP"].dt.normalize()
 
+    # Move past ETAs to next month (current month + 1) so they remain visible
+    _eta_today = pd.Timestamp.today().normalize()
+    _eta_next_month = _eta_today + pd.offsets.MonthBegin(1)
+    _eta_past = comex["FECHA"] < _eta_today
+    if _eta_past.any():
+        comex.loc[_eta_past, "FECHA"] = _eta_next_month
+
     # Pending quantity
     if "CANTIDAD_FINAL_CORREGIDA" in comex.columns:
         col_cant_final = "CANTIDAD_FINAL_CORREGIDA"
@@ -1020,6 +1027,10 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
         stock = cq.stock_proyeccion(conn)
         comex = cq.comex_full(conn)
         maestra = cq.maestra(conn)
+        try:
+            _fm = cq.familia_modelo(conn)
+        except Exception:
+            _fm = pd.DataFrame(columns=["SKU_PRODUCTO", "FAMILIA", "MODELO"])
         ventas_mtd = cq.ventas_mtd(conn)
         ventas_hist = cq.ventas_hist_proyeccion(conn)
         ventas_aa = cq.ventas_aa(conn)
@@ -1478,9 +1489,16 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
     # 10f. Previous month prices (additional fallback from ventas_hist)
     if not ventas_hist.empty:
         try:
-            hist_price_map = {"MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL"}
+            hist_price_map = {
+                "03": "TIENDA", "02": "MAYORISTA", "06": "ETAIL",
+                "3":  "TIENDA", "2":  "MAYORISTA", "6":  "ETAIL",
+                "MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL",
+                "TIENDA": "TIENDA", "MAYORISTA": "MAYORISTA",
+            }
             vh_price = ventas_hist.copy()
-            vh_price["CANAL_STD"] = vh_price["COD_CANAL"].map(hist_price_map).fillna("TIENDA")
+            vh_price["CANAL_STD"] = (
+                vh_price["COD_CANAL"].astype(str).str.strip().map(hist_price_map).fillna("TIENDA")
+            )
             vh_price["PRECIO_PROMEDIO"] = np.where(
                 vh_price["CANTIDAD_MES"] > 0,
                 vh_price["NETO_MES"] / vh_price["CANTIDAD_MES"],
@@ -1746,8 +1764,15 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
     if not ventas_aa.empty and "SKU_PRODUCTO" in ventas_aa.columns:
         try:
             # Map channels
-            aa_chan_map = {"MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL"}
-            ventas_aa["CANAL_STD"] = ventas_aa["COD_CANAL"].map(aa_chan_map).fillna("TIENDA")
+            aa_chan_map = {
+                "03": "TIENDA", "02": "MAYORISTA", "06": "ETAIL",
+                "3":  "TIENDA", "2":  "MAYORISTA", "6":  "ETAIL",
+                "MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL",
+                "TIENDA": "TIENDA", "MAYORISTA": "MAYORISTA",
+            }
+            ventas_aa["CANAL_STD"] = (
+                ventas_aa["COD_CANAL"].astype(str).str.strip().map(aa_chan_map).fillna("TIENDA")
+            )
             ventas_aa["PERIODO"] = pd.to_datetime(ventas_aa["PERIODO"])
             ventas_aa["MES"] = ventas_aa["PERIODO"].dt.month
 
@@ -1860,8 +1885,15 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
     if not ventas_hist.empty and "SKU_PRODUCTO" in ventas_hist.columns and "PERIODO" in ventas_hist.columns:
         try:
             ventas_hist["PERIODO"] = pd.to_datetime(ventas_hist["PERIODO"])
-            hist_mtd_map = {"MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL"}
-            ventas_hist["CANAL_STD"] = ventas_hist["COD_CANAL"].map(hist_mtd_map).fillna("TIENDA")
+            hist_mtd_map = {
+                "03": "TIENDA", "02": "MAYORISTA", "06": "ETAIL",
+                "3":  "TIENDA", "2":  "MAYORISTA", "6":  "ETAIL",
+                "MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL",
+                "TIENDA": "TIENDA", "MAYORISTA": "MAYORISTA",
+            }
+            ventas_hist["CANAL_STD"] = (
+                ventas_hist["COD_CANAL"].astype(str).str.strip().map(hist_mtd_map).fillna("TIENDA")
+            )
 
             all_hist_frames = []
             for periodo_h, vh_period in ventas_hist.groupby("PERIODO"):
@@ -2050,10 +2082,23 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
         stock = cq.stock_proyeccion(conn)
         comex = cq.comex_full(conn)
         maestra = cq.maestra(conn)
+        try:
+            _fm = cq.familia_modelo(conn)
+        except Exception:
+            _fm = pd.DataFrame(columns=["SKU_PRODUCTO", "FAMILIA", "MODELO"])
         ventas_mtd = cq.ventas_mtd(conn)
         ventas_mtd_diaria = cq.ventas_mtd_diaria(conn)
         ventas_hist = cq.ventas_hist_proyeccion(conn)
         ventas_aa = cq.ventas_aa(conn)
+        try:
+            stock_hist = cq.stock_hist_mensual(conn)
+            if not stock_hist.empty:
+                st.info(f"📦 Stock histórico cargado: {len(stock_hist):,} filas, "
+                        f"{stock_hist['SKU_PRODUCTO'].nunique():,} SKUs, "
+                        f"{stock_hist['PERIODO'].nunique()} meses")
+        except Exception as _e_sh:
+            st.warning(f"⚠️ No se pudo cargar stock histórico: {_e_sh}")
+            stock_hist = pd.DataFrame()
 
     # ── 3. Process Forecast → monthly f_piv ─────────────────────────────
     try:
@@ -2179,8 +2224,16 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
         return None
 
     # ── 6. Process MTD Sales ────────────────────────────────────────────
-    mtd_map = {"MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL"}
-    ventas_mtd["CANAL_STD"] = ventas_mtd["COD_CANAL"].map(mtd_map).fillna("TIENDA") if "COD_CANAL" in ventas_mtd.columns else "TIENDA"
+    mtd_map = {
+        "03": "TIENDA", "02": "MAYORISTA", "06": "ETAIL",
+        "3":  "TIENDA", "2":  "MAYORISTA", "6":  "ETAIL",
+        "MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL",
+        "TIENDA": "TIENDA", "MAYORISTA": "MAYORISTA",
+    }
+    ventas_mtd["CANAL_STD"] = (
+        ventas_mtd["COD_CANAL"].astype(str).str.strip().map(mtd_map).fillna("TIENDA")
+        if "COD_CANAL" in ventas_mtd.columns else "TIENDA"
+    )
     ventas_mtd["SKU_PRODUCTO"] = ventas_mtd["SKU_PRODUCTO"].astype(str).str.strip().str.upper() if "SKU_PRODUCTO" in ventas_mtd.columns else ""
 
     # ── 7. Process COMEX → daily arrivals (ETA + 10 days) ───────────────
@@ -2191,6 +2244,41 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
         eta_daily = pd.DataFrame(columns=["SKU_PRODUCTO", "FECHA", "ETA"])
 
     # ── 8. Merge maestra dimensions into f_daily ────────────────────────
+    # Fill SUBLINEA/MODELO from dt_producto (DB_DIMENSIONES) for SKUs missing them in vw_producto
+    if not _fm.empty:
+        _fm_dedup = _fm.drop_duplicates("SKU_PRODUCTO", keep="first")
+        _fm_sub_dict = _fm_dedup[_fm_dedup["FAMILIA"].notna() & (_fm_dedup["FAMILIA"].astype(str).str.strip() != "")].set_index("SKU_PRODUCTO")["FAMILIA"].to_dict()
+        _fm_mod_dict = _fm_dedup[_fm_dedup["MODELO"].notna() & (_fm_dedup["MODELO"].astype(str).str.strip() != "")].set_index("SKU_PRODUCTO")["MODELO"].to_dict()
+        if "SUBLINEA" in maestra.columns and _fm_sub_dict:
+            _mask_sub = maestra["SUBLINEA"].isna() | (maestra["SUBLINEA"].astype(str).str.strip() == "")
+            maestra.loc[_mask_sub, "SUBLINEA"] = maestra.loc[_mask_sub, "SKU_PRODUCTO"].map(_fm_sub_dict)
+        if "MODELO" in maestra.columns and _fm_mod_dict:
+            _mask_mod = maestra["MODELO"].isna() | (maestra["MODELO"].astype(str).str.strip() == "")
+            maestra.loc[_mask_mod, "MODELO"] = maestra.loc[_mask_mod, "SKU_PRODUCTO"].map(_fm_mod_dict)
+
+    # Fill remaining gaps using product hierarchy (mode within LINEA / LINEA+MARCA)
+    if all(c in maestra.columns for c in ["SUBLINEA", "LINEA"]):
+        _m_valid_sub = maestra[maestra["SUBLINEA"].notna() & (maestra["SUBLINEA"].astype(str).str.strip() != "")]
+        _sub_by_linea = _m_valid_sub.groupby("LINEA")["SUBLINEA"].agg(
+            lambda x: x.mode().iloc[0] if not x.empty else np.nan
+        )
+        _mask_sub = maestra["SUBLINEA"].isna() | (maestra["SUBLINEA"].astype(str).str.strip() == "")
+        maestra.loc[_mask_sub, "SUBLINEA"] = maestra.loc[_mask_sub, "LINEA"].map(_sub_by_linea)
+
+    if all(c in maestra.columns for c in ["MODELO", "LINEA", "MARCA"]):
+        _m_valid_mod = maestra[maestra["MODELO"].notna() & (maestra["MODELO"].astype(str).str.strip() != "")]
+        if not _m_valid_mod.empty:
+            _mod_dict = (
+                _m_valid_mod.groupby(["LINEA", "MARCA"])["MODELO"]
+                .agg(lambda x: x.mode().iloc[0] if not x.empty else np.nan)
+                .to_dict()
+            )
+            _mask_mod = maestra["MODELO"].isna() | (maestra["MODELO"].astype(str).str.strip() == "")
+            if _mask_mod.any():
+                maestra.loc[_mask_mod, "MODELO"] = maestra.loc[_mask_mod].apply(
+                    lambda r: _mod_dict.get((r["LINEA"], r["MARCA"]), np.nan), axis=1
+                )
+
     cols_maestra = ["SKU_PRODUCTO"]
     for c in ["SKU_NOM_PRODUCTO", "LINEA", "SUBLINEA", "AREA", "MARCA",
               "PROCEDENCIA", "COSTO_FOB_USD", "ULTIMO_COSTO", "FACTOR_IMPORTACION",
@@ -2432,11 +2520,86 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
         mtd_prices.columns = ["SKU_PRODUCTO"] + [f"PRECIO_MTD_{c}" for c in mtd_prices.columns[1:]]
         df_sim = df_sim.merge(mtd_prices, on="SKU_PRODUCTO", how="left")
 
+    # ── MTD Actual columns: VTA/DEMANDA/VN/APORTE/MARGEN/PRECIO por canal ──
+    # These show what has actually sold this month-to-date (same value repeated
+    # for all periods of a SKU since they are a snapshot, not per-period).
+    if not ventas_mtd.empty and "CANAL_STD" in ventas_mtd.columns:
+        try:
+            _mtd_a = ventas_mtd.copy()
+            for _mc in ["CANTIDAD_MTD", "NETO_MTD", "APORTE_MTD"]:
+                _mtd_a[_mc] = pd.to_numeric(_mtd_a.get(_mc, 0), errors="coerce").fillna(0)
+
+            # MAYORISTA in pivot → MAYOR in column names
+            _c_rn = {"TIENDA": "TIENDA", "ETAIL": "ETAIL", "MAYORISTA": "MAYOR"}
+
+            _qty_piv = (
+                _mtd_a.pivot_table(index="SKU_PRODUCTO", columns="CANAL_STD",
+                                   values="CANTIDAD_MTD", aggfunc="sum")
+                .fillna(0).reset_index()
+            )
+            _qty_piv = _qty_piv.rename(
+                columns={c: f"VTA_ACTUAL_{_c_rn.get(c, c)}" for c in _qty_piv.columns if c != "SKU_PRODUCTO"}
+            )
+
+            _neto_piv = (
+                _mtd_a.pivot_table(index="SKU_PRODUCTO", columns="CANAL_STD",
+                                   values="NETO_MTD", aggfunc="sum")
+                .fillna(0).reset_index()
+            )
+            _neto_piv = _neto_piv.rename(
+                columns={c: f"VN_ACTUAL_{_c_rn.get(c, c)}" for c in _neto_piv.columns if c != "SKU_PRODUCTO"}
+            )
+
+            _actual_df = _qty_piv.merge(_neto_piv, on="SKU_PRODUCTO", how="outer").fillna(0)
+
+            if "APORTE_MTD" in _mtd_a.columns and _mtd_a["APORTE_MTD"].abs().sum() > 0:
+                _ap_piv = (
+                    _mtd_a.pivot_table(index="SKU_PRODUCTO", columns="CANAL_STD",
+                                       values="APORTE_MTD", aggfunc="sum")
+                    .fillna(0).reset_index()
+                )
+                _ap_piv = _ap_piv.rename(
+                    columns={c: f"APORTE_ACTUAL_{_c_rn.get(c, c)}" for c in _ap_piv.columns if c != "SKU_PRODUCTO"}
+                )
+                _actual_df = _actual_df.merge(_ap_piv, on="SKU_PRODUCTO", how="outer").fillna(0)
+
+            # Ensure all 3-canal columns exist
+            for _sfx in ["TIENDA", "ETAIL", "MAYOR"]:
+                for _pfx in ["VTA_ACTUAL", "VN_ACTUAL", "APORTE_ACTUAL"]:
+                    if f"{_pfx}_{_sfx}" not in _actual_df.columns:
+                        _actual_df[f"{_pfx}_{_sfx}"] = 0.0
+
+            # DEMANDA_ACTUAL = unidades vendidas MTD por canal (igual que VTA)
+            for _sfx in ["TIENDA", "ETAIL", "MAYOR"]:
+                _actual_df[f"DEMANDA_ACTUAL_{_sfx}"] = _actual_df[f"VTA_ACTUAL_{_sfx}"]
+
+            # MARGEN_ACTUAL = aporte / neto; PRECIO_ACTUAL = neto / qty
+            for _sfx in ["TIENDA", "ETAIL", "MAYOR"]:
+                _vn  = _actual_df[f"VN_ACTUAL_{_sfx}"]
+                _qty = _actual_df[f"VTA_ACTUAL_{_sfx}"]
+                _ap  = _actual_df[f"APORTE_ACTUAL_{_sfx}"]
+                _actual_df[f"MARGEN_ACTUAL_{_sfx}"] = np.where(_vn  > 0, _ap  / _vn, 0.0)
+                _actual_df[f"PRECIO_ACTUAL_{_sfx}"] = np.where(_qty > 0, _vn  / _qty, 0.0)
+
+            df_sim = df_sim.merge(_actual_df, on="SKU_PRODUCTO", how="left")
+            for _ac in [c for c in _actual_df.columns if c != "SKU_PRODUCTO"]:
+                if _ac in df_sim.columns:
+                    df_sim[_ac] = pd.to_numeric(df_sim[_ac], errors="coerce").fillna(0)
+        except Exception as _e_actual:
+            st.warning(f"No se pudieron calcular columnas MTD actuales: {_e_actual}")
+
     if not ventas_hist.empty:
         try:
-            hist_price_map = {"MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL"}
+            hist_price_map = {
+                "03": "TIENDA", "02": "MAYORISTA", "06": "ETAIL",
+                "3":  "TIENDA", "2":  "MAYORISTA", "6":  "ETAIL",
+                "MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL",
+                "TIENDA": "TIENDA", "MAYORISTA": "MAYORISTA",
+            }
             vh_price = ventas_hist.copy()
-            vh_price["CANAL_STD"] = vh_price["COD_CANAL"].map(hist_price_map).fillna("TIENDA")
+            vh_price["CANAL_STD"] = (
+                vh_price["COD_CANAL"].astype(str).str.strip().map(hist_price_map).fillna("TIENDA")
+            )
             vh_price["PRECIO_PROMEDIO"] = np.where(
                 vh_price["CANTIDAD_MES"] > 0, vh_price["NETO_MES"] / vh_price["CANTIDAD_MES"], 0)
             hist_prices = (
@@ -2670,109 +2833,225 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
         except Exception as e:
             st.warning(f"No se pudo integrar filas HISTORICO al resultado mensual: {e}")
 
-    # ── Integrate ventas mes anterior as HISTORICO (same as monthly) ───
-    if not ventas_hist.empty and "SKU_PRODUCTO" in ventas_hist.columns:
+    # ── Integrate ventas_hist como HISTORICO multi-período (Ene 2025 → mes anterior) ──
+    if not ventas_hist.empty and "SKU_PRODUCTO" in ventas_hist.columns and "PERIODO" in ventas_hist.columns:
         try:
-            PERIODO_HISTORICO_ANT = PERIODO_ACTUAL - pd.DateOffset(months=1)
-            hist_mtd_map = {"MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL"}
+            # ── Diagnóstico: muestra valores únicos de COD_CANAL para verificar el mapeo ──
+            if "COD_CANAL" in ventas_hist.columns:
+                _raw_canales = ventas_hist["COD_CANAL"].astype(str).str.strip().value_counts()
+                st.info(
+                    f"📊 COD_CANAL únicos en ventas_hist: "
+                    + ", ".join(f"'{v}' ({n})" for v, n in _raw_canales.items())
+                )
+
+            # Peru cod_canal codes: '03'=TIENDA/MINOR, '02'=MAYORISTA, '06'=ETAIL
+            # Also support text names as fallback (Chile-style)
+            _hmap = {
+                "03": "TIENDA", "02": "MAYORISTA", "06": "ETAIL",
+                "3":  "TIENDA", "2":  "MAYORISTA", "6":  "ETAIL",
+                "MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL",
+                "TIENDA": "TIENDA", "MAYORISTA": "MAYORISTA",
+            }
             vh = ventas_hist.copy()
-            vh["CANAL_STD"] = vh["COD_CANAL"].map(hist_mtd_map).fillna("TIENDA") if "COD_CANAL" in vh.columns else "TIENDA"
-
-            h2_agg = vh.groupby("SKU_PRODUCTO").agg({"CANTIDAD_MES": "sum", "NETO_MES": "sum"}).reset_index()
-            h2_agg = h2_agg.merge(maestra[cols_maestra].drop_duplicates("SKU_PRODUCTO"), on="SKU_PRODUCTO", how="left")
-
-            h2_costo_col = "ULTIMO_COSTO" if "ULTIMO_COSTO" in h2_agg.columns else "COSTO_FOB_USD"
-            h2_agg["COSTO_UNITARIO"] = pd.to_numeric(h2_agg.get(h2_costo_col, 0), errors="coerce").fillna(0)
-
-            h2_rows = pd.DataFrame({
-                "SKU_PRODUCTO": h2_agg["SKU_PRODUCTO"],
-                "PERIODO": PERIODO_HISTORICO_ANT,
-                "TIPO_DATO": "HISTORICO",
-                "VENTA_FUL_TIENDA_UND": 0.0, "VENTA_FUL_ETAIL_UND": 0.0, "VENTA_FUL_MAYOR_UND": 0.0,
-                "VN_RES_TIENDA": 0.0, "VN_RES_ETAIL": 0.0, "VN_RES_MAYOR": 0.0,
-                "VN_RES_TOTAL": h2_agg["NETO_MES"],
-                "COSTO_UNITARIO": h2_agg["COSTO_UNITARIO"],
-            })
-            for _dim in ["SKU_NOM_PRODUCTO", "AREA", "LINEA", "SUBLINEA", "MARCA",
-                         "PROCEDENCIA", "MIX_OFICIAL", "MODELO", "PROVEEDOR", "COD_PROVEEDOR"]:
-                if _dim in h2_agg.columns:
-                    h2_rows[_dim] = h2_agg[_dim].values
-
-            # Break out by channel
-            for canal_std, col_suffix in [("TIENDA", "TIENDA"), ("ETAIL", "ETAIL"), ("MAYORISTA", "MAYOR")]:
-                canal_data = vh[vh["CANAL_STD"] == canal_std]
-                if not canal_data.empty:
-                    canal_agg = canal_data.groupby("SKU_PRODUCTO").agg(
-                        {"CANTIDAD_MES": "sum", "NETO_MES": "sum"}).reset_index()
-                    h2_rows = h2_rows.merge(
-                        canal_agg.rename(columns={
-                            "CANTIDAD_MES": f"VENTA_FUL_{col_suffix}_UND_TEMP",
-                            "NETO_MES": f"VN_RES_{col_suffix}_TEMP"}),
-                        on="SKU_PRODUCTO", how="left")
-                    h2_rows[f"VENTA_FUL_{col_suffix}_UND"] = h2_rows.get(
-                        f"VENTA_FUL_{col_suffix}_UND_TEMP", 0).fillna(0)
-                    h2_rows[f"VN_RES_{col_suffix}"] = h2_rows.get(
-                        f"VN_RES_{col_suffix}_TEMP", 0).fillna(0)
-                    h2_rows = h2_rows.drop(columns=[c for c in h2_rows.columns if "_TEMP" in c], errors="ignore")
-
-            # ── COGS, APORTE, MARGEN por canal (restricto) ──
-            for canal in ["TIENDA", "ETAIL", "MAYOR"]:
-                h2_rows[f"COGS_RES_{canal}"] = (
-                    h2_rows[f"VENTA_FUL_{canal}_UND"] * h2_rows["COSTO_UNITARIO"]
-                )
-                h2_rows[f"APORTE_RES_{canal}"] = (
-                    h2_rows[f"VN_RES_{canal}"] - h2_rows[f"COGS_RES_{canal}"]
-                )
-                h2_rows[f"MARGEN_RES_{canal}"] = np.where(
-                    h2_rows[f"VN_RES_{canal}"] > 0,
-                    h2_rows[f"APORTE_RES_{canal}"] / h2_rows[f"VN_RES_{canal}"], 0.0)
-
-            h2_rows["COGS_RES_TOTAL"] = (
-                h2_rows["COGS_RES_TIENDA"] + h2_rows["COGS_RES_ETAIL"] + h2_rows["COGS_RES_MAYOR"]
+            vh["CANAL_STD"] = (
+                vh["COD_CANAL"].astype(str).str.strip().map(_hmap).fillna("TIENDA")
+                if "COD_CANAL" in vh.columns else "TIENDA"
             )
-            h2_rows["APORTE_RES_TOTAL"] = h2_rows["VN_RES_TOTAL"] - h2_rows["COGS_RES_TOTAL"]
-            h2_rows["MARGEN_RES_TOTAL"] = np.where(
-                h2_rows["VN_RES_TOTAL"] > 0, h2_rows["APORTE_RES_TOTAL"] / h2_rows["VN_RES_TOTAL"], 0.0)
+            # Diagnóstico: muestra cómo quedó el mapeo de canales
+            _canal_dist = vh["CANAL_STD"].value_counts()
+            st.info(
+                f"🔀 Mapeo CANAL_STD resultante: "
+                + ", ".join(f"{k}={v}" for k, v in _canal_dist.items())
+            )
+            vh["PERIODO"] = pd.to_datetime(vh["PERIODO"])
+            vh["CANTIDAD_MES"] = pd.to_numeric(vh.get("CANTIDAD_MES", 0), errors="coerce").fillna(0)
+            vh["NETO_MES"] = pd.to_numeric(vh.get("NETO_MES", 0), errors="coerce").fillna(0)
 
-            # ── Precios historicos por canal (VN / Unidades) ──
+            qty_piv = (
+                vh.pivot_table(index=["SKU_PRODUCTO", "PERIODO"], columns="CANAL_STD",
+                               values="CANTIDAD_MES", aggfunc="sum").fillna(0).reset_index()
+            )
+            neto_piv = (
+                vh.pivot_table(index=["SKU_PRODUCTO", "PERIODO"], columns="CANAL_STD",
+                               values="NETO_MES", aggfunc="sum").fillna(0).reset_index()
+            )
+
+            h_rows = qty_piv.rename(columns={
+                "TIENDA": "VENTA_FUL_TIENDA_UND",
+                "ETAIL": "VENTA_FUL_ETAIL_UND",
+                "MAYORISTA": "VENTA_FUL_MAYOR_UND",
+            })
+            for _c in ["VENTA_FUL_TIENDA_UND", "VENTA_FUL_ETAIL_UND", "VENTA_FUL_MAYOR_UND"]:
+                if _c not in h_rows.columns:
+                    h_rows[_c] = 0.0
+
+            neto_piv = neto_piv.rename(columns={
+                "TIENDA": "VN_RES_TIENDA",
+                "ETAIL": "VN_RES_ETAIL",
+                "MAYORISTA": "VN_RES_MAYOR",
+            })
+            for _c in ["VN_RES_TIENDA", "VN_RES_ETAIL", "VN_RES_MAYOR"]:
+                if _c not in neto_piv.columns:
+                    neto_piv[_c] = 0.0
+
+            h_rows = h_rows.merge(
+                neto_piv[["SKU_PRODUCTO", "PERIODO", "VN_RES_TIENDA", "VN_RES_ETAIL", "VN_RES_MAYOR"]],
+                on=["SKU_PRODUCTO", "PERIODO"], how="left"
+            )
+            for _c in ["VN_RES_TIENDA", "VN_RES_ETAIL", "VN_RES_MAYOR"]:
+                h_rows[_c] = h_rows[_c].fillna(0)
+
+            h_rows["VN_RES_TOTAL"] = h_rows["VN_RES_TIENDA"] + h_rows["VN_RES_ETAIL"] + h_rows["VN_RES_MAYOR"]
+            h_rows["TIPO_DATO"] = "HISTORICO"
+            h_rows = h_rows.merge(maestra[cols_maestra].drop_duplicates("SKU_PRODUCTO"), on="SKU_PRODUCTO", how="left")
+
+            _hcosto = "ULTIMO_COSTO" if "ULTIMO_COSTO" in h_rows.columns else "COSTO_FOB_USD"
+            h_rows["COSTO_UNITARIO"] = pd.to_numeric(h_rows.get(_hcosto, 0), errors="coerce").fillna(0)
+
             for canal in ["TIENDA", "ETAIL", "MAYOR"]:
-                h2_rows[f"PRECIO_USADO_{canal}"] = np.where(
-                    h2_rows[f"VENTA_FUL_{canal}_UND"] > 0,
-                    h2_rows[f"VN_RES_{canal}"] / h2_rows[f"VENTA_FUL_{canal}_UND"], 0.0)
-                h2_rows[f"ORIGEN_PRECIO_{canal}"] = np.where(
-                    h2_rows[f"VENTA_FUL_{canal}_UND"] > 0, "HISTORICO", "SIN_PRECIO")
+                h_rows[f"COGS_RES_{canal}"] = h_rows[f"VENTA_FUL_{canal}_UND"] * h_rows["COSTO_UNITARIO"]
+                h_rows[f"APORTE_RES_{canal}"] = h_rows[f"VN_RES_{canal}"] - h_rows[f"COGS_RES_{canal}"]
+                h_rows[f"MARGEN_RES_{canal}"] = np.where(
+                    h_rows[f"VN_RES_{canal}"] > 0,
+                    h_rows[f"APORTE_RES_{canal}"] / h_rows[f"VN_RES_{canal}"], 0.0)
+            h_rows["COGS_RES_TOTAL"] = h_rows["COGS_RES_TIENDA"] + h_rows["COGS_RES_ETAIL"] + h_rows["COGS_RES_MAYOR"]
+            h_rows["APORTE_RES_TOTAL"] = h_rows["VN_RES_TOTAL"] - h_rows["COGS_RES_TOTAL"]
+            h_rows["MARGEN_RES_TOTAL"] = np.where(
+                h_rows["VN_RES_TOTAL"] > 0, h_rows["APORTE_RES_TOTAL"] / h_rows["VN_RES_TOTAL"], 0.0)
 
-            # ── Irrestricto = restricto para HISTORICO (demanda = venta real) ──
             for canal in ["TIENDA", "ETAIL", "MAYOR"]:
-                h2_rows[f"VN_IRR_{canal}"] = h2_rows[f"VN_RES_{canal}"]
-                h2_rows[f"COGS_IRR_{canal}"] = h2_rows[f"COGS_RES_{canal}"]
-                h2_rows[f"APORTE_IRR_{canal}"] = h2_rows[f"APORTE_RES_{canal}"]
-                h2_rows[f"MARGEN_IRR_{canal}"] = h2_rows[f"MARGEN_RES_{canal}"]
-            h2_rows["VN_IRR_TOTAL"] = h2_rows["VN_RES_TOTAL"]
-            h2_rows["COGS_IRR_TOTAL"] = h2_rows["COGS_RES_TOTAL"]
-            h2_rows["APORTE_IRR_TOTAL"] = h2_rows["APORTE_RES_TOTAL"]
-            h2_rows["MARGEN_IRR_TOTAL"] = h2_rows["MARGEN_RES_TOTAL"]
+                h_rows[f"PRECIO_USADO_{canal}"] = np.where(
+                    h_rows[f"VENTA_FUL_{canal}_UND"] > 0,
+                    h_rows[f"VN_RES_{canal}"] / h_rows[f"VENTA_FUL_{canal}_UND"], 0.0)
+                h_rows[f"ORIGEN_PRECIO_{canal}"] = np.where(
+                    h_rows[f"VENTA_FUL_{canal}_UND"] > 0, "HISTORICO", "SIN_PRECIO")
 
-            # ── DIAS_MES para HISTORICO ──
-            h2_rows["DIAS_MES"] = pd.to_datetime(PERIODO_HISTORICO_ANT).days_in_month
+            for canal in ["TIENDA", "ETAIL", "MAYOR"]:
+                h_rows[f"VN_IRR_{canal}"] = h_rows[f"VN_RES_{canal}"]
+                h_rows[f"COGS_IRR_{canal}"] = h_rows[f"COGS_RES_{canal}"]
+                h_rows[f"APORTE_IRR_{canal}"] = h_rows[f"APORTE_RES_{canal}"]
+                h_rows[f"MARGEN_IRR_{canal}"] = h_rows[f"MARGEN_RES_{canal}"]
+            h_rows["VN_IRR_TOTAL"] = h_rows["VN_RES_TOTAL"]
+            h_rows["COGS_IRR_TOTAL"] = h_rows["COGS_RES_TOTAL"]
+            h_rows["APORTE_IRR_TOTAL"] = h_rows["APORTE_RES_TOTAL"]
+            h_rows["MARGEN_IRR_TOTAL"] = h_rows["MARGEN_RES_TOTAL"]
 
-            h2_rows["PERIODO"] = pd.to_datetime(h2_rows["PERIODO"])
-            h2_rows["PERIODO_ANO"] = h2_rows["PERIODO"].dt.year
-            h2_rows["PERIODO_MES"] = h2_rows["PERIODO"].dt.month
-            h2_rows["ID_MES"] = h2_rows["PERIODO"].dt.strftime("%Y%m")
+            # ── Demand = actual fulfilled sales (no lost sales for completed months) ──
+            h_rows["DEMANDA_SIM_TIENDA"] = h_rows["VENTA_FUL_TIENDA_UND"]
+            h_rows["DEMANDA_SIM_ETAIL"]  = h_rows["VENTA_FUL_ETAIL_UND"]
+            h_rows["DEMANDA_SIM_MAYOR"]  = h_rows["VENTA_FUL_MAYOR_UND"]
+            h_rows["DEMANDA_TOTAL"] = (
+                h_rows["VENTA_FUL_TIENDA_UND"] + h_rows["VENTA_FUL_ETAIL_UND"] + h_rows["VENTA_FUL_MAYOR_UND"]
+            )
 
-            for c in df_sim.columns:
-                if c not in h2_rows.columns:
-                    if pd.api.types.is_datetime64_any_dtype(df_sim[c]):
-                        h2_rows[c] = pd.NaT
-                    elif pd.api.types.is_numeric_dtype(df_sim[c]):
-                        h2_rows[c] = 0.0
+            h_rows["DIAS_MES"]    = h_rows["PERIODO"].dt.days_in_month
+            h_rows["PERIODO_ANO"] = h_rows["PERIODO"].dt.year
+            h_rows["PERIODO_MES"] = h_rows["PERIODO"].dt.month
+            h_rows["ID_MES"]      = h_rows["PERIODO"].dt.strftime("%Y%m")
+
+            # ── Stock histórico: STOCK_FINAL y STOCK_INICIAL de ht_in_stock ──
+            if not stock_hist.empty and "SKU_PRODUCTO" in stock_hist.columns:
+                _sh = stock_hist.copy()
+                _sh["PERIODO"] = pd.to_datetime(_sh["PERIODO"])
+                for _c in ["STOCK_FINAL_CD", "STOCK_FINAL_TIENDA", "STOCK_FINAL_TOTAL"]:
+                    if _c not in _sh.columns:
+                        _sh[_c] = 0.0
                     else:
-                        h2_rows[c] = np.nan
-            h2_rows = h2_rows[[c for c in df_sim.columns if c in h2_rows.columns]].copy()
-            df_sim = pd.concat([h2_rows, df_sim], ignore_index=True)
+                        _sh[_c] = pd.to_numeric(_sh[_c], errors="coerce").fillna(0)
+
+                # STOCK_INICIAL del mes M = STOCK_FINAL del mes M-1 (shift)
+                _sh_sorted = _sh.sort_values(["SKU_PRODUCTO", "PERIODO"])
+                _sh_sorted["STOCK_INICIAL_CD"] = (
+                    _sh_sorted.groupby("SKU_PRODUCTO")["STOCK_FINAL_CD"].shift(1).fillna(0)
+                )
+                _sh_sorted["STOCK_INICIAL_TIENDA"] = (
+                    _sh_sorted.groupby("SKU_PRODUCTO")["STOCK_FINAL_TIENDA"].shift(1).fillna(0)
+                )
+                _sh_sorted["STOCK_INICIAL_TOTAL"] = (
+                    _sh_sorted["STOCK_INICIAL_CD"] + _sh_sorted["STOCK_INICIAL_TIENDA"]
+                )
+                _sh_sorted["STOCK_FINAL_TOTAL_H"] = _sh_sorted["STOCK_FINAL_TOTAL"]
+
+                h_rows = h_rows.merge(
+                    _sh_sorted[["SKU_PRODUCTO", "PERIODO",
+                                "STOCK_FINAL_CD", "STOCK_FINAL_TIENDA", "STOCK_FINAL_TOTAL_H",
+                                "STOCK_INICIAL_CD", "STOCK_INICIAL_TIENDA", "STOCK_INICIAL_TOTAL"]],
+                    on=["SKU_PRODUCTO", "PERIODO"], how="left"
+                )
+                for _col_sf, _col_dest in [
+                    ("STOCK_FINAL_CD",     "STOCK_FINAL_CD"),
+                    ("STOCK_FINAL_TIENDA", "STOCK_FINAL_TIENDA"),
+                    ("STOCK_FINAL_TOTAL_H","STOCK_FINAL_TOTAL"),
+                    ("STOCK_INICIAL_CD",   "STOCK_INICIAL_CD"),
+                    ("STOCK_INICIAL_TIENDA","STOCK_INICIAL_TIENDA"),
+                    ("STOCK_INICIAL_TOTAL","STOCK_INICIAL_TOTAL"),
+                ]:
+                    if _col_sf in h_rows.columns:
+                        h_rows[_col_dest] = h_rows[_col_sf].fillna(0)
+                        if _col_sf != _col_dest:
+                            h_rows.drop(columns=[_col_sf], inplace=True, errors="ignore")
+
+                # STOCK_DISPONIBLE = STOCK_INICIAL_TOTAL (no hay compras pendientes en meses cerrados)
+                h_rows["STOCK_DISPONIBLE"] = h_rows.get("STOCK_INICIAL_TOTAL", 0)
+
+            # ── InStock = 100% for completed historical months ──
+            h_rows["INSTOCK_CD"]          = 1.0
+            h_rows["INSTOCK_TIENDA"]      = 1.0
+            h_rows["INSTOCK_CIA"]         = 1.0
+            h_rows["INSTOCK_DIAS_CD"]     = h_rows["DIAS_MES"]
+            h_rows["INSTOCK_DIAS_TIENDA"] = h_rows["DIAS_MES"]
+            h_rows["INSTOCK_DIAS_CIA"]    = h_rows["DIAS_MES"]
+
+            # ── Cost origin ──
+            h_rows["ORIGEN_COSTO"]   = np.where(h_rows["COSTO_UNITARIO"] > 0, "HISTORICO", "SIN_COSTO")
+            h_rows["FLAG_SIN_COSTO"] = h_rows["COSTO_UNITARIO"] <= 0
+
+            # ── Price proxy: realized avg price → MTD and MES_ANT columns ──
+            h_rows["PRECIO_MTD_TIENDA"]     = h_rows["PRECIO_USADO_TIENDA"]
+            h_rows["PRECIO_MES_ANT_TIENDA"] = h_rows["PRECIO_USADO_TIENDA"]
+
+            # ── Indicator / text columns ──
+            h_rows["WARNING_FC_REAL"]     = ""
+            h_rows["QUIEBRE_POR_PERFIL"]  = False
+            h_rows["TIENE_QUIEBRE"]       = False
+            h_rows["MES_QUIEBRE"]         = 0
+            h_rows["MESES_HASTA_QUIEBRE"] = 0
+            h_rows["DEMANDA_AVG_3M"]      = 0.0
+            h_rows["LOST_SALES_TIENDA"]   = 0.0
+            h_rows["LOST_SALES_CD"]       = 0.0
+            h_rows["LOST_SALES_ETAIL"]    = 0.0
+            h_rows["LOST_SALES_MAYOR"]    = 0.0
+            h_rows["LOST_SALES_TOTAL"]    = 0.0
+
+            # ── Dimension fallback: fill from projected rows for same SKU ──
+            _dim_hist_cols = ["SKU_NOM_PRODUCTO", "AREA", "LINEA", "SUBLINEA",
+                              "MARCA", "MODELO", "PROCEDENCIA", "MIX_OFICIAL"]
+            _avail_dim = [c for c in _dim_hist_cols if c in df_sim.columns and c in h_rows.columns]
+            if _avail_dim:
+                _sim_dim_src = (
+                    df_sim[df_sim["AREA"].notna()]
+                    .drop_duplicates("SKU_PRODUCTO")
+                    [["SKU_PRODUCTO"] + _avail_dim]
+                )
+                for _dc in _avail_dim:
+                    _bad = h_rows[_dc].isna() | (h_rows[_dc].astype(str).str.strip().isin(["", "nan", "None"]))
+                    if _bad.any():
+                        _dc_map = _sim_dim_src.set_index("SKU_PRODUCTO")[_dc].to_dict()
+                        h_rows.loc[_bad, _dc] = h_rows.loc[_bad, "SKU_PRODUCTO"].map(_dc_map)
+
+            # ── Schema alignment: fill remaining df_sim columns ──
+            for c in df_sim.columns:
+                if c not in h_rows.columns:
+                    if pd.api.types.is_datetime64_any_dtype(df_sim[c]):
+                        h_rows[c] = pd.NaT
+                    elif pd.api.types.is_numeric_dtype(df_sim[c]):
+                        h_rows[c] = 0.0
+                    else:
+                        h_rows[c] = ""
+            h_rows = h_rows[[c for c in df_sim.columns if c in h_rows.columns]].copy()
+            df_sim = pd.concat([h_rows, df_sim], ignore_index=True)
         except Exception as e:
-            st.warning(f"No se pudo integrar ventas mes anterior como HISTORICO: {e}")
+            st.warning(f"No se pudo integrar ventas históricas como HISTORICO: {e}")
 
     # ============================================================
     # PRIOR YEAR (Ano Anterior) DATA — YoY comparison
@@ -2781,8 +3060,15 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
     if not ventas_aa.empty and "SKU_PRODUCTO" in ventas_aa.columns:
         try:
             # Map channels
-            aa_chan_map = {"MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL"}
-            ventas_aa["CANAL_STD"] = ventas_aa["COD_CANAL"].map(aa_chan_map).fillna("TIENDA")
+            aa_chan_map = {
+                "03": "TIENDA", "02": "MAYORISTA", "06": "ETAIL",
+                "3":  "TIENDA", "2":  "MAYORISTA", "6":  "ETAIL",
+                "MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL",
+                "TIENDA": "TIENDA", "MAYORISTA": "MAYORISTA",
+            }
+            ventas_aa["CANAL_STD"] = (
+                ventas_aa["COD_CANAL"].astype(str).str.strip().map(aa_chan_map).fillna("TIENDA")
+            )
             ventas_aa["PERIODO"] = pd.to_datetime(ventas_aa["PERIODO"])
             ventas_aa["MES"] = ventas_aa["PERIODO"].dt.month
 
@@ -2883,6 +3169,110 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
     # Re-sort after adding HISTORICO + AA
     df_sim = df_sim.sort_values(["SKU_PRODUCTO", "PERIODO"]).reset_index(drop=True)
     df_sim_daily = df_sim_daily.sort_values(["SKU_PRODUCTO", "FECHA"]).reset_index(drop=True)
+
+    # ── Llenar SUBLINEA y MODELO en df_sim (3 capas) ──────────────────────
+    # Capa 1: lookup directo por SKU en dt_producto (DB_DIMENSIONES)
+    if not _fm.empty:
+        _fm_dedup = _fm.drop_duplicates("SKU_PRODUCTO", keep="first")
+        _fm_sub_d = (
+            _fm_dedup[_fm_dedup["FAMILIA"].notna() & (_fm_dedup["FAMILIA"].astype(str).str.strip() != "")]
+            .set_index("SKU_PRODUCTO")["FAMILIA"].to_dict()
+        )
+        _fm_mod_d = (
+            _fm_dedup[_fm_dedup["MODELO"].notna() & (_fm_dedup["MODELO"].astype(str).str.strip() != "")]
+            .set_index("SKU_PRODUCTO")["MODELO"].to_dict()
+        )
+        if "SUBLINEA" in df_sim.columns and _fm_sub_d:
+            _m = df_sim["SUBLINEA"].isna() | (df_sim["SUBLINEA"].astype(str).str.strip() == "")
+            df_sim.loc[_m, "SUBLINEA"] = df_sim.loc[_m, "SKU_PRODUCTO"].map(_fm_sub_d)
+        if "MODELO" in df_sim.columns and _fm_mod_d:
+            _m = df_sim["MODELO"].isna() | (df_sim["MODELO"].astype(str).str.strip() == "")
+            df_sim.loc[_m, "MODELO"] = df_sim.loc[_m, "SKU_PRODUCTO"].map(_fm_mod_d)
+
+    # Capa 2: propagar desde cualquier fila del mismo SKU que ya tenga valor
+    for _col in ["SUBLINEA", "MODELO"]:
+        if _col not in df_sim.columns:
+            continue
+        _sku_val = (
+            df_sim[df_sim[_col].notna() & (df_sim[_col].astype(str).str.strip() != "")]
+            .groupby("SKU_PRODUCTO")[_col]
+            .agg(lambda x: x.mode().iloc[0] if not x.empty else np.nan)
+        )
+        _mask = df_sim[_col].isna() | (df_sim[_col].astype(str).str.strip() == "")
+        df_sim.loc[_mask, _col] = df_sim.loc[_mask, "SKU_PRODUCTO"].map(_sku_val)
+
+    # Capa 3: llenar por jerarquía (moda dentro de LINEA para SUBLINEA, moda dentro de LINEA+MARCA para MODELO)
+    if "SUBLINEA" in df_sim.columns and "LINEA" in df_sim.columns:
+        _valid = df_sim[df_sim["SUBLINEA"].notna() & (df_sim["SUBLINEA"].astype(str).str.strip() != "")]
+        _sub_by_linea = _valid.groupby("LINEA")["SUBLINEA"].agg(
+            lambda x: x.mode().iloc[0] if not x.empty else np.nan
+        )
+        _mask = df_sim["SUBLINEA"].isna() | (df_sim["SUBLINEA"].astype(str).str.strip() == "")
+        df_sim.loc[_mask, "SUBLINEA"] = df_sim.loc[_mask, "LINEA"].map(_sub_by_linea)
+
+    if "MODELO" in df_sim.columns and "LINEA" in df_sim.columns and "MARCA" in df_sim.columns:
+        _valid = df_sim[df_sim["MODELO"].notna() & (df_sim["MODELO"].astype(str).str.strip() != "")]
+        if not _valid.empty:
+            _mod_dict = (
+                _valid.groupby(["LINEA", "MARCA"])["MODELO"]
+                .agg(lambda x: x.mode().iloc[0] if not x.empty else np.nan)
+                .to_dict()
+            )
+            _mask = df_sim["MODELO"].isna() | (df_sim["MODELO"].astype(str).str.strip() == "")
+            if _mask.any():
+                df_sim.loc[_mask, "MODELO"] = df_sim.loc[_mask].apply(
+                    lambda r: _mod_dict.get((r["LINEA"], r["MARCA"]), np.nan), axis=1
+                )
+
+    # Apply column ordering — matches ejemplo.xlsx reference
+    _cols_order = [
+        "TIPO_DATO", "SKU_PRODUCTO", "SKU_NOM_PRODUCTO",
+        "AREA", "LINEA", "SUBLINEA", "MARCA", "MODELO", "PROCEDENCIA", "MIX_OFICIAL",
+        "ID_MES",
+        "STOCK_INICIAL_TOTAL", "STOCK_FINAL_TOTAL", "STOCK_DISPONIBLE",
+        "FORECAST_COMPRA", "ETA",
+        "DEMANDA_SIM_TIENDA", "DEMANDA_SIM_ETAIL", "DEMANDA_SIM_MAYOR", "DEMANDA_TOTAL",
+        # ── MTD Actual (venta real acumulada del mes en curso) ──
+        "VTA_ACTUAL_TIENDA", "VTA_ACTUAL_ETAIL", "VTA_ACTUAL_MAYOR",
+        "DEMANDA_ACTUAL_TIENDA", "DEMANDA_ACTUAL_ETAIL", "DEMANDA_ACTUAL_MAYOR",
+        "VN_ACTUAL_TIENDA", "VN_ACTUAL_ETAIL", "VN_ACTUAL_MAYOR",
+        "APORTE_ACTUAL_TIENDA", "APORTE_ACTUAL_ETAIL", "APORTE_ACTUAL_MAYOR",
+        "MARGEN_ACTUAL_TIENDA", "MARGEN_ACTUAL_ETAIL", "MARGEN_ACTUAL_MAYOR",
+        "PRECIO_ACTUAL_TIENDA", "PRECIO_ACTUAL_ETAIL", "PRECIO_ACTUAL_MAYOR",
+        "PERFIL_TIENDAS",
+        "PRECIO_USADO_TIENDA",
+        "LOST_SALES_TIENDA", "LOST_SALES_CD", "LOST_SALES_ETAIL", "LOST_SALES_MAYOR",
+        "NECESIDAD_TIENDA", "CARGA_REAL", "DEFICIT_PERFIL_UND",
+        "INSTOCK_CD", "INSTOCK_TIENDA", "INSTOCK_CIA",
+        "INSTOCK_DIAS_CD", "INSTOCK_DIAS_TIENDA", "INSTOCK_DIAS_CIA", "DIAS_MES",
+        "PERIODO_ANO", "PERIODO_MES",
+        "ORIGEN_COSTO", "FLAG_SIN_COSTO",
+        "PRECIO_MTD_TIENDA", "PRECIO_MES_ANT_TIENDA", "ORIGEN_PRECIO_TIENDA",
+        "PRECIO_USADO_ETAIL", "ORIGEN_PRECIO_ETAIL",
+        "PRECIO_USADO_MAYOR", "ORIGEN_PRECIO_MAYOR",
+        "VN_RES_TIENDA", "VN_RES_ETAIL", "VN_RES_MAYOR", "VN_RES_TOTAL",
+        "COGS_RES_TIENDA", "APORTE_RES_TIENDA", "MARGEN_RES_TIENDA",
+        "COGS_RES_ETAIL", "APORTE_RES_ETAIL", "MARGEN_RES_ETAIL",
+        "COGS_RES_MAYOR", "APORTE_RES_MAYOR", "MARGEN_RES_MAYOR",
+        "COGS_RES_TOTAL", "APORTE_RES_TOTAL", "MARGEN_RES_TOTAL",
+        "VN_IRR_TIENDA", "COGS_IRR_TIENDA", "APORTE_IRR_TIENDA", "MARGEN_IRR_TIENDA",
+        "VN_IRR_ETAIL", "COGS_IRR_ETAIL", "APORTE_IRR_ETAIL", "MARGEN_IRR_ETAIL",
+        "VN_IRR_MAYOR", "COGS_IRR_MAYOR", "APORTE_IRR_MAYOR", "MARGEN_IRR_MAYOR",
+        "VN_IRR_TOTAL", "COGS_IRR_TOTAL", "APORTE_IRR_TOTAL", "MARGEN_IRR_TOTAL",
+        "LOST_SALES_TOTAL",
+        "VN_LOST_TIENDA", "COGS_LOST_TIENDA", "APORTE_LOST_TIENDA", "MARGEN_LOST_TIENDA",
+        "VN_LOST_ETAIL", "COGS_LOST_ETAIL", "APORTE_LOST_ETAIL", "MARGEN_LOST_ETAIL",
+        "VN_LOST_MAYOR", "COGS_LOST_MAYOR", "APORTE_LOST_MAYOR", "MARGEN_LOST_MAYOR",
+        "VN_LOST_TOTAL", "COGS_LOST_TOTAL", "APORTE_LOST_TOTAL", "MARGEN_LOST_TOTAL",
+        "QUIEBRE_POR_PERFIL", "DEMANDA_AVG_3M", "TIENE_QUIEBRE",
+        "MES_QUIEBRE", "MESES_HASTA_QUIEBRE",
+        "WARNING_FC_REAL",
+        "AA_UND_TIENDA", "AA_VN_TIENDA", "AA_APORTE_TIENDA",
+        "AA_VN_TOTAL", "AA_UND_TOTAL", "AA_APORTE_TOTAL",
+    ]
+    _final = [c for c in _cols_order if c in df_sim.columns]
+    _extra = [c for c in df_sim.columns if c not in _final]
+    df_sim = df_sim[_final + _extra]
 
     return df_sim, df_sim_daily
 
@@ -3221,57 +3611,44 @@ _FMT_MONEY = '$#,##0'
 _FMT_PCT = '0.0%'
 
 
-def _style_summary_ws(ws, df, money_cols=None, pct_cols=None, number_cols=None):
-    """Apply professional formatting to a summary worksheet.
+def _style_summary_xl(wb_xl, ws_xl, df, money_cols=None, pct_cols=None, number_cols=None):
+    """Apply xlsxwriter formatting to a summary sheet — O(cols), no cell iteration.
 
-    Args:
-        ws: openpyxl Worksheet (data already written by pandas).
-        df: The DataFrame that was written (to know dtypes/columns).
-        money_cols: Column names that should use money format.
-        pct_cols: Column names that should use percentage format.
-        number_cols: Column names that should use integer number format.
+    Returns tuple (fmt_money, fmt_pct, fmt_num) for re-use in total rows.
     """
-    money_cols = set(money_cols or [])
-    pct_cols = set(pct_cols or [])
+    money_cols  = set(money_cols  or [])
+    pct_cols    = set(pct_cols    or [])
     number_cols = set(number_cols or [])
 
+    fmt_hdr   = wb_xl.add_format({'bold': True, 'font_size': 10,
+                                   'bg_color': '#1F4E79', 'font_color': '#FFFFFF',
+                                   'text_wrap': True, 'valign': 'vcenter',
+                                   'align': 'center', 'border': 1})
+    fmt_money = wb_xl.add_format({'num_format': '$#,##0', 'font_size': 10})
+    fmt_pct   = wb_xl.add_format({'num_format': '0.0%',   'font_size': 10})
+    fmt_num   = wb_xl.add_format({'num_format': '#,##0',  'font_size': 10})
+    fmt_def   = wb_xl.add_format({'font_size': 10})
+
     col_names = list(df.columns)
+    for col_idx, col_name in enumerate(col_names):
+        ws_xl.write(0, col_idx, col_name, fmt_hdr)
 
-    # Style header row
-    for col_idx in range(1, len(col_names) + 1):
-        cell = ws.cell(row=1, column=col_idx)
-        cell.font = _HDR_FONT
-        cell.fill = _HDR_FILL
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        fmt = (fmt_money if col_name in money_cols
+               else fmt_pct   if col_name in pct_cols
+               else fmt_num   if col_name in number_cols
+               else fmt_def)
 
-    # Auto-width and number formatting
-    for col_idx, col_name in enumerate(col_names, start=1):
-        col_letter = get_column_letter(col_idx)
+        try:
+            max_len = max(len(str(col_name)),
+                          int(df[col_name].astype(str).str.len().max() or 0) if len(df) > 0 else 0)
+        except Exception:
+            max_len = len(str(col_name))
+        ws_xl.set_column(col_idx, col_idx, min(max_len + 2, 25), fmt)
 
-        # Determine format
-        fmt = None
-        if col_name in money_cols:
-            fmt = _FMT_MONEY
-        elif col_name in pct_cols:
-            fmt = _FMT_PCT
-        elif col_name in number_cols:
-            fmt = _FMT_NUMBER
-
-        max_len = len(str(col_name)) + 2
-        for row_idx in range(2, ws.max_row + 1):
-            cell = ws.cell(row=row_idx, column=col_idx)
-            if fmt:
-                cell.number_format = fmt
-            cell_len = len(str(cell.value or ""))
-            if cell_len > max_len:
-                max_len = cell_len
-
-        ws.column_dimensions[col_letter].width = min(max_len + 2, 25)
-
-    # Freeze first row
-    ws.sheet_view.showGridLines = True
-    ws.freeze_panes = "A2"
-    ws.auto_filter.ref = ws.dimensions
+    ws_xl.autofilter(0, 0, 0, len(col_names) - 1)
+    ws_xl.freeze_panes(1, 0)
+    ws_xl.set_default_row(12)
+    return fmt_money, fmt_pct, fmt_num
 
 
 def _build_resumen_sku(df: pd.DataFrame) -> pd.DataFrame:
@@ -3495,21 +3872,21 @@ def _build_pivot_mensual(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _write_summary_sheets(writer, df: pd.DataFrame):
-    """Write all summary sheets to the Excel writer.
+    """Write summary sheets using xlsxwriter — O(cols) formatting, no cell iteration.
 
     Adds three sheets:
         - 'Resumen SKU': yearly aggregation per SKU
         - 'Resumen Area-Linea': yearly aggregation per Area × Linea
         - 'Pivot VN Mensual': cross-tab VN by month
     """
-    wb = writer.book
+    wb = writer.book  # xlsxwriter Workbook
 
     # --- Sheet 1: Resumen por SKU ---
     try:
         df_sku = _build_resumen_sku(df)
         if not df_sku.empty:
             df_sku.to_excel(writer, sheet_name="Resumen SKU", index=False)
-            ws = wb["Resumen SKU"]
+            ws = writer.sheets["Resumen SKU"]
 
             money_cols = {c for c in df_sku.columns
                           if any(c.startswith(p) for p in ["VN_", "COGS_", "APORTE_"])}
@@ -3518,8 +3895,7 @@ def _write_summary_sheets(writer, df: pd.DataFrame):
             number_cols = {c for c in df_sku.columns
                            if any(c.startswith(p) for p in
                                   ["VENTA_FUL_", "DEMANDA_", "LOST_SALES_"])}
-
-            _style_summary_ws(ws, df_sku, money_cols, pct_cols, number_cols)
+            _style_summary_xl(wb, ws, df_sku, money_cols, pct_cols, number_cols)
     except Exception:
         pass  # Defensive: never fail the entire export for a summary sheet
 
@@ -3528,7 +3904,7 @@ def _write_summary_sheets(writer, df: pd.DataFrame):
         df_al = _build_resumen_area_linea(df)
         if not df_al.empty:
             df_al.to_excel(writer, sheet_name="Resumen Area-Linea", index=False)
-            ws = wb["Resumen Area-Linea"]
+            ws = writer.sheets["Resumen Area-Linea"]
 
             money_cols = {c for c in df_al.columns
                           if any(c.startswith(p) for p in ["VN_", "COGS_", "APORTE_"])}
@@ -3538,42 +3914,40 @@ def _write_summary_sheets(writer, df: pd.DataFrame):
                            if c.startswith("VENTA_FUL_") or c.startswith("DEMANDA_")
                            or c.startswith("LOST_SALES_") or c == "CANT_SKUS"}
 
-            _style_summary_ws(ws, df_al, money_cols, pct_cols, number_cols)
+            fmt_money_al, fmt_pct_al, fmt_num_al = _style_summary_xl(
+                wb, ws, df_al, money_cols, pct_cols, number_cols
+            )
 
-            # Add a grand total row
-            last_row = ws.max_row + 1
-            ws.cell(row=last_row, column=1, value="TOTAL").font = _TOTAL_FONT
-            ws.cell(row=last_row, column=1).fill = _TOTAL_FILL
-            for col_idx in range(2, len(df_al.columns) + 1):
-                col_name = df_al.columns[col_idx - 1]
-                cell = ws.cell(row=last_row, column=col_idx)
-                cell.fill = _TOTAL_FILL
-                cell.font = _TOTAL_FONT
-
-                if col_name.startswith("MARGEN_"):
-                    # Recalculate margin from VN and APORTE columns
-                    vn_col_name = col_name.replace("MARGEN_RES_", "VN_RES_")
-                    if vn_col_name in df_al.columns:
-                        total_vn = df_al[vn_col_name].sum()
-                        ap_col_name = col_name.replace("MARGEN_RES_", "APORTE_RES_")
-                        total_ap = df_al[ap_col_name].sum() if ap_col_name in df_al.columns else 0
-                        cell.value = total_ap / total_vn if total_vn > 0 else 0
-                        cell.number_format = _FMT_PCT
+            # Grand total row (computed in pandas — no cell iteration needed)
+            total_ri = len(df_al) + 1  # 0-indexed: header=0, data=1..n, total at n+1
+            fmt_t_lbl   = wb.add_format({'bold': True, 'bg_color': '#D6E4F0', 'font_size': 10})
+            fmt_t_money = wb.add_format({'bold': True, 'bg_color': '#D6E4F0',
+                                          'num_format': '$#,##0', 'font_size': 10})
+            fmt_t_pct   = wb.add_format({'bold': True, 'bg_color': '#D6E4F0',
+                                          'num_format': '0.0%', 'font_size': 10})
+            fmt_t_num   = wb.add_format({'bold': True, 'bg_color': '#D6E4F0',
+                                          'num_format': '#,##0', 'font_size': 10})
+            for col_idx, col_name in enumerate(df_al.columns):
+                if col_idx == 0:
+                    ws.write(total_ri, col_idx, "TOTAL", fmt_t_lbl)
+                elif col_name.startswith("MARGEN_"):
+                    vn_c = col_name.replace("MARGEN_RES_", "VN_RES_")
+                    ap_c = col_name.replace("MARGEN_RES_", "APORTE_RES_")
+                    tvn = df_al[vn_c].sum() if vn_c in df_al.columns else 0
+                    tap = df_al[ap_c].sum() if ap_c in df_al.columns else 0
+                    ws.write(total_ri, col_idx, tap / tvn if tvn > 0 else 0, fmt_t_pct)
                 elif col_name.startswith("INSTOCK_POND_"):
-                    # Weighted avg: total dias / total dias_mes
                     tag = col_name.replace("INSTOCK_POND_", "")
-                    dias_col = f"INSTOCK_DIAS_{tag}"
-                    if dias_col in df_al.columns and "DIAS_MES" in df_al.columns:
-                        total_dias = df_al[dias_col].sum()
-                        total_dm = df_al["DIAS_MES"].sum()
-                        cell.value = total_dias / total_dm if total_dm > 0 else 0
-                    cell.number_format = _FMT_PCT
+                    dc = f"INSTOCK_DIAS_{tag}"
+                    tdias = df_al[dc].sum() if dc in df_al.columns else 0
+                    tdm   = df_al["DIAS_MES"].sum() if "DIAS_MES" in df_al.columns else 1
+                    ws.write(total_ri, col_idx, tdias / tdm if tdm > 0 else 0, fmt_t_pct)
                 elif col_name in money_cols:
-                    cell.value = df_al[col_name].sum()
-                    cell.number_format = _FMT_MONEY
+                    ws.write(total_ri, col_idx, df_al[col_name].sum(), fmt_t_money)
                 elif col_name in number_cols:
-                    cell.value = df_al[col_name].sum()
-                    cell.number_format = _FMT_NUMBER
+                    ws.write(total_ri, col_idx, df_al[col_name].sum(), fmt_t_num)
+                else:
+                    ws.write(total_ri, col_idx, "", fmt_t_lbl)
     except Exception:
         pass
 
@@ -3582,49 +3956,40 @@ def _write_summary_sheets(writer, df: pd.DataFrame):
         df_piv = _build_pivot_mensual(df)
         if not df_piv.empty:
             df_piv.to_excel(writer, sheet_name="Pivot VN Mensual", index=False)
-            ws = wb["Pivot VN Mensual"]
+            ws = writer.sheets["Pivot VN Mensual"]
 
-            # Style header
-            for col_idx in range(1, len(df_piv.columns) + 1):
-                cell = ws.cell(row=1, column=col_idx)
-                col_name = df_piv.columns[col_idx - 1]
-                if col_name in ("AREA", "LINEA"):
-                    cell.font = _HDR_FONT
-                    cell.fill = _HDR_FILL
-                elif col_name == "TOTAL_ANO":
-                    cell.font = _HDR_FONT
-                    cell.fill = PatternFill(start_color="C65911", end_color="C65911", fill_type="solid")
-                else:
-                    cell.font = _HDR_FONT
-                    cell.fill = _HDR_FILL_ALT
-                cell.alignment = Alignment(horizontal="center", vertical="center")
+            fmt_hdr_dim   = wb.add_format({'bold': True, 'font_size': 10, 'bg_color': '#1F4E79',
+                                            'font_color': '#FFFFFF', 'align': 'center'})
+            fmt_hdr_mon   = wb.add_format({'bold': True, 'font_size': 10, 'bg_color': '#2E75B6',
+                                            'font_color': '#FFFFFF', 'align': 'center'})
+            fmt_hdr_tot   = wb.add_format({'bold': True, 'font_size': 10, 'bg_color': '#C65911',
+                                            'font_color': '#FFFFFF', 'align': 'center'})
+            fmt_money_piv = wb.add_format({'num_format': '$#,##0', 'font_size': 10})
+            fmt_def_piv   = wb.add_format({'font_size': 10})
 
-            # Format data cells
-            for col_idx in range(3, len(df_piv.columns) + 1):
-                col_letter = get_column_letter(col_idx)
-                for row_idx in range(2, ws.max_row + 1):
-                    ws.cell(row=row_idx, column=col_idx).number_format = _FMT_MONEY
+            col_names_piv = list(df_piv.columns)
+            for ci, cn in enumerate(col_names_piv):
+                hfmt = (fmt_hdr_tot if cn == "TOTAL_ANO"
+                        else fmt_hdr_dim if cn in ("AREA", "LINEA")
+                        else fmt_hdr_mon)
+                ws.write(0, ci, cn, hfmt)
+                max_len = max(len(str(cn)), 12)
+                ws.set_column(ci, ci, min(max_len + 2, 20),
+                               fmt_def_piv if ci < 2 else fmt_money_piv)
 
-            # Auto-width
-            for col_idx in range(1, len(df_piv.columns) + 1):
-                col_letter = get_column_letter(col_idx)
-                max_len = len(str(df_piv.columns[col_idx - 1])) + 2
-                ws.column_dimensions[col_letter].width = max(max_len, 12)
+            ws.freeze_panes(1, 2)
+            ws.autofilter(0, 0, 0, len(col_names_piv) - 1)
+            ws.set_default_row(12)
 
-            ws.freeze_panes = "C2"
-            ws.auto_filter.ref = ws.dimensions
-
-            # Add grand total row
-            last_row = ws.max_row + 1
-            ws.cell(row=last_row, column=1, value="TOTAL").font = _TOTAL_FONT
-            ws.cell(row=last_row, column=1).fill = _TOTAL_FILL
-            ws.cell(row=last_row, column=2).fill = _TOTAL_FILL
-            for col_idx in range(3, len(df_piv.columns) + 1):
-                cell = ws.cell(row=last_row, column=col_idx)
-                cell.value = df_piv.iloc[:, col_idx - 1].sum()
-                cell.number_format = _FMT_MONEY
-                cell.font = _TOTAL_FONT
-                cell.fill = _TOTAL_FILL
+            # Grand total row
+            fmt_tot_piv = wb.add_format({'bold': True, 'bg_color': '#D6E4F0',
+                                          'num_format': '$#,##0', 'font_size': 10})
+            fmt_tot_lbl = wb.add_format({'bold': True, 'bg_color': '#D6E4F0', 'font_size': 10})
+            total_ri_piv = len(df_piv) + 1
+            ws.write(total_ri_piv, 0, "TOTAL", fmt_tot_lbl)
+            ws.write(total_ri_piv, 1, "", fmt_tot_lbl)
+            for ci in range(2, len(col_names_piv)):
+                ws.write(total_ri_piv, ci, df_piv.iloc[:, ci].sum(), fmt_tot_piv)
     except Exception:
         pass
 
@@ -6087,6 +6452,8 @@ def render_proyeccion(conn):
     if files_ready:
         if st.button("Generar Proyeccion", type="primary"):
             try:
+                # Limpiar caché de Snowflake para que stock_hist se re-ejecute con la query corregida
+                st.cache_data.clear()
                 # Guardar archivos nuevos a disco para reutilización futura
                 _current_user = get_current_user()
                 if _current_user and not use_saved:
@@ -6106,7 +6473,10 @@ def render_proyeccion(conn):
                         st.session_state["df_proy_daily"] = df_proy_daily
                         st.session_state["df_proy_ready"] = True
                         st.session_state["sim_mode_used"] = "diaria"
-                        st.session_state.pop("proy_excel_buffer", None)
+                        # Limpiar TODOS los caches de Excel (evita mostrar datos viejos)
+                        for _k in list(st.session_state.keys()):
+                            if _k.startswith("proy_excel_"):
+                                del st.session_state[_k]
                         # Persistir resultado en disco (parquet)
                         save_projection_results(df_proy_monthly, df_proy_daily, sim_mode="diaria")
                         st.toast("Proyeccion Diaria Generada Exitosamente")
@@ -6119,7 +6489,10 @@ def render_proyeccion(conn):
                         st.session_state.pop("df_proy_daily", None)
                         st.session_state["df_proy_ready"] = True
                         st.session_state["sim_mode_used"] = "mensual"
-                        st.session_state.pop("proy_excel_buffer", None)
+                        # Limpiar TODOS los caches de Excel
+                        for _k in list(st.session_state.keys()):
+                            if _k.startswith("proy_excel_"):
+                                del st.session_state[_k]
                         # Persistir resultado en disco (parquet)
                         save_projection_results(df_proy, sim_mode="mensual")
                         st.toast("Proyeccion Mensual Generada Exitosamente")
@@ -6286,29 +6659,100 @@ def render_proyeccion(conn):
         _render_instock_dashboard(df_proy, conn)
 
         st.markdown("### Detalle (Primeras 50 filas)")
-        st.dataframe(df_proy.head(50), use_container_width=True)
+        _areas_disponibles = sorted([str(a) for a in df_proy["AREA"].dropna().unique() if str(a).strip()]) if "AREA" in df_proy.columns else []
+        _default_areas = [a for a in ["Bebe", "Jugueteria", "Tiempo libre", "Vestuario"] if a in _areas_disponibles]
+        _sel_areas = st.multiselect(
+            "Filtrar por Área",
+            options=_areas_disponibles,
+            default=_default_areas,
+            key="detalle_area_filter",
+        )
+        _df_detalle = df_proy[df_proy["AREA"].isin(_sel_areas)] if _sel_areas and "AREA" in df_proy.columns else df_proy
+        st.dataframe(_df_detalle.head(50), use_container_width=True)
 
-        # Download with README + Summary sheets (cached to avoid rebuild on rerun)
-        if "proy_excel_buffer" not in st.session_state:
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                df_proy.to_excel(writer, sheet_name="DATA", index=False)
+        # ── Excel con README + hojas resumen (xlsxwriter: O(cols), sin iteración por celda) ──
+        _cache_key = f"proy_excel_{'_'.join(sorted(_sel_areas))}_{len(_df_detalle)}"
+        if _cache_key not in st.session_state:
+            _buf = io.BytesIO()
+            with pd.ExcelWriter(_buf, engine="xlsxwriter") as _wrtr:
+                _wb = _wrtr.book
 
-                # Summary sheets (Resumen SKU, Resumen Area-Linea, Pivot VN)
-                _write_summary_sheets(writer, df_proy)
+                # ── README (primera hoja) ──────────────────────────────────
+                _ws_rm = _wb.add_worksheet("README")
+                _fmt_rm_hdr = _wb.add_format({'bold': True, 'font_color': '#FFFFFF',
+                                               'bg_color': '#366092', 'font_size': 10,
+                                               'border': 1})
+                _fmt_rm_def = _wb.add_format({'font_size': 10, 'text_wrap': True})
+                for _ri, _rd in enumerate(README_DATA):
+                    for _ci, _rv in enumerate(_rd):
+                        _ws_rm.write(_ri, _ci, _rv,
+                                     _fmt_rm_hdr if _ri == 0 else _fmt_rm_def)
+                _ws_rm.set_column(0, 0, 22)
+                _ws_rm.set_column(1, 1, 30)
+                _ws_rm.set_column(2, 2, 85)
+                _ws_rm.set_default_row(13)
 
-                wb = writer.book
+                # ── DATA sheet: write_column para garantizar font 8 en TODAS las celdas ──
+                _ws_d = _wb.add_worksheet("DATA")
 
-                # README sheet — move to first position
-                ws = wb.create_sheet("README", 0)
-                for row_idx, row_data in enumerate(README_DATA, start=1):
-                    for col_idx, value in enumerate(row_data, start=1):
-                        cell = ws.cell(row=row_idx, column=col_idx, value=value)
-                        if row_idx == 1:
-                            cell.font = Font(color="FFFFFF", bold=True)
-                            cell.fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+                _fmt_hdr_d = _wb.add_format({'bold': True, 'font_size': 8,
+                                              'bg_color': '#366092', 'font_color': '#FFFFFF',
+                                              'valign': 'vcenter', 'border': 1})
+                _fmt_num_d = _wb.add_format({'font_size': 8, 'num_format': '#,##0.00'})
+                _fmt_pct_d = _wb.add_format({'font_size': 8, 'num_format': '0.00%'})
+                _fmt_def_d = _wb.add_format({'font_size': 8})
 
-            st.session_state["proy_excel_buffer"] = buf.getvalue()
+                # Detecta formato por nombre de columna (robusto ante cambios de orden)
+                def _col_fmt_detect(col_name):
+                    cn = col_name.upper()
+                    if "MARGEN_" in cn:
+                        return _fmt_pct_d
+                    if cn == "ETA" or any(k in cn for k in (
+                        "STOCK_", "FORECAST", "DEMANDA_", "VTA_", "VN_",
+                        "COGS_", "APORTE_", "PRECIO_", "LOST_", "PERFIL_",
+                        "NECESIDAD", "CARGA_", "DEFICIT_", "INSTOCK_",
+                        "DIAS_MES", "PERIODO_ANO", "PERIODO_MES",
+                        "AA_UND", "AA_VN", "AA_APORTE", "MOI_", "DEMANDA_AVG",
+                        "MESES_HASTA",
+                    )):
+                        return _fmt_num_d
+                    return _fmt_def_d
 
-        buffer = io.BytesIO(st.session_state["proy_excel_buffer"])
-        download_buttons(df_proy, "proyeccion_stock_simulada", excel_buffer=buffer)
+                # Preparar datos: convertir tipos para escritura segura
+                _df_w = _df_detalle.copy()
+                for _wc in _df_w.columns:
+                    if pd.api.types.is_datetime64_any_dtype(_df_w[_wc]):
+                        _df_w[_wc] = _df_w[_wc].dt.strftime('%Y-%m-%d').fillna('')
+                    elif pd.api.types.is_bool_dtype(_df_w[_wc]):
+                        _df_w[_wc] = _df_w[_wc].astype(int)
+                    elif pd.api.types.is_numeric_dtype(_df_w[_wc]):
+                        _df_w[_wc] = _df_w[_wc].fillna(0)
+                    else:
+                        _df_w[_wc] = _df_w[_wc].fillna('').astype(str)
+
+                _cols_d = list(_df_w.columns)
+
+                # Calcular anchos sobre todo el DataFrame (vectorizado, rápido)
+                _str_lens = _df_w.astype(str).apply(lambda s: s.str.len().max()).fillna(0).astype(int)
+
+                for _ci, _cn in enumerate(_cols_d):
+                    # Cabecera coloreada
+                    _ws_d.write(0, _ci, _cn, _fmt_hdr_d)
+                    # Ancho basado en todo el contenido
+                    _w = min(max(len(_cn), int(_str_lens[_cn])) + 2, 40)
+                    _ws_d.set_column(_ci, _ci, _w)
+                    # Datos con formato explícito → garantiza font_size 8 en cada celda
+                    _fmt_d = _col_fmt_detect(_cn)
+                    _ws_d.write_column(1, _ci, _df_w[_cn].tolist(), _fmt_d)
+
+                _ws_d.set_default_row(11)     # altura proporcional a font 8
+                _ws_d.freeze_panes(1, 0)
+                _ws_d.autofilter(0, 0, 0, len(_cols_d) - 1)
+
+                # ── Hojas resumen (también xlsxwriter) ────────────────────
+                _write_summary_sheets(_wrtr, _df_detalle)
+
+            st.session_state[_cache_key] = _buf.getvalue()
+
+        _buffer = io.BytesIO(st.session_state[_cache_key])
+        download_buttons(_df_detalle, "proyeccion_stock_simulada", excel_buffer=_buffer)

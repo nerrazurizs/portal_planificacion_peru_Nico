@@ -289,6 +289,18 @@ select p.*
 from {_PROD} p
 """
 
+QUERY_FAMILIA_MODELO = """
+select
+    cod_producto as sku_producto,
+    familia,
+    modelo
+from db_dimensiones.dim.dt_producto
+qualify row_number() over (
+    partition by cod_producto
+    order by familia nulls last, modelo nulls last
+) = 1
+"""
+
 # -- Dashboard ejecutivo (queries livianas) --
 
 QUERY_DASHBOARD_VENTAS_MTD = f"""
@@ -552,9 +564,10 @@ QUERY_VENTAS_MTD = f"""
 select
     a.cod_canal,
     a.sku_producto,
-    sum(a.cantidad) as cantidad_mtd,
-    sum(a.neto)     as neto_mtd,
-    sum(a.neto) / nullif(sum(a.cantidad), 0) as precio_prom_mtd
+    sum(a.cantidad)                                  as cantidad_mtd,
+    sum(a.neto)                                      as neto_mtd,
+    sum(a.aporte)                                    as aporte_mtd,
+    sum(a.neto) / nullif(sum(a.cantidad), 0)         as precio_prom_mtd
 from {_VCM} a
 where a.cantidad > 0
   and a.fecha >= date_trunc('month', current_date())
@@ -606,6 +619,52 @@ from {_VCM} a
 where a.fecha >= '2025-01-01'
   and a.fecha <  date_trunc('month', current_date())
 group by 1,2,3
+"""
+
+# Stock histórico mensual: último snapshot disponible de cada mes (cierre de mes)
+# Retorna stock_final_cd, stock_final_tienda, stock_final_total por SKU × mes
+# STOCK_INICIAL del mes M = STOCK_FINAL del mes M-1 (se calcula en pandas con shift)
+QUERY_STOCK_HIST_MENSUAL = f"""
+with monthly_last as (
+    -- Última fecha con stock válido por SKU × mes (excluyendo bodegas de merma/siniestros)
+    select
+        a.sku_producto,
+        date_trunc('month', a.fecha) as periodo,
+        max(a.fecha)                 as ultima_fecha
+    from db_supply.hst.ht_in_stock a
+    where a.fecha >= '2025-01-01'
+      and a.fecha <  date_trunc('month', current_date())
+      {_CD_EXCL_CLAUSE}
+    group by 1, 2
+),
+daily_stock as (
+    -- Stock total por SKU × fecha, separado en CD vs Tienda
+    select
+        a.sku_producto,
+        date_trunc('month', a.fecha) as periodo,
+        a.fecha,
+        sum(case when coalesce(b.canal_de_distribucion, 'TIENDA') = 'CD'
+                 then a.stock_unidades else 0 end) as stock_cd,
+        sum(case when coalesce(b.canal_de_distribucion, 'TIENDA') != 'CD'
+                 then a.stock_unidades else 0 end) as stock_tienda
+    from db_supply.hst.ht_in_stock a
+    left join {_SUCURSAL} b on a.cod_bodega = b.id_sucursal
+    where a.fecha >= '2025-01-01'
+      and a.fecha <  date_trunc('month', current_date())
+      {_CD_EXCL_CLAUSE}
+    group by 1, 2, 3
+)
+select
+    ds.sku_producto,
+    ds.periodo,
+    ds.stock_cd                      as stock_final_cd,
+    ds.stock_tienda                  as stock_final_tienda,
+    ds.stock_cd + ds.stock_tienda    as stock_final_total
+from daily_stock ds
+inner join monthly_last ml
+    on  ds.sku_producto = ml.sku_producto
+    and ds.periodo      = ml.periodo
+    and ds.fecha        = ml.ultima_fecha
 """
 
 # Ventas Ano Anterior completo
