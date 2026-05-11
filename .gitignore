@@ -28,6 +28,10 @@ frontend/node_modules/
 !data/inputs/precios.xlsx
 !data/inputs/metadata.json
 
+# Flujo de Costos — archivos default compartidos (visibles para todos los usuarios)
+!data/inputs/budget_default.xlsx
+!data/inputs/factor_override.xlsx
+
 # Projection results cache (large files)
 data/inputs/*.parquet
 # Excepción: proy_result.parquet se necesita en GitHub Actions para alertas email

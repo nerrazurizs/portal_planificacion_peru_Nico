@@ -301,14 +301,27 @@ def _compute_transitos(df_pos: pd.DataFrame, factor_ovr: dict) -> pd.DataFrame:
 
 def _compute_compras_pry(factor_ovr: dict) -> pd.DataFrame:
     EMPTY = pd.DataFrame(columns=["PERIODO", "AREA", "LINEA", "COMPRA_PRY_SOLES"])
-    tc    = st.session_state.get("fc_tc_pen", _TC_PEN_DEFAULT)
+    tc      = st.session_state.get("fc_tc_pen", _TC_PEN_DEFAULT)
     parquet = _DATA_DIR / "proy_result.parquet"
-    if not parquet.exists():
-        return EMPTY
-    try:
-        df = norm_cols(pd.read_parquet(parquet))
-    except Exception as e:
-        st.warning(f"Error leyendo proy_result.parquet: {e}")
+
+    # 1️⃣ Intentar parquet guardado en disco
+    if parquet.exists():
+        try:
+            df = norm_cols(pd.read_parquet(parquet))
+        except Exception as e:
+            st.warning(f"Error leyendo proy_result.parquet: {e}")
+            df = pd.DataFrame()
+    else:
+        df = pd.DataFrame()
+
+    # 2️⃣ Fallback: resultado de Proyección en sesión actual
+    if df.empty and "df_proy" in st.session_state:
+        df_ss = st.session_state["df_proy"]
+        if isinstance(df_ss, pd.DataFrame) and not df_ss.empty:
+            df = norm_cols(df_ss.copy())
+
+    # 3️⃣ Sin datos → aviso accionable
+    if df.empty:
         return EMPTY
 
     if "FORECAST_COMPRA" not in df.columns or "PERIODO" not in df.columns:
@@ -390,13 +403,23 @@ def _render_diagnostico_compras(factor_ovr: dict, df_pos_raw: pd.DataFrame):
         st.markdown("### 📦 Compras Proyectadas (proy_result.parquet)")
 
         parquet = _DATA_DIR / "proy_result.parquet"
-        if not parquet.exists():
-            st.warning("proy_result.parquet no encontrado en data/inputs/"); return
-
-        try:
-            raw = norm_cols(pd.read_parquet(parquet))
-        except Exception as e:
-            st.error(f"Error leyendo parquet: {e}"); return
+        raw = pd.DataFrame()
+        if parquet.exists():
+            try:
+                raw = norm_cols(pd.read_parquet(parquet))
+            except Exception as e:
+                st.error(f"Error leyendo parquet: {e}"); return
+        elif "df_proy" in st.session_state:
+            df_ss = st.session_state["df_proy"]
+            if isinstance(df_ss, pd.DataFrame) and not df_ss.empty:
+                raw = norm_cols(df_ss.copy())
+                st.info("ℹ️ Usando proyección de la sesión actual (parquet no encontrado en disco).")
+        if raw.empty:
+            st.warning(
+                "Sin datos de Compras Proyectadas. "
+                "Ve a **Proyección de Stock**, carga los archivos y presiona **Procesar**."
+            )
+            return
 
         for c in ("AREA", "LINEA"):
             if c not in raw.columns: raw[c] = f"SIN {c}"
@@ -1335,7 +1358,13 @@ def render_flujo_costos(conn):
     df_cp = _compute_compras_pry(factor_ovr)
 
     if not (_DATA_DIR / "proy_result.parquet").exists():
-        st.warning("⚠️ proy_result.parquet no encontrado — *Compras Pry S/.* estará vacía.")
+        if "df_proy" in st.session_state:
+            st.info("ℹ️ Usando proyección de la sesión actual para *Compras Pry S/.* (parquet no encontrado en disco).")
+        else:
+            st.warning(
+                "⚠️ Sin datos de *Compras Pry S/.* — Ve a **Proyección de Stock**, "
+                "carga los archivos y presiona **Procesar** para generarlos."
+            )
 
     # ── Budget + Forecast override ────────────────────────────────────────────
     df_budget = _load_budget_df()
