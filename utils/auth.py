@@ -62,6 +62,7 @@ PLANNER_MODULES = [
     "DDMRP Reposicion",
     "Alerta Forecast",
     "Fcst vs Vta Retail",
+    "Analisis Venta",
 ]
 
 # Modules that only jefe+ can access (everything else is also available)

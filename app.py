@@ -52,6 +52,7 @@ from modules.ddmrp import render_ddmrp
 from modules.fcst_vs_vta_retail import render_fcst_vs_vta_retail
 from modules.alerta_forecast import render_alerta_forecast
 from modules.flujo_costos import render_flujo_costos
+from modules.analisis_venta import render_analisis_venta
 from db.cache import cached_query as cq, clear_all as clear_query_cache, last_refresh_label, auto_refresh_if_new_day
 from utils.ui_animations import lottie_spinner, show_lottie, animated_kpi_row
 
@@ -302,6 +303,7 @@ def main_app():
             ("🛒", "Canasta Productos"),
             ("📐", "Capacidad Volumetrica"),
             ("📉", "Venta Perdida"),
+            ("📊", "Analisis Venta"),
         ],
         "OPERACION Y ALERTAS": [
             ("🗼", "Torre Control S&OP"),
@@ -504,6 +506,7 @@ def main_app():
         # Operaciones Supply: tablas ft_pedidotransferencia y ft_picking no existen en Peru
         "Operaciones Supply": None,
         "Venta Perdida": render_venta_perdida,
+        "Analisis Venta": render_analisis_venta,
         "Ventas Forecast 2+10": render_ventas_forecast_210,
         "Fcst vs Vta Retail": render_fcst_vs_vta_retail,
         "Diagnostico Tablas": render_diagnostico,
