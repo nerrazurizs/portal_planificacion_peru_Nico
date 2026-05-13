@@ -63,6 +63,7 @@ PLANNER_MODULES = [
     "Alerta Forecast",
     "Fcst vs Vta Retail",
     "Analisis Venta",
+    "Agotamiento",
 ]
 
 # Modules that only jefe+ can access (everything else is also available)
@@ -80,6 +81,7 @@ JEFE_EXTRA_MODULES = [
     "Alertas Email",
     "Capacidad Volumetrica",
     "Flujo de Costos",
+    "Analisis Contenedor",
 ]
 
 ALL_MODULES = PLANNER_MODULES + JEFE_EXTRA_MODULES

@@ -1770,11 +1770,15 @@ def render_venta_perdida(conn):
         f_sublinea = c2.multiselect("Sublinea", opts_sublinea)
         f_marca = c3.multiselect("Marca", opts_marca)
         f_proveedor = c3.multiselect("Proveedor", opts_proveedor)
-        f_status = c3.multiselect(
-            "Status Producto",
-            ["ESTABLECIDO", "NUEVO", "SIN VENTAS"],
-            help="Filtra por antigüedad: ESTABLECIDO=ventas antes del "
-                 "periodo, NUEVO=1era venta en el periodo, SIN VENTAS=nunca vendido",
+
+        # Row 3: Status filter — dedicated full-width row
+        cs1, cs2 = st.columns([1, 2])
+        f_status = cs1.multiselect(
+            "Status del Producto",
+            ["NUEVO", "ESTABLECIDO", "SIN VENTAS"],
+            help="NUEVO = primera venta dentro del periodo  |  "
+                 "ESTABLECIDO = ya tenia ventas antes del periodo  |  "
+                 "SIN VENTAS = SKU sin historial de ventas",
         )
 
         # Show demand window info per month
@@ -3067,6 +3071,17 @@ def render_venta_perdida(conn):
 
     # ── Tab Detalle Calculo ──
     with tab_detalle:
+        # Status filter — always visible at top of tab
+        _det_status = st.multiselect(
+            "Filtrar Status del Producto",
+            ["NUEVO", "ESTABLECIDO", "SIN VENTAS"],
+            default=[],
+            key="vp_det_status_inline",
+            help="NUEVO = primera venta dentro del periodo  |  "
+                 "ESTABLECIDO = ya tenia ventas antes del periodo  |  "
+                 "SIN VENTAS = SKU sin historial de ventas",
+        )
+
         if df_detail.empty:
             st.warning(
                 "No hay datos de detalle para mostrar. "
@@ -3085,6 +3100,9 @@ def render_venta_perdida(conn):
                 df_detail, f_sku, f_area, f_linea,
                 f_sublinea, f_marca, f_proveedor, f_status,
             )
+            # Apply inline status filter
+            if _det_status and "PRODUCTO_STATUS" in df_det.columns:
+                df_det = df_det[df_det["PRODUCTO_STATUS"].isin(_det_status)]
 
             # Summary KPIs for the detail
             n_rows = len(df_det)
@@ -3142,6 +3160,7 @@ def render_venta_perdida(conn):
 
             # ── Daily detail table — SKU × Sucursal × Dia ──
             st.html(_hdr("📋 Detalle Diario — SKU × Sucursal × Dia"))
+
             st.caption(
                 f"Cada fila es un dia especifico × SKU × tienda. "
                 f"Total: **{len(df_det):,}** registros. "

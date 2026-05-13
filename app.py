@@ -40,6 +40,7 @@ from modules.pasillo_infinito import render_pasillo_infinito
 from modules.canasta import render_canasta
 from modules.redistribucion import render_redistribucion
 from modules.analisis_transitos import render_analisis_transitos
+from modules.analisis_agotamiento import render_analisis_agotamiento
 from modules.capacidad_volumetrica import render_capacidad_volumetrica
 from modules.operaciones_supply import render_operaciones_supply
 from modules.venta_perdida import render_venta_perdida
@@ -53,6 +54,7 @@ from modules.fcst_vs_vta_retail import render_fcst_vs_vta_retail
 from modules.alerta_forecast import render_alerta_forecast
 from modules.flujo_costos import render_flujo_costos
 from modules.analisis_venta import render_analisis_venta
+from modules.analisis_contenedor import render_analisis_contenedor
 from db.cache import cached_query as cq, clear_all as clear_query_cache, last_refresh_label, auto_refresh_if_new_day
 from utils.ui_animations import lottie_spinner, show_lottie, animated_kpi_row
 
@@ -304,6 +306,7 @@ def main_app():
             ("📐", "Capacidad Volumetrica"),
             ("📉", "Venta Perdida"),
             ("📊", "Analisis Venta"),
+            ("📦", "Agotamiento"),
         ],
         "OPERACION Y ALERTAS": [
             ("🗼", "Torre Control S&OP"),
@@ -315,6 +318,7 @@ def main_app():
             ("📧", "Alertas Email"),
             ("🏭", "Operaciones Supply"),
             ("📊", "Fcst vs Vta Retail"),
+            ("📦", "Analisis Contenedor"),
         ],
     }
 
@@ -501,6 +505,7 @@ def main_app():
         "Canasta Productos": render_canasta,
         "Alertas Email": render_alertas_email,
         "Analisis Transitos": render_analisis_transitos,
+        "Agotamiento": render_analisis_agotamiento,
         "Redistribucion Stock": render_redistribucion,
         "Capacidad Volumetrica": render_capacidad_volumetrica,
         # Operaciones Supply: tablas ft_pedidotransferencia y ft_picking no existen en Peru
@@ -509,6 +514,7 @@ def main_app():
         "Analisis Venta": render_analisis_venta,
         "Ventas Forecast 2+10": render_ventas_forecast_210,
         "Fcst vs Vta Retail": render_fcst_vs_vta_retail,
+        "Analisis Contenedor": render_analisis_contenedor,
         "Diagnostico Tablas": render_diagnostico,
     }
 

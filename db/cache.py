@@ -36,6 +36,9 @@ import pandas as pd
 import streamlit as st
 
 from db.queries import (
+    QUERY_CONTENEDOR_STOCK,
+    QUERY_CONTENEDOR_DIMS,
+    QUERY_CONTENEDOR_VENTAS_12M,
     QUERY_COMEX_FULL,
     QUERY_DASHBOARD_COMEX,
     QUERY_DASHBOARD_VENTAS_MTD,
@@ -103,6 +106,7 @@ from db.queries import (
     QUERY_VENTAS_HIST_PROY,
     QUERY_FAMILIA_MODELO,
     QUERY_STOCK_HIST_MENSUAL,
+    QUERY_AGOTAMIENTO,
 )
 from utils.filters import norm_cols
 
@@ -624,6 +628,14 @@ def leadtimes(_conn_id, _conn=None) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def agotamiento(_conn_id, _conn=None) -> pd.DataFrame:
+    """Agotamiento: último ingreso CD + qty recibida + stock actual + ventas desde ingreso.
+    Lead Time se une en el módulo via cq.leadtimes(). Cached 24h.
+    """
+    return _run(QUERY_AGOTAMIENTO, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
 def syncro_config(_conn_id, _conn=None) -> pd.DataFrame:
     """SKU × Store profile: MIN_INV_REQUERIDO, MAX_REPO, CD_ORIGEN. Cached 24h."""
     return _run(QUERY_SYNCRO_CONFIG, _conn)
@@ -840,11 +852,34 @@ def unified_transit(_conn_id, _conn=None) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Analisis Contenedor (24 h)
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def contenedor_stock(_conn_id, _conn=None) -> pd.DataFrame:
+    """Stock por bodega (bodegas + almacen contenedor) para Analisis Contenedor."""
+    return _run(QUERY_CONTENEDOR_STOCK, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def contenedor_dims(_conn_id, _conn=None) -> pd.DataFrame:
+    """M3 y Und x Pallet desde DB_DIMENSIONES.ODS.OT_PRODUCTO_UNIMAR."""
+    return _run(QUERY_CONTENEDOR_DIMS, _conn)
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def contenedor_ventas_12m(_conn_id, _conn=None) -> pd.DataFrame:
+    """Ventas mensuales ultimos 12 meses por SKU — para calculo MOI en Analisis Contenedor."""
+    return _run(QUERY_CONTENEDOR_VENTAS_12M, _conn)
+
+
+# ---------------------------------------------------------------------------
 # Cache management
 # ---------------------------------------------------------------------------
 
 # Registry of all cached functions for batch clearing
 _ALL_CACHED = [
+    contenedor_stock, contenedor_dims, contenedor_ventas_12m,
     maestra, ventas_aa, ventas_mes_anterior, ventas_hist_proyeccion, ventas_semanales,
     ventas_historicas, ventas_ytd, ventas_ytd_aa,
     ventas_mensual_precio, ventas_semanal_tendencia,
@@ -859,6 +894,7 @@ _ALL_CACHED = [
     abc_xyz_fsn,
     comex_full, dashboard_comex,
     leadtimes,
+    agotamiento,
     syncro_config, transito_sucursales, ventas_90d_sucursal,
     supply_pedidos_transfer, supply_picking, supply_stock_actual,
     supply_bultos, supply_despachos_fedex,
@@ -1115,6 +1151,10 @@ class cached_query:
     def leadtimes(conn):
         return leadtimes(cached_query._cid(conn), _conn=conn)
 
+    @staticmethod
+    def agotamiento(conn):
+        return agotamiento(cached_query._cid(conn), _conn=conn)
+
     # -- Redistribucion (24h) --
     @staticmethod
     def syncro_config(conn):
@@ -1203,6 +1243,19 @@ class cached_query:
     @staticmethod
     def ddmrp_dias_con_stock(conn):
         return ddmrp_dias_con_stock(cached_query._cid(conn), _conn=conn)
+
+    # -- Analisis Contenedor (24h) --
+    @staticmethod
+    def contenedor_stock(conn):
+        return contenedor_stock(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def contenedor_dims(conn):
+        return contenedor_dims(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def contenedor_ventas_12m(conn):
+        return contenedor_ventas_12m(cached_query._cid(conn), _conn=conn)
 
     # -- Alerta Forecast (diario) --
     @staticmethod

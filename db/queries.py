@@ -965,6 +965,77 @@ SELECT id_sucursal, descripcion_sucursal, canal_de_distribucion as canal
 FROM {_SUCURSAL}
 """
 
+# Agotamiento: SKUs maestra + último ingreso CD + qty recibida + stock actual + ventas desde ingreso
+# Lead Time se une en Python (via cq.leadtimes) para manejar columnas variables de syncro
+QUERY_AGOTAMIENTO = f"""
+WITH
+ult_ing AS (
+    SELECT
+        c.sku_producto,
+        MAX(c.fecha_recepcion_en_cd) AS fecha_ult_ing_cd
+    FROM {_COMPRAS} c
+    WHERE c.fecha_recepcion_en_cd IS NOT NULL
+      AND COALESCE(c.cantidad_carpeta_recepcionada, 0) > 0
+    GROUP BY c.sku_producto
+),
+qty_ult_ing AS (
+    SELECT
+        c.sku_producto,
+        u.fecha_ult_ing_cd,
+        SUM(COALESCE(c.cantidad_carpeta_recepcionada, 0)) AS qty_recibida
+    FROM {_COMPRAS} c
+    INNER JOIN ult_ing u
+        ON  c.sku_producto          = u.sku_producto
+        AND c.fecha_recepcion_en_cd = u.fecha_ult_ing_cd
+    GROUP BY c.sku_producto, u.fecha_ult_ing_cd
+),
+stock_hoy AS (
+    SELECT
+        a.sku_producto,
+        SUM(a.stock_unidades) AS stock_actual_total
+    FROM db_supply.hst.ht_in_stock a
+    WHERE a.fecha = (
+        SELECT MAX(fecha) FROM db_supply.hst.ht_in_stock WHERE fecha < CURRENT_DATE()
+    )
+    {_CD_EXCL_CLAUSE}
+    GROUP BY a.sku_producto
+),
+vtas_desde_ing AS (
+    SELECT
+        v.sku_producto,
+        SUM(v.cantidad) AS venta_unidades
+    FROM {_VCM} v
+    INNER JOIN qty_ult_ing q ON v.sku_producto = q.sku_producto
+    WHERE v.fecha >= q.fecha_ult_ing_cd
+      AND COALESCE(v.flg_eliminado, 0) = 0
+    GROUP BY v.sku_producto
+)
+SELECT
+    p.sku_producto,
+    p.nom_producto                                              AS descripcion,
+    p.area,
+    p.linea,
+    p.sublinea                                                  AS familia,
+    p.marca,
+    p.procedencia,
+    p.mix_oficial,
+    q.fecha_ult_ing_cd                                          AS fecha_ult_ingreso_cd,
+    DATEDIFF('day', q.fecha_ult_ing_cd, CURRENT_DATE())         AS dias,
+    COALESCE(q.qty_recibida, 0)                                 AS cant_recibida_ult_ing,
+    COALESCE(s.stock_actual_total, 0)                           AS stock_actual_total,
+    COALESCE(vd.venta_unidades, 0)                              AS venta_unidades,
+    COALESCE(vd.venta_unidades, 0)
+        / NULLIF(q.qty_recibida, 0)                             AS pct_avance,
+    p.pvp,
+    p.ultimo_costo
+FROM {_PROD} p
+LEFT JOIN qty_ult_ing    q  ON TRIM(p.sku_producto) = TRIM(q.sku_producto)
+LEFT JOIN stock_hoy      s  ON TRIM(p.sku_producto) = TRIM(s.sku_producto)
+LEFT JOIN vtas_desde_ing vd ON TRIM(p.sku_producto) = TRIM(vd.sku_producto)
+WHERE TRIM(COALESCE(p.area, '')) != ''
+ORDER BY p.area, p.linea, p.sku_producto
+"""
+
 # Mirror monthly sales by sucursal + canal
 QUERY_MIRROR_HIST_MONTHLY = f"""
 SELECT
@@ -2672,6 +2743,64 @@ WHERE TRY_TO_DATE(CAST(a.id_periodo AS VARCHAR), 'YYYYMMDD')
 GROUP BY 1, 2, 3, 4
 ORDER BY 5 DESC
 LIMIT 30
+"""
+
+# ============================================================
+# ANALISIS CONTENEDOR
+# Stock por bodega (dt_almacen) + producto master.
+# Dims (M3, Und x Pallet) from DB_DIMENSIONES.ODS.OT_PRODUCTO_UNIMAR.
+# Filtrar en Python: bodegas CD → sección principal; almacen contenedor → sección 2.
+# ============================================================
+
+QUERY_CONTENEDOR_STOCK = f"""
+SELECT
+    a.sku_producto,
+    COALESCE(bo.nom_almacen, 'Bodega ' || a.cod_bodega) AS nom_almacen,
+    p.nom_producto,
+    p.area,
+    p.linea,
+    p.sublinea,
+    p.marca,
+    SUM(a.stock_unidades) AS stock_unidades,
+    SUM(a.stock_costo)    AS stock_costo
+FROM db_supply.hst.ht_in_stock a
+LEFT JOIN (
+    SELECT cod_almacen, MAX(nom_almacen) AS nom_almacen
+    FROM db_dimensiones.dim.dt_almacen
+    GROUP BY cod_almacen
+) bo ON a.cod_bodega = bo.cod_almacen
+LEFT JOIN {_PROD} p ON a.sku_producto = p.sku_producto
+WHERE a.fecha = (
+    SELECT MAX(fecha) FROM db_supply.hst.ht_in_stock WHERE fecha < CURRENT_DATE()
+)
+AND a.stock_unidades > 0
+AND bo.nom_almacen IS NOT NULL
+GROUP BY 1, 2, 3, 4, 5, 6, 7
+"""
+
+# Dimensiones (M3 y Und x Pallet) desde OT_PRODUCTO_UNIMAR.
+QUERY_CONTENEDOR_DIMS = """
+SELECT
+    CODIGO                                                         AS cod_producto,
+    COALESCE(TRY_TO_DOUBLE(CAST(VOLUMENM3      AS VARCHAR)), 0)   AS m3_unidad,
+    COALESCE(TRY_TO_DOUBLE(CAST(UNIDADESPALETA AS VARCHAR)), 0)   AS unidades_x_pallet
+FROM DB_DIMENSIONES.ODS.OT_PRODUCTO_UNIMAR
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY CODIGO ORDER BY VOLUMENM3 DESC NULLS LAST
+) = 1
+"""
+
+# Ventas mensuales ultimos 12 meses completos por SKU — para calculo MOI contenedor.
+QUERY_CONTENEDOR_VENTAS_12M = f"""
+SELECT
+    sku_producto,
+    DATE_TRUNC('month', fecha) AS periodo,
+    SUM(cantidad)              AS unidades_vendidas
+FROM {_VCM}
+WHERE cantidad > 0
+  AND fecha >= DATEADD('month', -12, DATE_TRUNC('month', CURRENT_DATE()))
+  AND fecha <  DATE_TRUNC('month', CURRENT_DATE())
+GROUP BY 1, 2
 """
 
 # ============================================================
