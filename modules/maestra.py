@@ -1,6 +1,4 @@
-import json
 from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -13,30 +11,18 @@ from utils.export import download_buttons
 from utils.ui_animations import lottie_spinner
 
 # ---------------------------------------------------------------------------
-# Profiles persistence (JSON on disk, same pattern as file_persistence.py)
+# Profiles persistence (session_state — no filesystem in SiS)
 # ---------------------------------------------------------------------------
 
-_PROFILES_FILE = (
-    Path(__file__).resolve().parent.parent / "data" / "inputs" / "maestra_profiles.json"
-)
+_PROFILES_KEY = "_maestra_profiles"
 
 
 def _load_profiles() -> dict:
-    """Read saved column profiles.  Returns empty dict if missing/corrupt."""
-    if not _PROFILES_FILE.exists():
-        return {}
-    try:
-        with open(_PROFILES_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {}
+    return st.session_state.get(_PROFILES_KEY, {})
 
 
 def _save_profiles(profiles: dict) -> None:
-    """Write column profiles to JSON."""
-    _PROFILES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(_PROFILES_FILE, "w", encoding="utf-8") as f:
-        json.dump(profiles, f, indent=2, ensure_ascii=False)
+    st.session_state[_PROFILES_KEY] = profiles
 
 
 # ---------------------------------------------------------------------------

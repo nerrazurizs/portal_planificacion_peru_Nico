@@ -1,0 +1,16 @@
+name: dorel-portal-peru
+channels:
+  - snowflake
+dependencies:
+  - matplotlib
+  - numpy
+  - openpyxl
+  - pandas
+  - plotly
+  - python-dateutil
+  - scipy
+  - seaborn
+  - streamlit
+  - streamlit-lottie
+  - xlsxwriter
+  - yfinance

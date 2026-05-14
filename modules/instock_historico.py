@@ -2717,14 +2717,3 @@ def render_instock_historico(conn):
                 _proy_filter, figures_export,
             )
 
-    # ── Export PPT ────────────────────────────────────────────────────────
-    if figures_export:
-        from utils.export import generate_ppt
-
-        ppt_buffer = generate_ppt(figures_export, title="InStock Historico — Dorel")
-        st.download_button(
-            "Descargar Reporte PPT",
-            ppt_buffer,
-            file_name="instock_historico_dorel.pptx",
-            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        )

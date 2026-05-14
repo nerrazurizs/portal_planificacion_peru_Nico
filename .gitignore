@@ -22,27 +22,14 @@ exports/
 node_modules/
 frontend/node_modules/
 
-# Allow persisted input files for projection
-!data/inputs/forecast.xlsx
-!data/inputs/compra.csv
-!data/inputs/precios.xlsx
-!data/inputs/metadata.json
-
-# Flujo de Costos — archivos default compartidos (visibles para todos los usuarios)
+# Flujo de Costos — archivos default compartidos (accesibles via Git integration en SiS)
 !data/inputs/budget_default.xlsx
 !data/inputs/factor_override.xlsx
 
-# Projection results cache (large files)
+# Projection results and user-uploaded files handled via session_state in SiS
 data/inputs/*.parquet
-# Excepción: proy_result.parquet se necesita en GitHub Actions para alertas email
-!data/inputs/proy_result.parquet
-
-# Scenario comparison files (local per user)
 data/inputs/scenarios/
-
-# Forecast accuracy snapshots (user-uploaded data, persisted locally)
-data/forecast_snapshots/*.parquet
-data/forecast_snapshots/metadata.json
+data/forecast_snapshots/
 
 # Backend virtualenv
 backend/.venv/

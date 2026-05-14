@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
-from streamlit_pivot import st_pivot_table
 
 from config import apply_pm_filter
 from utils.sql_builder import build_in_clause, build_ilike
@@ -213,32 +212,36 @@ def render_analisis_venta(conn):
         st.info("Configura los filtros y presiona **Consultar** para cargar datos.")
         return
 
-    st.markdown(f"**{len(df):,} filas** · usa el pivot para explorar los datos")
+    st.markdown(f"**{len(df):,} filas**")
 
-    dim_cols = [c for c in df.columns if c not in ("NETO_TOTAL", "UNIDADES_VENDIDAS", "APORTE_TOTAL")]
     metric_cols = [c for c in ("NETO_TOTAL", "UNIDADES_VENDIDAS", "APORTE_TOTAL") if c in df.columns]
+    dim_cols = [c for c in df.columns if c not in metric_cols and c != "FECHA"]
 
-    st_pivot_table(
-        df,
-        key="av_pivot",
-        rows=["MES", "AREA", "LINEA"],
-        columns=["CANAL_DE_DISTRIBUCION"],
-        values=metric_cols,
-        aggregation={m: "sum" for m in metric_cols},
-        show_totals=True,
-        show_subtotals=True,
-        max_height=600,
-        number_format={
-            "NETO_TOTAL": "$#,##0",
-            "APORTE_TOTAL": "$#,##0",
-            "UNIDADES_VENDIDAS": "#,##0",
-        },
-        export_filename="analisis_venta",
-        filter_fields=dim_cols,
-        # FECHA (dia) disponible pero fuera del drag-drop por defecto;
-        # el usuario puede pivotear por SEMANA, MES, TRIMESTRE o ANIO
-        hidden_from_drag_drop=["FECHA"],
-    )
+    pc1, pc2, pc3 = st.columns(3)
+    with pc1:
+        sel_rows = st.multiselect("Filas", dim_cols, default=["MES", "AREA", "LINEA"] if all(c in dim_cols for c in ["MES", "AREA", "LINEA"]) else dim_cols[:2], key="av_pivot_rows")
+    with pc2:
+        col_opts = [c for c in dim_cols if c not in sel_rows]
+        sel_cols = st.multiselect("Columnas", col_opts, default=["CANAL_DE_DISTRIBUCION"] if "CANAL_DE_DISTRIBUCION" in col_opts else [], key="av_pivot_cols")
+    with pc3:
+        sel_metric = st.selectbox("Métrica", metric_cols, key="av_pivot_metric")
+
+    if sel_rows and sel_metric:
+        try:
+            pivot = df.pivot_table(
+                index=sel_rows,
+                columns=sel_cols if sel_cols else None,
+                values=sel_metric,
+                aggfunc="sum",
+                margins=True,
+                margins_name="Total",
+            )
+            st.dataframe(pivot.style.format("{:,.0f}"), use_container_width=True)
+        except Exception as e:
+            st.warning(f"No se pudo generar el pivot: {e}")
+            st.dataframe(df[sel_rows + (sel_cols or []) + [sel_metric]], use_container_width=True)
+    else:
+        st.info("Selecciona al menos una fila y una métrica.")
 
     st.markdown("---")
     download_buttons(df, "analisis_venta")

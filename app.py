@@ -1,14 +1,8 @@
-import os
 import streamlit as st
-from dotenv import load_dotenv
-
-load_dotenv()
 
 from config import get_css, COLORS, PM_NAMES, apply_pm_filter
-from db.connection import get_snowflake_connection, get_active_connection
+from db.connection import get_active_connection
 from utils.auth import (
-    authenticate,
-    change_password,
     get_current_user,
     get_allowed_modules,
     get_area_filter,
@@ -69,9 +63,7 @@ st.set_page_config(
 )
 
 # Logo Corporativo
-logo_path = os.path.join(os.path.dirname(__file__), "logo_dorel.png")
-if os.path.exists(logo_path):
-    st.sidebar.image(logo_path, use_container_width=True)
+# Logo: not available in Streamlit in Snowflake (no filesystem access)
 
 # CSS (st.html para compatibilidad con Streamlit >=1.42 que deprecó unsafe_allow_html)
 st.html(get_css())
@@ -83,150 +75,13 @@ st.html(get_css())
 def _check_snowflake_connection() -> bool:
     """Return True if Snowflake connection is alive, False otherwise."""
     try:
-        conn = get_snowflake_connection()
+        conn = get_active_connection()
         conn.cursor().execute("SELECT 1")
         return True
     except Exception:
         return False
 
 
-# ============================================================================
-# LOGIN
-# ============================================================================
-def login_screen():
-    st.html(
-        "<h1 style='text-align: center; margin-top: 3rem;'>"
-        "Portal de Planificacion Dorel Peru</h1>"
-    )
-    st.html(
-        "<p style='text-align: center; color: #94a3b8; margin-bottom: 2rem;'>"
-        "Ingresa con tu correo corporativo</p>"
-    )
-
-    col1, col2, col3 = st.columns([1, 1.5, 1])
-    with col2:
-        with st.form("login_form"):
-            email = st.text_input("Correo electronico", placeholder="nombre@dorel.cl")
-            password = st.text_input("Contrasena", type="password")
-            submitted = st.form_submit_button("Ingresar", use_container_width=True)
-
-            if submitted:
-                if not email or not password:
-                    st.error("Ingresa correo y contrasena")
-                else:
-                    user = authenticate(email, password)
-                    if user is not None:
-                        st.session_state["authenticated"] = True
-                        st.session_state["user"] = user
-                        st.rerun()
-                    else:
-                        st.error("Credenciales incorrectas o usuario inactivo")
-
-
-# ============================================================================
-# FORCED PASSWORD CHANGE (first login)
-# ============================================================================
-_VALID_PHRASES = {
-    "la u es chile",
-    "la u es de chile",
-    "u es chile",
-    "la u es chile!",
-    "la u es de chile!",
-}
-
-
-def _phrase_accepted(text: str) -> bool:
-    """Check if the user typed an acceptable variant of the magic phrase."""
-    normalized = text.strip().lower()
-    # Remove trailing punctuation for flexibility
-    cleaned = normalized.rstrip("!.,;")
-    return cleaned in _VALID_PHRASES or normalized in _VALID_PHRASES
-
-
-def change_password_screen():
-    """Intermediate screen forcing a password change — with a fun twist."""
-    user = get_current_user()
-    if user is None:
-        st.session_state["authenticated"] = False
-        st.rerun()
-        return
-
-    nombre = user.get("nombre", "Usuario")
-    first_name = nombre.split()[0] if nombre else "Usuario"
-
-    st.html(
-        "<h1 style='text-align:center; margin-top:2rem;'>"
-        "Cambio de Contrasena Obligatorio</h1>"
-    )
-    st.html(
-        "<p style='text-align:center; color:#94a3b8; margin-bottom:1.5rem;'>"
-        "Por seguridad, debes cambiar tu contrasena antes de continuar.</p>"
-    )
-
-    col1, col2, col3 = st.columns([1, 2, 1])
-    with col2:
-        # ── Step 1: The prank challenge ──
-        st.html(
-            f"""
-            <div style="background: linear-gradient(135deg, #1e3a5f 0%, #065E8B 100%);
-                        padding: 2rem; border-radius: 16px; text-align: center;
-                        margin-bottom: 1.5rem; box-shadow: 0 4px 20px rgba(6,94,139,0.3);">
-                <div style="font-size: 2.5rem; margin-bottom: 0.5rem;">🏆</div>
-                <div style="color: #f1f5f9; font-size: 1.5rem; font-weight: 800;
-                            text-transform: uppercase; letter-spacing: 2px;
-                            line-height: 1.4;">
-                    {first_name.upper()}<br>DI QUE LA U ES CHILE<br>ESCRIBELO
-                </div>
-                <div style="color: #94a3b8; font-size: 0.8rem; margin-top: 0.75rem;">
-                    Protocolo de seguridad obligatorio
-                </div>
-            </div>
-            """
-        )
-
-        phrase_input = st.text_input(
-            "Escribe la frase para continuar",
-            placeholder="Escribe aqui...",
-            key="phrase_challenge",
-        )
-
-        phrase_ok = _phrase_accepted(phrase_input) if phrase_input else False
-
-        if phrase_input and not phrase_ok:
-            st.error("Esa no es la frase correcta. Intentalo de nuevo.")
-
-        if phrase_ok:
-            st.balloons()
-            st.success("Asi se habla! Ahora puedes cambiar tu contrasena.")
-
-            st.markdown("---")
-            with st.form("change_pwd_form"):
-                new_pwd = st.text_input("Nueva contrasena", type="password")
-                confirm_pwd = st.text_input("Confirmar contrasena", type="password")
-                submitted = st.form_submit_button(
-                    "Cambiar contrasena", use_container_width=True
-                )
-
-                if submitted:
-                    if not new_pwd or not confirm_pwd:
-                        st.error("Completa ambos campos.")
-                    elif len(new_pwd) < 6:
-                        st.error("La contrasena debe tener al menos 6 caracteres.")
-                    elif new_pwd != confirm_pwd:
-                        st.error("Las contrasenas no coinciden.")
-                    else:
-                        ok = change_password(user["email"], new_pwd)
-                        if ok:
-                            st.session_state["user"]["must_change_password"] = False
-                            st.toast("Contrasena actualizada exitosamente!")
-                            st.rerun()
-                        else:
-                            st.error("Error al cambiar la contrasena.")
-
-
-# ============================================================================
-# MAIN APP
-# ============================================================================
 def main_app():
     from utils.ui_components import (
         page_header,
@@ -235,28 +90,8 @@ def main_app():
     )
 
     user = get_current_user()
-    if user is None:
-        st.session_state["authenticated"] = False
-        st.rerun()
-        return
-
-    user_rol = user.get("rol", "planner")
+    user_rol = user.get("rol", "admin")
     allowed_modules = get_allowed_modules(user_rol)
-
-    # ------------------------------------------------------------------
-    # Auto-cargar proyección persistida (si existe y no está en memoria)
-    # ------------------------------------------------------------------
-    if not st.session_state.get("df_proy_ready"):
-        from utils.file_persistence import has_saved_projection, load_projection_results, get_projection_info
-        if has_saved_projection():
-            _df_proy, _df_proy_daily = load_projection_results()
-            if _df_proy is not None and not _df_proy.empty:
-                st.session_state["df_proy"] = _df_proy
-                if _df_proy_daily is not None and not _df_proy_daily.empty:
-                    st.session_state["df_proy_daily"] = _df_proy_daily
-                st.session_state["df_proy_ready"] = True
-                _info = get_projection_info()
-                st.session_state["sim_mode_used"] = _info.get("sim_mode", "diaria") if _info else "diaria"
 
     # ------------------------------------------------------------------
     # Sidebar: grouped navigation
@@ -440,18 +275,6 @@ def main_app():
             nombre=user.get("nombre", ""),
             email=user.get("email", ""),
         ),
-    )
-
-    def _logout():
-        st.session_state["authenticated"] = False
-        st.session_state["user"] = None
-        st.session_state["selected_module"] = "Inicio"
-
-    st.sidebar.button(
-        "🚪  Cerrar Sesion",
-        key="btn_logout",
-        on_click=_logout,
-        use_container_width=True,
     )
 
     # ------------------------------------------------------------------
@@ -1214,12 +1037,4 @@ def main_app():
 # ============================================================================
 # ENTRY POINT
 # ============================================================================
-if "authenticated" not in st.session_state:
-    st.session_state["authenticated"] = False
-
-if not st.session_state["authenticated"]:
-    login_screen()
-elif st.session_state.get("user", {}).get("must_change_password", False):
-    change_password_screen()
-else:
-    main_app()
+main_app()

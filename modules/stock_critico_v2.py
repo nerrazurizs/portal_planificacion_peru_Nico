@@ -13,7 +13,7 @@ from db.queries import (
 )
 from db.cache import cached_query as cq
 from utils.filters import clasificar_canal, human_format, fmt_clp, calcular_moi_ajustado
-from utils.export import download_buttons, generate_ppt
+from utils.export import download_buttons
 from utils.budget import get_budget_cogs_monthly
 from utils.ui_animations import lottie_spinner, StepProgress
 from config import COLORS, dorel_layout, apply_pm_filter
@@ -2527,23 +2527,6 @@ def render_stock_dashboard_v2(conn):
                 except Exception as e:
                     st.error(f"Error generando excel: {e}")
 
-        # ---- PPT Export ----
-        st.markdown("---")
-        if st.button("Generar PPT con Graficos"):
-            if figures_to_export:
-                try:
-                    ppt_buffer = generate_ppt(figures_to_export, title="Reporte de Stock Critico Dorel")
-                    st.download_button(
-                        label="Descargar PPT",
-                        data=ppt_buffer,
-                        file_name=f"Reporte_Supply_{pd.Timestamp.now().strftime('%Y%m%d')}.pptx",
-                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    )
-                    st.success("PPT Generado Exitosamente!")
-                except Exception as e:
-                    st.error(f"Error generando PPT: {e}")
-            else:
-                st.warning("No hay graficos generados para exportar.")
 
     except Exception as e:
         st.error(f"Error en el proceso: {e}")

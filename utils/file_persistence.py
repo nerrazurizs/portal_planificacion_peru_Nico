@@ -1,202 +1,77 @@
-"""Persistence layer for projection input files and results.
+"""Persistence layer using Streamlit session_state.
 
-Saves uploaded files (Forecast, Plan Compra, Precios) to ``data/inputs/``
-so they survive app restarts.  Also persists projection results (df_proy,
-df_proy_daily) as parquet files to avoid re-running the simulation.
-Includes an admin-only git push helper to share files with the team.
+In Streamlit in Snowflake there is no writable filesystem.
+Files uploaded by the user and projection results are kept in session_state
+for the duration of the browser session.
 """
 
-import json
-import subprocess
+from __future__ import annotations
+
+import io
 from datetime import datetime
-from pathlib import Path
 from typing import BinaryIO
 
 import pandas as pd
+import streamlit as st
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
+# Session-state key prefixes
+_FILE_KEY_PREFIX = "_fp_file_"
+_PROJ_KEY = "_fp_projection"
 
-_BASE_DIR = Path(__file__).resolve().parent.parent
-_INPUTS_DIR = _BASE_DIR / "data" / "inputs"
-_METADATA_FILE = _INPUTS_DIR / "metadata.json"
-
-# Fixed filenames on disk (original name stored in metadata)
-_FILE_KEYS = {
-    "forecast": "forecast.xlsx",
-    "compra": "compra.csv",
-    "precios": "precios.xlsx",
-}
-
-# Projection result files (parquet for speed + compression)
-_PROY_FILE = _INPUTS_DIR / "proy_result.parquet"
-_PROY_DAILY_FILE = _INPUTS_DIR / "proy_daily.parquet"
-_PROY_META_KEYS = ["proy_generated_at", "proy_sim_mode", "proy_n_skus", "proy_n_periodos"]
+_FILE_KEYS = {"forecast", "compra", "precios"}
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Uploaded input files
 # ---------------------------------------------------------------------------
 
-def _ensure_dir() -> None:
-    """Create ``data/inputs/`` if it does not exist."""
-    _INPUTS_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _save_metadata(meta: dict) -> None:
-    """Write metadata.json."""
-    _ensure_dir()
-    with open(_METADATA_FILE, "w", encoding="utf-8") as fh:
-        json.dump(meta, fh, indent=2, ensure_ascii=False, default=str)
-
-
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
-
-def load_metadata() -> dict:
-    """Read ``metadata.json``.  Returns empty dict if missing or malformed."""
-    if not _METADATA_FILE.exists():
-        return {}
-    try:
-        with open(_METADATA_FILE, "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except (json.JSONDecodeError, OSError):
-        return {}
-
-
-def save_input_file(
-    key: str,
-    uploaded_file: BinaryIO,
-    user: dict,
-) -> None:
-    """Save an uploaded file to ``data/inputs/`` and update metadata.
-
-    Parameters
-    ----------
-    key : str
-        One of ``"forecast"``, ``"compra"``, ``"precios"``.
-    uploaded_file : BinaryIO
-        Streamlit ``UploadedFile`` (BytesIO-like).
-    user : dict
-        Current user dict from ``get_current_user()``.
-    """
+def save_input_file(key: str, uploaded_file: BinaryIO, user: dict) -> None:
+    """Store an uploaded file in session_state."""
     if key not in _FILE_KEYS:
         raise ValueError(f"Unknown file key: {key}")
-
-    _ensure_dir()
-    dest = _INPUTS_DIR / _FILE_KEYS[key]
-
-    # Write bytes to disk
     uploaded_file.seek(0)
-    with open(dest, "wb") as fh:
-        fh.write(uploaded_file.read())
-    uploaded_file.seek(0)  # reset so downstream can still read it
-
-    # Update metadata
-    meta = load_metadata()
-    meta[key] = {
-        "filename": getattr(uploaded_file, "name", _FILE_KEYS[key]),
-        "saved_as": _FILE_KEYS[key],
+    raw = uploaded_file.read()
+    uploaded_file.seek(0)
+    st.session_state[_FILE_KEY_PREFIX + key] = {
+        "bytes": raw,
+        "filename": getattr(uploaded_file, "name", key),
         "uploaded_by": user.get("email", "unknown"),
         "uploaded_by_name": user.get("nombre", "Desconocido"),
         "uploaded_at": datetime.now().isoformat(timespec="seconds"),
-        "size_bytes": dest.stat().st_size,
+        "size_bytes": len(raw),
     }
-    _save_metadata(meta)
 
 
-def get_saved_file_path(key: str) -> Path | None:
-    """Return the ``Path`` to a saved file, or ``None`` if it does not exist."""
-    if key not in _FILE_KEYS:
+def get_saved_file_path(key: str) -> io.BytesIO | None:
+    """Return a fresh BytesIO for a saved file, or None if not saved.
+
+    Returns BytesIO (not Path) — compatible with pd.read_csv / pd.read_excel.
+    A new BytesIO is created each call so position is always at the start.
+    """
+    entry = st.session_state.get(_FILE_KEY_PREFIX + key)
+    if entry is None:
         return None
-    path = _INPUTS_DIR / _FILE_KEYS[key]
-    return path if path.exists() else None
+    return io.BytesIO(entry["bytes"])
 
 
 def has_saved_files() -> bool:
-    """Return ``True`` if both required files (forecast + compra) are saved."""
+    """Return True if both required files (forecast + compra) are saved."""
     return (
-        get_saved_file_path("forecast") is not None
-        and get_saved_file_path("compra") is not None
+        st.session_state.get(_FILE_KEY_PREFIX + "forecast") is not None
+        and st.session_state.get(_FILE_KEY_PREFIX + "compra") is not None
     )
 
 
 def get_saved_file_info(key: str) -> dict | None:
-    """Return metadata dict for a saved file, or ``None``."""
-    meta = load_metadata()
-    info = meta.get(key)
-    if info and get_saved_file_path(key) is not None:
-        return info
-    return None
-
-
-def git_share_inputs() -> tuple[bool, str]:
-    """Git add + commit + push ``data/inputs/``.
-
-    Returns ``(success, message)``.  Only meant to be called by admin users.
-    """
-    cwd = str(_BASE_DIR)
-    try:
-        # Stage
-        subprocess.run(
-            ["git", "add", "data/inputs/"],
-            cwd=cwd, check=True, capture_output=True, text=True, timeout=30,
-        )
-
-        # Anything to commit?
-        status = subprocess.run(
-            ["git", "diff", "--cached", "--name-only"],
-            cwd=cwd, check=True, capture_output=True, text=True, timeout=10,
-        )
-        if not status.stdout.strip():
-            return True, "No hay cambios nuevos para compartir."
-
-        # Commit
-        from utils.auth import get_current_user
-        user = get_current_user()
-        author = user.get("nombre", "Portal") if user else "Portal"
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        msg = f"datos: inputs proyeccion actualizados por {author} ({ts})"
-
-        subprocess.run(
-            ["git", "commit", "-m", msg],
-            cwd=cwd, check=True, capture_output=True, text=True, timeout=30,
-        )
-
-        # Push
-        subprocess.run(
-            ["git", "push"],
-            cwd=cwd, check=True, capture_output=True, text=True, timeout=60,
-        )
-
-        # Record share info in metadata
-        meta = load_metadata()
-        hash_result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=cwd, capture_output=True, text=True, timeout=10,
-        )
-        meta["last_shared"] = {
-            "shared_by": user.get("email", "unknown") if user else "unknown",
-            "shared_by_name": user.get("nombre", "Desconocido") if user else "Desconocido",
-            "shared_at": datetime.now().isoformat(timespec="seconds"),
-            "commit_hash": hash_result.stdout.strip() if hash_result.returncode == 0 else "",
-        }
-        _save_metadata(meta)
-
-        return True, "Archivos compartidos exitosamente con el equipo."
-
-    except subprocess.TimeoutExpired:
-        return False, "Timeout: la operacion git tomo demasiado tiempo."
-    except subprocess.CalledProcessError as e:
-        return False, f"Error git: {e.stderr or e.stdout or str(e)}"
-    except Exception as e:
-        return False, f"Error inesperado: {e}"
+    """Return metadata dict for a saved file, or None."""
+    entry = st.session_state.get(_FILE_KEY_PREFIX + key)
+    if entry is None:
+        return None
+    return {k: v for k, v in entry.items() if k != "bytes"}
 
 
 # ---------------------------------------------------------------------------
-# Projection results persistence
+# Projection results
 # ---------------------------------------------------------------------------
 
 def save_projection_results(
@@ -204,78 +79,53 @@ def save_projection_results(
     df_proy_daily: pd.DataFrame | None = None,
     sim_mode: str = "diaria",
 ) -> None:
-    """Save projection results to parquet files for fast reload.
-
-    Parameters
-    ----------
-    df_proy : DataFrame
-        Monthly aggregated projection (the main result).
-    df_proy_daily : DataFrame, optional
-        Daily detail (can be large, saved if provided).
-    sim_mode : str
-        Simulation mode used ("diaria" or "mensual").
-    """
-    _ensure_dir()
-    try:
-        df_proy.to_parquet(_PROY_FILE, index=False, engine="pyarrow")
-
-        if df_proy_daily is not None and not df_proy_daily.empty:
-            df_proy_daily.to_parquet(_PROY_DAILY_FILE, index=False, engine="pyarrow")
-
-        # Update metadata with projection info
-        meta = load_metadata()
-        meta["projection"] = {
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "sim_mode": sim_mode,
-            "n_skus": int(df_proy["SKU_PRODUCTO"].nunique()) if "SKU_PRODUCTO" in df_proy.columns else 0,
-            "n_periodos": int(df_proy["PERIODO"].nunique()) if "PERIODO" in df_proy.columns else 0,
-            "n_rows": len(df_proy),
-            "file_size_mb": round(_PROY_FILE.stat().st_size / 1_048_576, 1),
-        }
-        _save_metadata(meta)
-    except Exception:
-        pass  # Silently fail — projection still works in memory
+    """Store projection results in session_state."""
+    st.session_state[_PROJ_KEY] = {
+        "df_proy": df_proy,
+        "df_proy_daily": df_proy_daily,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "sim_mode": sim_mode,
+        "n_skus": int(df_proy["SKU_PRODUCTO"].nunique()) if "SKU_PRODUCTO" in df_proy.columns else 0,
+        "n_periodos": int(df_proy["PERIODO"].nunique()) if "PERIODO" in df_proy.columns else 0,
+        "n_rows": len(df_proy),
+    }
 
 
 def load_projection_results() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
-    """Load projection results from parquet files.
-
-    Returns ``(df_proy, df_proy_daily)`` or ``(None, None)`` if files
-    don't exist or fail to load.
-    """
-    df_proy = None
-    df_proy_daily = None
-
-    try:
-        if _PROY_FILE.exists():
-            df_proy = pd.read_parquet(_PROY_FILE, engine="pyarrow")
-        if _PROY_DAILY_FILE.exists():
-            df_proy_daily = pd.read_parquet(_PROY_DAILY_FILE, engine="pyarrow")
-    except Exception:
+    """Return (df_proy, df_proy_daily) from session_state."""
+    entry = st.session_state.get(_PROJ_KEY)
+    if entry is None:
         return None, None
-
-    return df_proy, df_proy_daily
+    return entry.get("df_proy"), entry.get("df_proy_daily")
 
 
 def has_saved_projection() -> bool:
-    """Return True if a saved projection result exists on disk."""
-    return _PROY_FILE.exists()
+    """Return True if projection results exist in session_state."""
+    return st.session_state.get(_PROJ_KEY) is not None
 
 
 def get_projection_info() -> dict | None:
     """Return metadata about the saved projection, or None."""
-    meta = load_metadata()
-    info = meta.get("projection")
-    if info and _PROY_FILE.exists():
-        return info
-    return None
+    entry = st.session_state.get(_PROJ_KEY)
+    if entry is None:
+        return None
+    return {k: v for k, v in entry.items() if k not in ("df_proy", "df_proy_daily")}
 
 
 def clear_projection_cache() -> None:
-    """Delete saved projection files (forces re-run next time)."""
-    for f in [_PROY_FILE, _PROY_DAILY_FILE]:
-        if f.exists():
-            f.unlink()
-    meta = load_metadata()
-    meta.pop("projection", None)
-    _save_metadata(meta)
+    """Remove saved projection results from session_state."""
+    st.session_state.pop(_PROJ_KEY, None)
+
+
+# ---------------------------------------------------------------------------
+# Stubs for functionality not available in Streamlit in Snowflake
+# ---------------------------------------------------------------------------
+
+def load_metadata() -> dict:
+    """Not available in SiS — returns empty dict."""
+    return {}
+
+
+def git_share_inputs() -> tuple[bool, str]:
+    """Not available in Streamlit in Snowflake."""
+    return False, "Sincronización git no disponible en Streamlit in Snowflake."
