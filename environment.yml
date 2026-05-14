@@ -11,6 +11,4 @@ dependencies:
   - scipy
   - seaborn
   - streamlit
-  - streamlit-lottie
   - xlsxwriter
-  - yfinance
