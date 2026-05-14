@@ -1379,86 +1379,95 @@ def _generar_plan_compra(df_pos, maestra, factor_file):
                 df_ft.loc[_mask_prov, "SKU_PRODUCTO"].map(_prov_map)
             )
 
-    # ── Proyección desde proy_result.parquet ───────────────────────────────
+    # ── Proyección desde proy_result.parquet (opcional) ────────────────────
     parquet_path = Path(__file__).resolve().parent.parent / "data" / "inputs" / "proy_result.parquet"
+    df_pq_rows = []  # lista vacía por defecto si el parquet no existe
+
     if not parquet_path.exists():
-        st.error(f"No se encontró proy_result.parquet en: {parquet_path}")
-        return None
+        st.warning(
+            "⚠️ No se encontró la proyección guardada (`proy_result.parquet`). "
+            "El resumen se genera **sólo con las OCs de FT_COMPRAS**. "
+            "Para incluir compras proyectadas, primero corre la **Proyección de Stock** "
+            "y luego vuelve aquí."
+        )
+        df_pq = pd.DataFrame()
+    else:
+        try:
+            df_pq = norm_cols(pd.read_parquet(parquet_path))
+        except Exception as e:
+            st.warning(f"⚠️ No se pudo leer proy_result.parquet ({e}). Se usarán sólo OCs de FT_COMPRAS.")
+            df_pq = pd.DataFrame()
 
-    try:
-        df_pq = norm_cols(pd.read_parquet(parquet_path))
-    except Exception as e:
-        st.error(f"Error leyendo proy_result.parquet: {e}")
-        return None
+    if not df_pq.empty:
+        df_pq["FORECAST_COMPRA"] = pd.to_numeric(
+            df_pq["FORECAST_COMPRA"] if "FORECAST_COMPRA" in df_pq.columns else 0,
+            errors="coerce",
+        ).fillna(0)
+        df_pq = df_pq[df_pq["FORECAST_COMPRA"] > 0].copy()
+        _periodo_pq = df_pq["PERIODO"] if "PERIODO" in df_pq.columns else pd.Series(dtype="datetime64[ns]")
+        eta_pq = pd.to_datetime(_periodo_pq, errors="coerce")
+        mask_ano_pq = eta_pq.dt.year == anio_actual
+        df_pq = df_pq[mask_ano_pq].copy()
+        eta_pq = eta_pq[mask_ano_pq]
 
-    df_pq["FORECAST_COMPRA"] = pd.to_numeric(
-        df_pq["FORECAST_COMPRA"] if "FORECAST_COMPRA" in df_pq.columns else 0,
-        errors="coerce",
-    ).fillna(0)
-    df_pq = df_pq[df_pq["FORECAST_COMPRA"] > 0].copy()
-    _periodo_pq = df_pq["PERIODO"] if "PERIODO" in df_pq.columns else pd.Series(dtype="datetime64[ns]")
-    eta_pq = pd.to_datetime(_periodo_pq, errors="coerce")
-    mask_ano_pq = eta_pq.dt.year == anio_actual
-    df_pq = df_pq[mask_ano_pq].copy()
-    eta_pq = eta_pq[mask_ano_pq]
+        # El parquet ya trae AREA, LINEA, SUBLINEA, MARCA, PROCEDENCIA,
+        # MIX_OFICIAL, COSTO_FOB_USD, ULTIMO_COSTO — no se necesita merge con maestra.
+        proc_pq = df_pq["PROCEDENCIA"].fillna("") if "PROCEDENCIA" in df_pq.columns else pd.Series("", index=df_pq.index)
+        df_pq["_FACTOR"] = [
+            _lookup_factor(r.get("AREA", ""), r.get("LINEA", ""), r.get("MARCA", ""), p)
+            for r, p in zip(df_pq.to_dict("records"), proc_pq)
+        ]
+        mask_imp_pq = proc_pq.str.strip().str.upper() == "IMPORTADO"
+        costo_fob = pd.to_numeric(
+            df_pq["COSTO_FOB_USD"] if "COSTO_FOB_USD" in df_pq.columns else 0,
+            errors="coerce",
+        ).fillna(0)
+        costo_loc = pd.to_numeric(
+            df_pq["ULTIMO_COSTO"] if "ULTIMO_COSTO" in df_pq.columns else 0,
+            errors="coerce",
+        ).fillna(0)
+        unds_pq = df_pq["FORECAST_COMPRA"]
 
-    # El parquet ya trae AREA, LINEA, SUBLINEA, MARCA, PROCEDENCIA,
-    # MIX_OFICIAL, COSTO_FOB_USD, ULTIMO_COSTO — no se necesita merge con maestra.
-    proc_pq = df_pq["PROCEDENCIA"].fillna("") if "PROCEDENCIA" in df_pq.columns else pd.Series("", index=df_pq.index)
-    df_pq["_FACTOR"] = [
-        _lookup_factor(r.get("AREA", ""), r.get("LINEA", ""), r.get("MARCA", ""), p)
-        for r, p in zip(df_pq.to_dict("records"), proc_pq)
-    ]
-    mask_imp_pq = proc_pq.str.strip().str.upper() == "IMPORTADO"
-    costo_fob = pd.to_numeric(
-        df_pq["COSTO_FOB_USD"] if "COSTO_FOB_USD" in df_pq.columns else 0,
-        errors="coerce",
-    ).fillna(0)
-    costo_loc = pd.to_numeric(
-        df_pq["ULTIMO_COSTO"] if "ULTIMO_COSTO" in df_pq.columns else 0,
-        errors="coerce",
-    ).fillna(0)
-    unds_pq = df_pq["FORECAST_COMPRA"]
+        df_pq["CURRENCY"] = np.where(mask_imp_pq, "USD", "PEN")
+        df_pq["AMOUNT"] = np.where(mask_imp_pq, costo_fob * unds_pq, costo_loc * unds_pq)
+        df_pq["AMOUNT_SOLES"] = np.where(
+            mask_imp_pq,
+            costo_fob * df_pq["_FACTOR"] * tc * unds_pq,
+            costo_loc * unds_pq,
+        )
+        df_pq["ETD"] = ""
+        df_pq["ETA"] = eta_pq.dt.strftime("%d/%m/%Y").fillna("").values
+        df_pq["MES ETA"] = eta_pq.dt.month.map(MESES_FULL).values
+        df_pq["Días agua"] = ""
+        df_pq["COMPRA_UNDS"] = unds_pq
+        df_pq["FUENTE"] = "proy_result.parquet"
+        df_pq["STATUS_PO"] = "Compra Proy"
+        df_pq["N_PO"] = "-"
+        df_pq["SKU"] = df_pq["SKU_PRODUCTO"]
+        nom_col_pq = "SKU_NOM_PRODUCTO" if "SKU_NOM_PRODUCTO" in df_pq.columns else "SKU_PRODUCTO"
+        df_pq["PRODUCTO"] = df_pq[nom_col_pq].fillna("")
+        df_pq["MIX"] = df_pq["MIX_OFICIAL"].fillna("") if "MIX_OFICIAL" in df_pq.columns else ""
+        # ── Lookup NOM_PROVEEDOR, COD_PROVEEDOR y SUBLINEA desde vw_producto ────
+        _pq_sku = df_pq["SKU_PRODUCTO"]
+        _maestra_idx = maestra.drop_duplicates("SKU_PRODUCTO").set_index("SKU_PRODUCTO")
 
-    df_pq["CURRENCY"] = np.where(mask_imp_pq, "USD", "PEN")
-    df_pq["AMOUNT"] = np.where(mask_imp_pq, costo_fob * unds_pq, costo_loc * unds_pq)
-    df_pq["AMOUNT_SOLES"] = np.where(
-        mask_imp_pq,
-        costo_fob * df_pq["_FACTOR"] * tc * unds_pq,
-        costo_loc * unds_pq,
-    )
-    df_pq["ETD"] = ""
-    df_pq["ETA"] = eta_pq.dt.strftime("%d/%m/%Y").fillna("").values
-    df_pq["MES ETA"] = eta_pq.dt.month.map(MESES_FULL).values
-    df_pq["Días agua"] = ""
-    df_pq["COMPRA_UNDS"] = unds_pq
-    df_pq["FUENTE"] = "proy_result.parquet"
-    df_pq["STATUS_PO"] = "Compra Proy"
-    df_pq["N_PO"] = "-"
-    df_pq["SKU"] = df_pq["SKU_PRODUCTO"]
-    nom_col_pq = "SKU_NOM_PRODUCTO" if "SKU_NOM_PRODUCTO" in df_pq.columns else "SKU_PRODUCTO"
-    df_pq["PRODUCTO"] = df_pq[nom_col_pq].fillna("")
-    df_pq["MIX"] = df_pq["MIX_OFICIAL"].fillna("") if "MIX_OFICIAL" in df_pq.columns else ""
-    # ── Lookup NOM_PROVEEDOR, COD_PROVEEDOR y SUBLINEA desde vw_producto ────
-    _pq_sku = df_pq["SKU_PRODUCTO"]
-    _maestra_idx = maestra.drop_duplicates("SKU_PRODUCTO").set_index("SKU_PRODUCTO")
+        df_pq["NOM_PROVEEDOR"] = (
+            _pq_sku.map(_maestra_idx["PROVEEDOR"]).fillna("")
+            if "PROVEEDOR" in maestra.columns else ""
+        )
+        df_pq["COD_PROVEEDOR"] = (
+            _pq_sku.map(_maestra_idx["COD_PROVEEDOR"]).fillna("")
+            if "COD_PROVEEDOR" in maestra.columns else ""
+        )
+        if "SUBLINEA" in maestra.columns:
+            if "SUBLINEA" not in df_pq.columns:
+                df_pq["SUBLINEA"] = pd.NA
+            _mask_sl = df_pq["SUBLINEA"].replace("", pd.NA).isna()
+            if _mask_sl.any():
+                df_pq.loc[_mask_sl, "SUBLINEA"] = _pq_sku[_mask_sl].map(_maestra_idx["SUBLINEA"])
 
-    df_pq["NOM_PROVEEDOR"] = (
-        _pq_sku.map(_maestra_idx["PROVEEDOR"]).fillna("")
-        if "PROVEEDOR" in maestra.columns else ""
-    )
-    df_pq["COD_PROVEEDOR"] = (
-        _pq_sku.map(_maestra_idx["COD_PROVEEDOR"]).fillna("")
-        if "COD_PROVEEDOR" in maestra.columns else ""
-    )
-    if "SUBLINEA" in maestra.columns:
-        if "SUBLINEA" not in df_pq.columns:
-            df_pq["SUBLINEA"] = pd.NA
-        _mask_sl = df_pq["SUBLINEA"].replace("", pd.NA).isna()
-        if _mask_sl.any():
-            df_pq.loc[_mask_sl, "SUBLINEA"] = _pq_sku[_mask_sl].map(_maestra_idx["SUBLINEA"])
-
-    df_pq["ORIGEN"] = proc_pq.values
+        df_pq["ORIGEN"] = proc_pq.values
+        df_pq_rows = [df_pq]
 
     # ── Concat final ────────────────────────────────────────────────────────
     COLS_SALIDA = [
@@ -1468,13 +1477,14 @@ def _generar_plan_compra(df_pos, maestra, factor_file):
         "AREA", "LINEA", "SUBLINEA", "MARCA", "MIX", "SKU", "PRODUCTO",
         "COMPRA_UNDS", "FUENTE",
     ]
-    for col in COLS_SALIDA:
-        if col not in df_ft.columns:
-            df_ft[col] = ""
-        if col not in df_pq.columns:
-            df_pq[col] = ""
+    frames_to_concat = []
+    for _frame in [df_ft] + df_pq_rows:
+        for col in COLS_SALIDA:
+            if col not in _frame.columns:
+                _frame[col] = ""
+        frames_to_concat.append(_frame[COLS_SALIDA])
 
-    df = pd.concat([df_ft[COLS_SALIDA], df_pq[COLS_SALIDA]], ignore_index=True)
+    df = pd.concat(frames_to_concat, ignore_index=True)
     df = df[df["AREA"].astype(str).isin(AREAS_VALIDAS)]
     df = df.rename(columns={
         "_FACTOR":      "Factor Importación",
@@ -1489,8 +1499,160 @@ def _generar_plan_compra(df_pos, maestra, factor_file):
     return df
 
 
-def _render_exportar_plan_compra(df_pos, maestra):
-    """Tab: carga Factor de Importación y genera resumen Plan de Compra."""
+# ─── Tabla Stock Cierre MES ────────────────────────────────────────────────────
+
+def _render_stock_cierre_tabla(conn):
+    """
+    Tabla visual 'Stock cierre MES' (año actual, 12 meses).
+    Reutiliza la lógica de Flujo de Costos para calcular los valores a nivel CIA.
+
+    Filas:
+      VENTA A COSTO DEL MES              → Vta Costo Fcst (real cerrado + fcst futuro)
+      TT RECEPCIONES EFECTIVAS DEL MES   → TT S/. + Compras Pry S/.
+      TOTAL ON HAND AL CIERRE DE MES     → Stk Final S/.
+      TOTAL ON HAND + TT CIERRE DE MES   → Stk[M] + TT_RECEPCIONES[M+1]
+      Meses de stock (todos los meses)   → MOI
+    """
+    from modules.flujo_costos import (
+        _fetch_ventas, _fetch_stock, _fetch_pos,
+        _compute_transitos, _compute_compras_pry,
+        _load_factor_override, _load_budget_df, _load_fcst_override_df,
+        _all_periods, _closed_set, _build_matrix, _period_label,
+    )
+
+    today    = datetime.today()
+    periods  = _all_periods()
+    closed   = _closed_set()
+
+    # Solo meses del año actual para esta tabla
+    curr_periods = [p for p in periods if p.year == today.year]
+    curr_labels  = [_period_label(p) for p in curr_periods]
+    cur_lbl      = _period_label(pd.Timestamp(today.year, today.month, 1))
+
+    # ── Datos ─────────────────────────────────────────────────────────────────
+    _cid       = id(conn)
+    factor_ovr = _load_factor_override()
+
+    try:
+        df_ventas = _fetch_ventas(_cid, _conn=conn)
+        df_stock  = _fetch_stock(_cid,  _conn=conn)
+        # Usar datos raw de POs — formato correcto para _compute_transitos
+        df_pos_fc = _fetch_pos(_cid,    _conn=conn)
+    except Exception as e:
+        st.warning(f"Error cargando datos para tabla Stock cierre: {e}")
+        return
+
+    df_tt  = _compute_transitos(df_pos_fc, factor_ovr)
+    df_cp  = _compute_compras_pry(factor_ovr)
+    df_bud = _load_budget_df()
+    df_fov = _load_fcst_override_df()
+
+    try:
+        df_matrix = _build_matrix(
+            ventas=df_ventas, stock=df_stock,
+            transitos=df_tt, compras_pry=df_cp,
+            budget=df_bud, fcst_override=df_fov,
+            periods=periods, closed=closed, area_filter=None,
+        )
+    except Exception as e:
+        st.warning(f"Error construyendo matriz: {e}")
+        return
+
+    # ── Extraer fila CIA ───────────────────────────────────────────────────────
+    def _cia_val(metric: str, lbl: str) -> float:
+        mask = (df_matrix["__nivel__"] == "CIA") & (df_matrix["Fecha"] == metric)
+        row  = df_matrix[mask]
+        if row.empty or lbl not in row.columns:
+            return 0.0
+        try:
+            return float(row[lbl].iloc[0] or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # ── Construir las 5 filas ──────────────────────────────────────────────────
+    vta_costo = [_cia_val("Vta Costo Fcst", lbl) for lbl in curr_labels]
+    tt_rec    = [_cia_val("TT S/.", lbl) + _cia_val("Compras Pry S/.", lbl)
+                 for lbl in curr_labels]
+    stk_hand  = [_cia_val("Stk Final S/.", lbl) for lbl in curr_labels]
+    moi       = [_cia_val("MOI", lbl) for lbl in curr_labels]
+
+    # TOTAL ON HAND + TT CIERRE = Stk[i] + TT_REC[i+1]
+    onhand_tt = []
+    for i, lbl in enumerate(curr_labels):
+        tt_next = tt_rec[i + 1] if i + 1 < len(curr_labels) else 0.0
+        onhand_tt.append(stk_hand[i] + tt_next)
+
+    # ── HTML ──────────────────────────────────────────────────────────────────
+    NAVY      = "#1F3563"
+    GREEN_HDR = "#00B050"
+    YELLOW_BG = "#FFFF00"
+    LABEL_W   = "220px"
+    CELL_W    = "90px"
+    BORDER    = "#C8CBD4"
+
+    def _fmt_int(v: float) -> str:
+        return "—" if v == 0 else f"{v:,.0f}"
+
+    def _fmt_moi(v: float) -> str:
+        return "—" if v == 0 else f"{v:.2f}"
+
+    rows_data = [
+        ("VENTA A COSTO DEL MES",           vta_costo, _fmt_int, "#FFFFFF"),
+        ("TT RECEPCIONES EFECTIVAS DEL MES", tt_rec,   _fmt_int, "#FFFFFF"),
+        ("TOTAL ON HAND AL CIERRE DE MES",   stk_hand, _fmt_int, "#FFFFFF"),
+        ("TOTAL ON HAND + TT CIERRE DE MES", onhand_tt,_fmt_int, "#FFFFFF"),
+        ("Meses de stock (todos los meses)", moi,      _fmt_moi, YELLOW_BG),
+    ]
+
+    # Header
+    th_base = (
+        f"padding:6px 10px;border:1px solid {BORDER};"
+        f"color:#FFFFFF;font-weight:bold;font-size:11px;text-align:center;"
+    )
+    header_cells = (
+        f"<th style='{th_base}background:{NAVY};width:{LABEL_W};text-align:left;'>Indicador</th>"
+    )
+    for lbl in curr_labels:
+        bg = GREEN_HDR if lbl == cur_lbl else NAVY
+        header_cells += f"<th style='{th_base}background:{bg};width:{CELL_W};'>{lbl}</th>"
+
+    # Body
+    body_rows = ""
+    for label, values, fmt_fn, row_bg in rows_data:
+        td_label = (
+            f"<td style='padding:5px 8px;border:1px solid {BORDER};"
+            f"background:{NAVY};color:#FFFFFF;font-weight:bold;"
+            f"font-size:11px;width:{LABEL_W};'>{label}</td>"
+        )
+        cells = td_label
+        for i, v in enumerate(values):
+            lbl = curr_labels[i]
+            bg  = GREEN_HDR if lbl == cur_lbl else row_bg
+            fc  = "#FFFFFF" if bg in (NAVY, GREEN_HDR) else "#000000"
+            cells += (
+                f"<td style='padding:5px 8px;border:1px solid {BORDER};"
+                f"background:{bg};color:{fc};font-size:11px;"
+                f"text-align:right;'>{fmt_fn(v)}</td>"
+            )
+        body_rows += f"<tr>{cells}</tr>"
+
+    html = (
+        "<div style='overflow-x:auto;'>"
+        "<table style='border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif;"
+        "width:100%;margin-bottom:12px;'>"
+        f"<thead><tr>{header_cells}</tr></thead>"
+        f"<tbody>{body_rows}</tbody>"
+        "</table></div>"
+    )
+    st.markdown("#### Stock Cierre MES")
+    st.html(html)
+
+
+def _render_exportar_plan_compra(conn, df_pos, maestra):
+    """Tab: tabla Stock cierre MES + carga Factor de Importación y genera resumen Plan de Compra."""
+    # ── Tabla Stock Cierre MES ─────────────────────────────────────────────────
+    _render_stock_cierre_tabla(conn)
+    st.markdown("---")
     st.markdown("#### Resumen Plan de Compra")
     st.caption(
         "Combina las OC pendientes de **FT_COMPRAS** con las compras proyectadas "
@@ -1831,4 +1993,4 @@ def render_plan_compras(conn):
         _render_detalle_pos(df_filt)
 
     with tab5:
-        _render_exportar_plan_compra(df_pos, maestra)
+        _render_exportar_plan_compra(conn, df_pos, maestra)

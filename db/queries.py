@@ -2775,6 +2775,11 @@ WHERE a.fecha = (
 )
 AND a.stock_unidades > 0
 AND bo.nom_almacen IS NOT NULL
+AND (
+    LOWER(bo.nom_almacen) LIKE '%cdu.%'
+    OR LOWER(bo.nom_almacen) LIKE '%contenedor%'
+    OR LOWER(bo.nom_almacen) LIKE '%transito mercaderia%'
+)
 GROUP BY 1, 2, 3, 4, 5, 6, 7
 """
 

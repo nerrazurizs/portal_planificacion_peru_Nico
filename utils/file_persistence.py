@@ -44,6 +44,43 @@ def _ensure_dir() -> None:
     _INPUTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _sanitize_for_parquet(df: pd.DataFrame) -> pd.DataFrame:
+    """Fix mixed-type object columns that pyarrow cannot serialize.
+
+    Common cases in the projection DataFrame:
+    - MES_QUIEBRE: mix of pd.NaT / Timestamps (OK after the fix) or int 0 + Timestamps
+    - Boolean columns that ended up as object due to concat with int rows
+    - Any object column that should be numeric or datetime
+
+    Returns a copy with problematic columns coerced to safe types.
+    """
+    df = df.copy()
+    for col in df.columns:
+        if df[col].dtype == object:
+            # Try to infer a better dtype
+            sample = df[col].dropna()
+            if sample.empty:
+                df[col] = df[col].astype(str).replace("None", "").replace("nan", "")
+                continue
+            first = sample.iloc[0]
+            # Datetime-like: coerce to datetime64
+            if isinstance(first, (pd.Timestamp,)):
+                df[col] = pd.to_datetime(df[col], errors="coerce")
+            # Boolean-like object: coerce to int
+            elif isinstance(first, (bool,)):
+                df[col] = df[col].fillna(False).astype(int)
+            else:
+                # Try numeric; fallback to string
+                try:
+                    df[col] = pd.to_numeric(df[col], errors="raise").fillna(0)
+                except Exception:
+                    df[col] = df[col].fillna("").astype(str)
+        # Downcast boolean to int8 for parquet compatibility
+        elif df[col].dtype == bool:
+            df[col] = df[col].astype("int8")
+    return df
+
+
 def _save_metadata(meta: dict) -> None:
     """Write metadata.json."""
     _ensure_dir()
@@ -217,24 +254,31 @@ def save_projection_results(
     """
     _ensure_dir()
     try:
-        df_proy.to_parquet(_PROY_FILE, index=False, engine="pyarrow")
+        df_save = _sanitize_for_parquet(df_proy)
+        df_save.to_parquet(_PROY_FILE, index=False, engine="pyarrow")
 
         if df_proy_daily is not None and not df_proy_daily.empty:
-            df_proy_daily.to_parquet(_PROY_DAILY_FILE, index=False, engine="pyarrow")
+            _sanitize_for_parquet(df_proy_daily).to_parquet(
+                _PROY_DAILY_FILE, index=False, engine="pyarrow"
+            )
 
         # Update metadata with projection info
         meta = load_metadata()
         meta["projection"] = {
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "sim_mode": sim_mode,
-            "n_skus": int(df_proy["SKU_PRODUCTO"].nunique()) if "SKU_PRODUCTO" in df_proy.columns else 0,
-            "n_periodos": int(df_proy["PERIODO"].nunique()) if "PERIODO" in df_proy.columns else 0,
-            "n_rows": len(df_proy),
+            "n_skus": int(df_save["SKU_PRODUCTO"].nunique()) if "SKU_PRODUCTO" in df_save.columns else 0,
+            "n_periodos": int(df_save["PERIODO"].nunique()) if "PERIODO" in df_save.columns else 0,
+            "n_rows": len(df_save),
             "file_size_mb": round(_PROY_FILE.stat().st_size / 1_048_576, 1),
         }
         _save_metadata(meta)
-    except Exception:
-        pass  # Silently fail — projection still works in memory
+    except Exception as _e:
+        import streamlit as st  # import here to avoid circular deps at module level
+        try:
+            st.warning(f"⚠️ No se pudo guardar el parquet de proyección: {_e}")
+        except Exception:
+            pass  # fuera de contexto Streamlit (tests, CLI)
 
 
 def load_projection_results() -> tuple[pd.DataFrame | None, pd.DataFrame | None]:

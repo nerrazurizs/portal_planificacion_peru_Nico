@@ -218,6 +218,7 @@ _DISPLAY_COLS_T1 = [
 
 _DISPLAY_COLS_T2 = [
     "SKU_PRODUCTO", "NOM_PRODUCTO", "AREA", "LINEA", "SUBLINEA", "MARCA",
+    "ALERTA_RETIRAR",
     "M3_UNIDAD", "UNIDADES_X_PALLET", "M3_TOTAL", "CANT_PALLETS",
     "STOCK_UNIDADES", "STOCK_COSTO", "MOI",
 ]
@@ -237,6 +238,7 @@ _COL_CONFIG_BASE = {
     "STOCK_COSTO":        st.column_config.NumberColumn("Stock Costo", format="$%,.0f"),
     "MOI":                st.column_config.NumberColumn("MOI (meses)", format="%.1f"),
     "PRODUCTO_STATUS":     st.column_config.TextColumn("Status", width="small"),
+    "ALERTA_RETIRAR":      st.column_config.TextColumn("Alerta", width="large"),
     "SUGERIDO_CONTENEDOR": st.column_config.TextColumn("Sugerido Contenedor", width="large"),
     "CANT_SUGERIDA":      st.column_config.NumberColumn("Cant. a Separar", format="%.0f",
                               help="Unidades a mover al contenedor dejando 6 meses en destino actual"),
@@ -355,6 +357,9 @@ def render_analisis_contenedor(conn):
     df_cont_raw   = df_raw[mask_cont].copy()
     df_otras_raw  = df_raw[mask_incl & ~mask_cont].copy()
 
+    # SKUs con MOI <= 1 en Tabla 1 (calculado antes de filtros de usuario)
+    skus_bajo_moi: set = set()
+
     # Aggregate per SKU (sum across bodegas within each group)
     def _agg_sku(df):
         grp_cols = ["SKU_PRODUCTO", "NOM_PRODUCTO", "AREA", "LINEA", "SUBLINEA", "MARCA",
@@ -389,6 +394,11 @@ def render_analisis_contenedor(conn):
         # Enrich first so MOI is available for the filter options
         df_t1 = _enrich(df_otras, df_ventas, n_meses_t1)
         df_t1 = _add_status(df_t1, df_primera_venta)
+
+        # Capturar SKUs con stock critico (MOI <= 1) antes de aplicar filtros de usuario
+        skus_bajo_moi = set(
+            df_t1.loc[df_t1["MOI"].fillna(float("inf")) <= 1, "SKU_PRODUCTO"]
+        )
 
         # ── Filters ──────────────────────────────────────────────────────────
         with st.expander("🔍 Filtros", expanded=False):
@@ -550,7 +560,17 @@ def render_analisis_contenedor(conn):
         if not sel_moi_sin_datos:
             df_t2 = df_t2[df_t2["MOI"].notna()]
 
-        df_t2 = df_t2.sort_values("M3_TOTAL", ascending=False)
+        # Alerta: SKUs cuyo MOI en Tabla 1 es <= 1 deben salir del contenedor
+        df_t2["ALERTA_RETIRAR"] = df_t2["SKU_PRODUCTO"].apply(
+            lambda sku: "⚠️ Retirar de Contenedor y Poner Disponible"
+            if sku in skus_bajo_moi else ""
+        )
+
+        # Ordenar: alertas primero, luego por M3 total descendente
+        df_t2["_tiene_alerta"] = (df_t2["ALERTA_RETIRAR"] != "").astype(int)
+        df_t2 = df_t2.sort_values(
+            ["_tiene_alerta", "M3_TOTAL"], ascending=[False, False]
+        ).drop(columns=["_tiene_alerta"])
 
         show_cols2 = [c for c in _DISPLAY_COLS_T2 if c in df_t2.columns]
         st.dataframe(

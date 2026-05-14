@@ -3012,10 +3012,10 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
 
             # ── Indicator / text columns ──
             h_rows["WARNING_FC_REAL"]     = ""
-            h_rows["QUIEBRE_POR_PERFIL"]  = False
-            h_rows["TIENE_QUIEBRE"]       = False
-            h_rows["MES_QUIEBRE"]         = 0
-            h_rows["MESES_HASTA_QUIEBRE"] = 0
+            h_rows["QUIEBRE_POR_PERFIL"]  = 0
+            h_rows["TIENE_QUIEBRE"]       = 0
+            h_rows["MES_QUIEBRE"]         = pd.NaT   # mismo dtype que df_sim (Timestamp/NaT)
+            h_rows["MESES_HASTA_QUIEBRE"] = 0.0
             h_rows["DEMANDA_AVG_3M"]      = 0.0
             h_rows["LOST_SALES_TIENDA"]   = 0.0
             h_rows["LOST_SALES_CD"]       = 0.0
