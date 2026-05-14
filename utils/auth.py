@@ -63,7 +63,7 @@ ALL_MODULES = [
 def get_current_user() -> dict:
     """Return a minimal user dict from the active Snowflake SSO session."""
     try:
-        email = st.experimental_user.email or ""
+        email = st.user.email or ""
     except Exception:
         email = ""
     nombre = email.split("@")[0].replace(".", " ").title() if email else "Usuario"
