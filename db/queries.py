@@ -986,14 +986,14 @@ ult_ing AS (
         MAX(c.fecha_recepcion_en_cd) AS fecha_ult_ing_cd
     FROM {_COMPRAS} c
     WHERE c.fecha_recepcion_en_cd IS NOT NULL
-      AND COALESCE(c.cantidad_carpeta_recepcionada, 0) > 0
+      AND COALESCE(TRY_CAST(c.cantidad_carpeta_recepcionada AS FLOAT), 0) > 0
     GROUP BY c.sku_producto
 ),
 qty_ult_ing AS (
     SELECT
         c.sku_producto,
         u.fecha_ult_ing_cd,
-        SUM(COALESCE(c.cantidad_carpeta_recepcionada, 0)) AS qty_recibida
+        SUM(COALESCE(TRY_CAST(c.cantidad_carpeta_recepcionada AS FLOAT), 0)) AS qty_recibida
     FROM {_COMPRAS} c
     INNER JOIN ult_ing u
         ON  c.sku_producto          = u.sku_producto
