@@ -181,6 +181,7 @@ def _enrich(df: pd.DataFrame, conn) -> tuple[pd.DataFrame, list[str]]:
                 "SUBLINEA":      "FAMILIA",   # en Perú familia == sublinea
                 "MARCA":         "MARCA",
                 "LINEA":         "LINEA",
+                "AREA":          "AREA",      # grupo → area en vw_producto
             }
             maestra = maestra.rename(columns=rename_map)
             cols_to_keep = ["id_material"] + [v for v in rename_map.values()
@@ -203,7 +204,7 @@ def _enrich(df: pd.DataFrame, conn) -> tuple[pd.DataFrame, list[str]]:
 
     # ── Normalizar columnas de producto ──────────────────────────────────
     for col in ["PROCEDENCIA", "MIX_OFICIAL", "ORIGEN", "COD_PROVEEDOR",
-                "PROVEEDOR", "FAMILIA", "MARCA", "LINEA"]:
+                "PROVEEDOR", "FAMILIA", "MARCA", "LINEA", "AREA"]:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
         else:
@@ -880,7 +881,8 @@ def _export_excel(
     OC_COLS = [
         "contenedor_id", "tipo_cont", "contenedores_grupo",
         "COD_PROVEEDOR", "PROVEEDOR", "ORIGEN", "id_material",
-        "FAMILIA", "MARCA", "mes_llegada_orig", "mes_llegada", "delta_meses",
+        "AREA", "LINEA", "FAMILIA", "MARCA",
+        "mes_llegada_orig", "mes_llegada", "delta_meses",
         "fecha_oc", "lead_time", "fecha_llegada", "orden", "VOLUMEN", "cbm_orden",
         "valor_orden", "costo_promedio", "stock_cd", "demanda", "rop", "moi_en_oc",
         "accion", "cbm_contenedor", "cap_contenedor", "fill_pct_cont",
@@ -1190,7 +1192,8 @@ def _tab_detalle(df_imp_opt: pd.DataFrame) -> None:
     OC_COLS = [
         "contenedor_id", "tipo_cont", "contenedores_grupo",
         "COD_PROVEEDOR", "PROVEEDOR", "ORIGEN", "id_material",
-        "FAMILIA", "MARCA", "mes_llegada_orig", "mes_llegada", "delta_meses",
+        "AREA", "LINEA", "FAMILIA", "MARCA",
+        "mes_llegada_orig", "mes_llegada", "delta_meses",
         "fecha_oc", "lead_time", "fecha_llegada", "orden", "VOLUMEN", "cbm_orden",
         "valor_orden", "costo_promedio", "stock_cd", "demanda", "rop", "moi_en_oc",
         "accion", "cbm_contenedor", "cap_contenedor", "fill_pct_cont",
