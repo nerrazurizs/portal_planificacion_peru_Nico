@@ -64,6 +64,7 @@ PLANNER_MODULES = [
     "Fcst vs Vta Retail",
     "Analisis Venta",
     "Agotamiento",
+    "Optimizador Compras",
 ]
 
 # Modules that only jefe+ can access (everything else is also available)

@@ -107,6 +107,7 @@ from db.queries import (
     QUERY_FAMILIA_MODELO,
     QUERY_STOCK_HIST_MENSUAL,
     QUERY_AGOTAMIENTO,
+    QUERY_DT_PRODUCTO,
 )
 from utils.filters import norm_cols
 
@@ -933,6 +934,14 @@ def last_refresh_label() -> str:
     return f"Ultima actualizacion: {ts.strftime('%H:%M')}"
 
 
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def dt_producto(_conn_id, _conn=None) -> pd.DataFrame:
+    """Product dimensions (ALTO, ANCHO, PROFUNDIDAD) from dt_producto.
+    Used by Optimizador de Compras to calculate VOLUMEN (CBM/unit).
+    """
+    return _run(QUERY_DT_PRODUCTO, _conn)
+
+
 # ---------------------------------------------------------------------------
 # Alerta Forecast helpers
 # ---------------------------------------------------------------------------
@@ -1265,3 +1274,7 @@ class cached_query:
     @staticmethod
     def alerta_vta_semanal(conn):
         return alerta_vta_semanal(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def dt_producto(conn):
+        return dt_producto(cached_query._cid(conn), _conn=conn)

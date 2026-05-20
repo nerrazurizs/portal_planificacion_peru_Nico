@@ -301,6 +301,17 @@ qualify row_number() over (
 ) = 1
 """
 
+QUERY_DT_PRODUCTO = """
+select
+    cod_producto,
+    procedencia,
+    volumen,
+    densidad
+from db_dimensiones.dim.dt_producto
+where coalesce(volumen, 0) > 0
+   or coalesce(densidad, 0) > 0
+"""
+
 # -- Dashboard ejecutivo (queries livianas) --
 
 QUERY_DASHBOARD_VENTAS_MTD = f"""
