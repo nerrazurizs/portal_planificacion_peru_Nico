@@ -397,16 +397,27 @@ def _build_stats(
     return stats
 
 
-def _classify_alert(fc: float, media: float, umbral_alerta: float, umbral_advertencia: float) -> str:
-    """Clasifica basado en ratio FC / Media historica.
+def _classify_alert(
+    fc: float,
+    media: float,
+    umbral_alerta: float,
+    umbral_advertencia: float,
+    venta_mes_actual: float = 0,
+) -> str:
+    """Clasifica basado en ratio FC / Media historica y venta real del mes.
 
-    SIN DATOS : forecast nulo/cero o sin historial
-    OK        : FC <= Media * RATIO_ADVERTENCIA
-    ADVERTENCIA: Media * RATIO_ADVERTENCIA < FC <= Media * RATIO_ALERTA
-    ALERTA    : FC > Media * RATIO_ALERTA
+    SIN DATOS    : forecast nulo/cero o sin historial de ventas
+    ALERTA       : FC > Media * RATIO_ALERTA  (sobreestimacion extrema)
+                   o FC < VENTA_MES_ACTUAL    (subestimacion — ya se esta vendiendo mas)
+    ADVERTENCIA  : Media * RATIO_ADVERTENCIA < FC <= Media * RATIO_ALERTA
+    OK           : FC <= Media * RATIO_ADVERTENCIA  y  FC >= VENTA_MES_ACTUAL
     """
     if pd.isna(fc) or fc <= 0 or pd.isna(media) or media <= 0:
         return "SIN DATOS"
+    # Subestimacion: el forecast ya es menor a lo vendido en el mes actual
+    vma = venta_mes_actual if not pd.isna(venta_mes_actual) else 0
+    if vma > 0 and fc < vma:
+        return "ALERTA"
     if fc > umbral_alerta:
         return "ALERTA"
     if fc > umbral_advertencia:
@@ -460,7 +471,8 @@ def _build_alert_table(
 
     merged["ESTADO"] = merged.apply(
         lambda r: _classify_alert(
-            r["FC_UND"], r["MEDIA_4M"], r["UMBRAL_ALERTA"], r["UMBRAL_ADVERTENCIA"]
+            r["FC_UND"], r["MEDIA_4M"], r["UMBRAL_ALERTA"], r["UMBRAL_ADVERTENCIA"],
+            r.get("VENTA_MES_ACTUAL", 0),
         ),
         axis=1,
     )
@@ -545,12 +557,13 @@ _README_ROWS = [
 ]
 
 _README_ESTADOS = [
-    ("🟢 OK",          f"FC / Media ≤ {_RATIO_ADVERTENCIA}x",
-     f"El forecast no supera el {int((_RATIO_ADVERTENCIA-1)*100)} % sobre el promedio. Sin accion requerida."),
+    ("🟢 OK",          f"FC / Media ≤ {_RATIO_ADVERTENCIA}x  y  FC ≥ Venta MTD",
+     f"El forecast no supera el {int((_RATIO_ADVERTENCIA-1)*100)} % sobre el promedio y cubre la venta del mes. Sin accion requerida."),
     ("🟡 ADVERTENCIA", f"{_RATIO_ADVERTENCIA}x < FC / Media ≤ {_RATIO_ALERTA}x",
      f"El forecast supera el {int((_RATIO_ADVERTENCIA-1)*100)} % sobre el promedio. Revisar si hay justificacion."),
-    ("🔴 ALERTA",      f"FC / Media > {_RATIO_ALERTA}x",
-     f"El forecast es mas del doble del promedio. Corregir o documentar la razon antes de aprobar."),
+    ("🔴 ALERTA",      f"FC / Media > {_RATIO_ALERTA}x  o  FC < Venta MTD",
+     f"Sobreestimacion: forecast mas del doble del promedio. "
+     f"Subestimacion: forecast ya por debajo de lo vendido en el mes. Corregir antes de aprobar."),
     ("⚪ SIN DATOS",   "FC nulo/cero o sin historial de ventas",
      "No se puede calcular el ratio. Verificar si el SKU tiene historial de ventas en ese CC."),
 ]
@@ -805,24 +818,24 @@ def _render_definiciones():
           <p style='margin:0 0 0.8rem'>
             El sistema compara el <strong>forecast cargado</strong> contra el
             <strong>promedio de venta real de los ultimos 4 meses cerrados</strong>
+            y contra la <strong>venta acumulada del mes actual (MTD)</strong>
             por cada combinacion <em>SKU x Centro de Costo</em>.
-            Se usa el <strong>ratio FC / Media historica</strong> para detectar
-            forecasts sobreestimados, independientemente del nivel de ventas.
-            Ejemplo: media = 10 und → forecast = 25 → ratio = 2.5x → 🔴 ALERTA.
+            Ejemplo sobreestimacion: media = 10 und → forecast = 25 → ratio = 2.5x → 🔴 ALERTA.<br>
+            Ejemplo subestimacion: venta MTD = 80 und → forecast = 50 → 🔴 ALERTA (ya se vendio mas de lo forecasted).
           </p>
           <div style='display:flex;gap:1rem;flex-wrap:wrap'>
             <div style='flex:1;min-width:200px;background:#E8F5E9;border-left:5px solid #43A047;
                         padding:0.8rem;border-radius:6px'>
               <div style='font-weight:700;color:#43A047'>🟢 OK</div>
-              <div>FC / Media &le; {_RATIO_ADVERTENCIA}x &nbsp;(+{adv_pct}%)</div>
+              <div>FC / Media &le; {_RATIO_ADVERTENCIA}x &nbsp;y&nbsp; FC &ge; Venta MTD</div>
               <div style='color:#555;font-size:0.82rem;margin-top:0.3rem'>
-                El forecast no supera el {adv_pct}% sobre el promedio historico. No se requiere accion.
+                El forecast no supera el {adv_pct}% sobre el promedio y cubre la venta actual. Sin accion.
               </div>
             </div>
             <div style='flex:1;min-width:200px;background:#FFF8E1;border-left:5px solid #FB8C00;
                         padding:0.8rem;border-radius:6px'>
               <div style='font-weight:700;color:#FB8C00'>🟡 ADVERTENCIA</div>
-              <div>{_RATIO_ADVERTENCIA}x &lt; FC / Media &le; {_RATIO_ALERTA}x &nbsp;(+{adv_pct}% – +{alt_pct}%)</div>
+              <div>{_RATIO_ADVERTENCIA}x &lt; FC / Media &le; {_RATIO_ALERTA}x</div>
               <div style='color:#555;font-size:0.82rem;margin-top:0.3rem'>
                 El forecast supera el {adv_pct}% sobre el promedio.
                 <strong>Revisar</strong> si hay un evento o justificacion.
@@ -831,10 +844,11 @@ def _render_definiciones():
             <div style='flex:1;min-width:200px;background:#FFEBEE;border-left:5px solid #E53935;
                         padding:0.8rem;border-radius:6px'>
               <div style='font-weight:700;color:#E53935'>🔴 ALERTA</div>
-              <div>FC / Media &gt; {_RATIO_ALERTA}x &nbsp;(+{alt_pct}%)</div>
+              <div>FC / Media &gt; {_RATIO_ALERTA}x &nbsp;<em>o</em>&nbsp; FC &lt; Venta MTD</div>
               <div style='color:#555;font-size:0.82rem;margin-top:0.3rem'>
-                El forecast es mas del doble del promedio historico.
-                <strong>Corregir el forecast</strong> o documentar la razon antes de aprobar.
+                <strong>Sobreestimacion:</strong> forecast mas del doble del promedio historico.<br>
+                <strong>Subestimacion:</strong> forecast ya por debajo de lo vendido en el mes.
+                Corregir antes de aprobar.
               </div>
             </div>
           </div>
@@ -1350,7 +1364,7 @@ def render_convertir_forecast():
         st.caption(
             f"El archivo tendra **24 columnas de meses**: "
             f"{meses_salida[0].strftime('%b %y')} → {meses_salida[-1].strftime('%b %y')}.  \n"
-            "Los meses sin datos en el archivo fuente quedan en **0**."
+            "Los meses sin datos en el archivo fuente quedan **vacios**."
         )
 
     # ── Columnas descriptoras a conservar (primera aparicion por SKU x CC) ───
@@ -1389,18 +1403,16 @@ def render_convertir_forecast():
         columns="PERIODO",
         values="FORECAST_SUGERIDO",
         aggfunc="sum",
-        fill_value=0,
     ).reset_index()
     pivot.columns.name = None
 
     # ── Expandir / rellenar los 24 meses de salida ────────────────────────────
-    # Convertir columnas Timestamp existentes a clave periodo
     existing_month_cols = {
         c: c for c in pivot.columns if isinstance(c, pd.Timestamp)
     }
     for mes in meses_salida:
         if mes not in existing_month_cols:
-            pivot[mes] = 0      # mes no presente en la fuente → 0
+            pivot[mes] = None   # mes sin datos → celda vacia en Excel
 
     # Reordenar: primero idx_cols, luego los 24 meses en orden cronologico
     pivot = pivot[idx_cols + list(meses_salida)]
