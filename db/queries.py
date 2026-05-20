@@ -2938,3 +2938,32 @@ WHERE v.fecha >= DATEADD('week', -8, DATE_TRUNC('week', CURRENT_DATE()))
   AND v.cantidad > 0
 GROUP BY 1, 2, 3
 """
+
+# ============================================================
+# ANALISIS FORECAST — ventas unitarias mensuales (36 meses)
+# ============================================================
+QUERY_FORECAST_VCM_HISTORICO = f"""
+SELECT
+    a.sku_producto,
+    COALESCE(p.nom_producto, CAST(a.sku_producto AS VARCHAR)) AS nom_producto,
+    COALESCE(p.area,       'SIN ASIGNAR')                     AS area,
+    COALESCE(p.linea,      'SIN ASIGNAR')                     AS linea,
+    COALESCE(p.sublinea,   'SIN ASIGNAR')                     AS sublinea,
+    COALESCE(p.marca,      'SIN ASIGNAR')                     AS marca,
+    COALESCE(p.mix_oficial,'SIN ASIGNAR')                     AS mix_oficial,
+    CASE TRIM(a.cod_canal)
+        WHEN '03' THEN 'TIENDA'
+        WHEN '02' THEN 'MAYORISTA'
+        WHEN '06' THEN 'ETAIL'
+        ELSE COALESCE(TRIM(a.cod_canal), 'SIN CANAL')
+    END                                                       AS canal,
+    DATE_TRUNC('month', a.fecha)                              AS periodo,
+    SUM(a.cantidad)                                           AS unidades
+FROM {_VCM} a
+LEFT JOIN {_PROD} p ON a.sku_producto = p.sku_producto
+WHERE a.fecha >= DATEADD('month', -36, DATE_TRUNC('month', CURRENT_DATE()))
+  AND a.fecha <  DATE_TRUNC('month', CURRENT_DATE())
+  AND a.cantidad > 0
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
+ORDER BY 9
+"""

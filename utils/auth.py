@@ -83,6 +83,7 @@ JEFE_EXTRA_MODULES = [
     "Capacidad Volumetrica",
     "Flujo de Costos",
     "Analisis Contenedor",
+    "Analisis Forecast",
 ]
 
 ALL_MODULES = PLANNER_MODULES + JEFE_EXTRA_MODULES

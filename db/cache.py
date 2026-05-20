@@ -39,6 +39,7 @@ from db.queries import (
     QUERY_CONTENEDOR_STOCK,
     QUERY_CONTENEDOR_DIMS,
     QUERY_CONTENEDOR_VENTAS_12M,
+    QUERY_FORECAST_VCM_HISTORICO,
     QUERY_COMEX_FULL,
     QUERY_DASHBOARD_COMEX,
     QUERY_DASHBOARD_VENTAS_MTD,
@@ -874,6 +875,12 @@ def contenedor_ventas_12m(_conn_id, _conn=None) -> pd.DataFrame:
     return _run(QUERY_CONTENEDOR_VENTAS_12M, _conn)
 
 
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def vcm_forecast_historico(_conn_id, _conn=None) -> pd.DataFrame:
+    """Ventas unitarias mensuales ultimos 36 meses por SKU + jerarquia — para Analisis Forecast."""
+    return _run(QUERY_FORECAST_VCM_HISTORICO, _conn)
+
+
 # ---------------------------------------------------------------------------
 # Cache management
 # ---------------------------------------------------------------------------
@@ -881,6 +888,7 @@ def contenedor_ventas_12m(_conn_id, _conn=None) -> pd.DataFrame:
 # Registry of all cached functions for batch clearing
 _ALL_CACHED = [
     contenedor_stock, contenedor_dims, contenedor_ventas_12m,
+    vcm_forecast_historico,
     maestra, ventas_aa, ventas_mes_anterior, ventas_hist_proyeccion, ventas_semanales,
     ventas_historicas, ventas_ytd, ventas_ytd_aa,
     ventas_mensual_precio, ventas_semanal_tendencia,
@@ -1265,6 +1273,11 @@ class cached_query:
     @staticmethod
     def contenedor_ventas_12m(conn):
         return contenedor_ventas_12m(cached_query._cid(conn), _conn=conn)
+
+    # -- Analisis Forecast (24h) --
+    @staticmethod
+    def vcm_forecast_historico(conn):
+        return vcm_forecast_historico(cached_query._cid(conn), _conn=conn)
 
     # -- Alerta Forecast (diario) --
     @staticmethod
