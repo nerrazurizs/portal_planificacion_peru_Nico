@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 from db.queries import QUERY_STOCK_BASE, _PROD
+from db.cache import run_sql
 from config import apply_pm_filter
 from utils.sql_builder import build_in_clause, build_ilike, append_condition
 from utils.filters import limpiar_lista, fmt_clp
@@ -168,7 +169,7 @@ def render_stock(conn):
 
         try:
             with lottie_spinner("snowflake"):
-                df = pd.read_sql(final_query, conn, params=all_params)
+                df = run_sql(conn, final_query, all_params)
                 df.columns = [c.upper() for c in df.columns]
                 df = apply_pm_filter(df)
 

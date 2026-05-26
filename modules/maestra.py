@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 
 from db.queries import QUERY_MAESTRA, _PROD
+from db.cache import run_sql
 from config import apply_pm_filter
 from utils.sql_builder import build_ilike, build_in_clause, append_condition
 from utils.filters import limpiar_lista, fmt_clp
@@ -122,7 +123,7 @@ def render_maestra(conn):
 
         try:
             with lottie_spinner("snowflake"):
-                df = pd.read_sql(query, conn, params=flat_params if flat_params else None)
+                df = run_sql(conn, query, flat_params if flat_params else None)
                 df.columns = [c.upper() for c in df.columns]
                 df = apply_pm_filter(df)
 

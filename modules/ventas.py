@@ -7,6 +7,7 @@ from utils.filters import limpiar_lista, fmt_clp
 from utils.export import download_buttons
 from utils.ui_animations import lottie_spinner
 from db.queries import _VCM, _PROD
+from db.cache import run_sql
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -210,7 +211,7 @@ def render_ventas(conn):
 
         try:
             with lottie_spinner("snowflake"):
-                df = pd.read_sql(query, conn, params=params)
+                df = run_sql(conn, query, params)
                 df.columns = [c.upper() for c in df.columns]
                 df = apply_pm_filter(df)
 

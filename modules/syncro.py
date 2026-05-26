@@ -12,20 +12,28 @@ from utils.export import download_buttons
 
 from utils.ui_animations import lottie_spinner
 from config import apply_pm_filter
+from db.cache import run_sql, _quote_param
 
 
 def _safe_read_sql(conn, query, params):
     """Execute a Snowflake query, handling hex-float errors ('0x1.0p0').
 
     Strategy:
-    1. Try normal pd.read_sql first.
+    1. Try run_sql (formats params in Python, avoids Snowflake %s issue).
     2. On hex-float error (Snowflake 100038), get column metadata via LIMIT 0,
        then re-issue the query wrapping every FLOAT/NUMBER column with
        TRY_TO_DOUBLE() which gracefully parses hex-float representations.
     """
-    _params = params if params else None
+    # Pre-format SQL with params so both the main and fallback paths
+    # send plain SQL without %s placeholders to Snowflake.
+    if params:
+        quoted = tuple(_quote_param(p) for p in params)
+        formatted_query = query % quoted
+    else:
+        formatted_query = query
+
     try:
-        return pd.read_sql(query, conn, params=_params)
+        return pd.read_sql(formatted_query, conn)
     except Exception as e:
         if "0x" not in str(e) and "100038" not in str(e):
             raise
@@ -33,7 +41,7 @@ def _safe_read_sql(conn, query, params):
     # ── Fallback: discover column types via LIMIT 0 (reads 0 rows → no
     # hex-float error), then re-select with TRY_TO_DOUBLE wrapping. ──
     cur = conn.cursor()
-    cur.execute(f"SELECT * FROM ({query}) _meta LIMIT 0", _params)
+    cur.execute(f"SELECT * FROM ({formatted_query}) _meta LIMIT 0")
     col_descs = cur.description  # (name, type_code, display_size, ...)
 
     safe_cols = []
@@ -47,8 +55,8 @@ def _safe_read_sql(conn, query, params):
         else:
             safe_cols.append(f'"{name}"')
 
-    safe_query = f"SELECT {', '.join(safe_cols)} FROM ({query}) _sq"
-    cur.execute(safe_query, _params)
+    safe_query = f"SELECT {', '.join(safe_cols)} FROM ({formatted_query}) _sq"
+    cur.execute(safe_query)
     return cur.fetch_pandas_all()
 
 

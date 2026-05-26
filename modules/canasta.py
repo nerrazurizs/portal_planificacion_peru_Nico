@@ -16,6 +16,7 @@ from itertools import combinations
 from datetime import date, timedelta
 
 from db.queries import QUERY_CANASTA
+from db.cache import run_sql
 from utils.filters import norm_cols, human_format
 from utils.export import download_buttons
 from config import COLORS, dorel_layout, apply_pm_filter
@@ -59,7 +60,7 @@ def _fmt_dec_cl(v, decimals=2):
 
 def _load_canasta(conn, fecha_ini, fecha_fin):
     """Carga transacciones para análisis de canasta."""
-    df = pd.read_sql(QUERY_CANASTA, conn, params=[str(fecha_ini), str(fecha_fin)])
+    df = run_sql(conn, QUERY_CANASTA, [str(fecha_ini), str(fecha_fin)])
     return norm_cols(df)
 
 

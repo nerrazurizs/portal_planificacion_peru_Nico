@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from db.queries import QUERY_COMEX_BASE, _PROD
+from db.cache import run_sql
 from utils.sql_builder import (
     build_in_clause,
     build_ilike,
@@ -129,7 +130,7 @@ def render_comex(conn):
                     for p in params_list:
                         flat_params.extend(p)
 
-                df = pd.read_sql(final_query, conn, params=flat_params if flat_params else None)
+                df = run_sql(conn, final_query, flat_params if flat_params else None)
                 df.columns = [c.upper() for c in df.columns]
                 # Deduplicate columns (safety: SELECT * may produce overlaps)
                 df = df.loc[:, ~df.columns.duplicated()]

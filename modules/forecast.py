@@ -14,7 +14,7 @@ from db.queries import (
     _PROD,
 )
 from config import COLORS, dorel_layout, apply_pm_filter
-from db.cache import cached_query as cq
+from db.cache import cached_query as cq, run_sql
 from utils.filters import norm_cols
 from utils.ui_animations import lottie_spinner
 
@@ -33,7 +33,7 @@ def get_mirror_quality(df_input, conn, start_date, end_date):
     params = espejos + [str(start_date), str(end_date)]
 
     try:
-        df_quality = pd.read_sql(query, conn, params=params)
+        df_quality = run_sql(conn, query, params)
     except Exception as e:
         return None, None, f"Error consultando Snowflake: {e}"
 
@@ -333,7 +333,7 @@ def process_forecast_mirror(df_input, conn, start_date, end_date, dates_map=None
 
         # A) Hierarchy
         q_hier = QUERY_MIRROR_HIERARCHY.format(placeholders=placeholders)
-        df_hier = pd.read_sql(q_hier, conn, params=espejos)
+        df_hier = run_sql(conn, q_hier, espejos)
 
         # B) Historical sales
         real_start, real_end = start_date, end_date
@@ -345,7 +345,7 @@ def process_forecast_mirror(df_input, conn, start_date, end_date, dates_map=None
 
         q_hist = QUERY_MIRROR_HIST_SKU.format(placeholders=placeholders)
         params_hist = espejos + [str(real_start), str(real_end)]
-        df_hist_raw = pd.read_sql(q_hist, conn, params=params_hist)
+        df_hist_raw = run_sql(conn, q_hist, params_hist)
         df_hist_raw.columns = [c.upper() for c in df_hist_raw.columns]
         df_hist_raw["FECHA"] = pd.to_datetime(df_hist_raw["FECHA"]).dt.date
 
@@ -365,7 +365,7 @@ def process_forecast_mirror(df_input, conn, start_date, end_date, dates_map=None
             GROUP BY 1, 2
             """
             params_sub = sublineas + [str(start_date), str(end_date)]
-            df_hist_sub = pd.read_sql(q_nivel2, conn, params=params_sub)
+            df_hist_sub = run_sql(conn, q_nivel2, params_sub)
             df_hist_sub.columns = [c.upper() for c in df_hist_sub.columns]
 
         # Global fallback
@@ -377,7 +377,7 @@ def process_forecast_mirror(df_input, conn, start_date, end_date, dates_map=None
           AND b.canal_de_distribucion = 'TIENDA'
         GROUP BY 1
         """
-        df_global = pd.read_sql(q_global, conn, params=[str(start_date), str(end_date)])
+        df_global = run_sql(conn, q_global, [str(start_date), str(end_date)])
         df_global.columns = [c.upper() for c in df_global.columns]
 
         # Filter to ACTIVA TIENDA stores only
@@ -613,7 +613,7 @@ def _load_mirror_history_batch(conn, espejo_skus, start_date, end_date):
     GROUP BY 1, 2, 3, 4, 5
     """
     params = list(espejo_skus) + [str(start_date), str(end_date)]
-    df = pd.read_sql(query, conn, params=params)
+    df = run_sql(conn, query, params)
     df.columns = [c.upper() for c in df.columns]
     if "PERIODO" in df.columns:
         df["PERIODO"] = pd.to_datetime(df["PERIODO"])

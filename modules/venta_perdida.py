@@ -24,28 +24,11 @@ from db.queries import (
     QUERY_MAESTRA, QUERY_ETA_PENDIENTE_POR_SKU,
     _VCM, _INSTOCK, _INSTOCK_CD, _PROD,
 )
+from db.cache import run_sql as _run_sql
 from utils.export import download_buttons
 from utils.filters import limpiar_lista, norm_cols
 from utils.ui_animations import lottie_spinner
 from utils.ui_components import simple_kpi_card
-
-
-# ── SQL helper ────────────────────────────────────────────────────────────────
-
-
-def _run_sql(conn, sql: str, params: list) -> pd.DataFrame:
-    """Execute a parameterized SQL query and return a DataFrame.
-
-    Formats the SQL in Python before sending to Snowflake, because the
-    Snowflake connector in SiS does NOT unescape %% → % when params are
-    passed via cursor.execute — causing syntax errors on LIKE '%%FOO%%'.
-
-    All params in this module are date strings (str(date)), so quoting them
-    directly as 'YYYY-MM-DD' is safe.
-    """
-    quoted = tuple(f"'{p}'" for p in params)
-    formatted_sql = sql % quoted
-    return pd.read_sql(formatted_sql, conn)
 
 
 # ── Cached helpers ────────────────────────────────────────────────────────────

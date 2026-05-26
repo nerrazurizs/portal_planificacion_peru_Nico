@@ -118,8 +118,40 @@ TTL_COMEX = 3_600        # 1 hour   -- comex (updated during the workday)
 
 
 # ---------------------------------------------------------------------------
-# Internal: run query + norm_cols
+# SQL execution helpers
 # ---------------------------------------------------------------------------
+
+def _quote_param(v) -> str:
+    """Quote a single parameter value for safe inline SQL substitution."""
+    if v is None:
+        return 'NULL'
+    if isinstance(v, bool):
+        return 'TRUE' if v else 'FALSE'
+    if isinstance(v, (int, float)):
+        return str(v)
+    return "'" + str(v).replace("'", "''") + "'"
+
+
+def run_sql(conn, sql: str, params=None) -> pd.DataFrame:
+    """Execute a parameterized SQL query and return a DataFrame.
+
+    The Snowflake connector in SiS (via get_active_session().connection)
+    does NOT process %s placeholders nor unescape %% when params are
+    passed through cursor.execute — both cause Snowflake syntax errors.
+
+    This helper formats the SQL in Python before sending it:
+      - %s  → quoted parameter value
+      - %%  → %  (for LIKE/ILIKE wildcards)
+
+    Handles: date strings, plain strings, integers, floats,
+             ILIKE wildcards (%val%), IN clause values.
+    """
+    if not params:
+        return pd.read_sql(sql, conn)
+    quoted = tuple(_quote_param(p) for p in params)
+    return pd.read_sql(sql % quoted, conn)
+
+
 def _run(query: str, conn) -> pd.DataFrame:
     """Execute query and normalize column names."""
     df = pd.read_sql(query, conn)
@@ -128,7 +160,7 @@ def _run(query: str, conn) -> pd.DataFrame:
 
 def _run_params(query: str, conn, params: tuple) -> pd.DataFrame:
     """Execute parameterized query (%s placeholders) and normalize."""
-    df = pd.read_sql(query, conn, params=params)
+    df = run_sql(conn, query, params)
     return norm_cols(df)
 
 
