@@ -30,6 +30,24 @@ from utils.ui_animations import lottie_spinner
 from utils.ui_components import simple_kpi_card
 
 
+# ── SQL helper ────────────────────────────────────────────────────────────────
+
+
+def _run_sql(conn, sql: str, params: list) -> pd.DataFrame:
+    """Execute a parameterized SQL query and return a DataFrame.
+
+    Formats the SQL in Python before sending to Snowflake, because the
+    Snowflake connector in SiS does NOT unescape %% → % when params are
+    passed via cursor.execute — causing syntax errors on LIKE '%%FOO%%'.
+
+    All params in this module are date strings (str(date)), so quoting them
+    directly as 'YYYY-MM-DD' is safe.
+    """
+    quoted = tuple(f"'{p}'" for p in params)
+    formatted_sql = sql % quoted
+    return pd.read_sql(formatted_sql, conn)
+
+
 # ── Cached helpers ────────────────────────────────────────────────────────────
 
 
@@ -114,7 +132,7 @@ def _load_cd_recovery_events(_conn, lookback_start, range_end):
     ) sub
     WHERE stock_cd > 0 AND prev_stock = 0
     """
-    df = pd.read_sql(sql, _conn, params=[str(lookback_start), str(range_end)])
+    df = _run_sql(_conn, sql, [str(lookback_start), str(range_end)])
     df = norm_cols(df)
     if "RECOVERY_DATE" in df.columns:
         df["RECOVERY_DATE"] = pd.to_datetime(df["RECOVERY_DATE"])
@@ -673,7 +691,7 @@ def _compute_vp_range(conn, stock_start, stock_end,
 
         # ── Tienda VP (SKU level) — always unfiltered ──
         sql_t = _sql_vp_tienda(dias_ventana, mix_values, perfil_only)
-        df_t = norm_cols(pd.read_sql(sql_t, conn, params=prm_base))
+        df_t = norm_cols(_run_sql(conn, sql_t, prm_base))
         if not df_t.empty:
             all_tienda.append(df_t)
 
@@ -714,7 +732,7 @@ def _compute_vp_range(conn, stock_start, stock_end,
                 WHERE a.fecha >= %s AND a.fecha <= %s
                 """
                 _diag_prm = [str(f_ini), str(f_fin), str(ms), str(me)]
-                _df_diag = pd.read_sql(_diag_sql, conn, params=_diag_prm)
+                _df_diag = _run_sql(conn, _diag_sql, _diag_prm)
                 st.session_state["vp_store_diag"] = _df_diag
             except Exception:
                 pass
@@ -748,9 +766,7 @@ def _compute_vp_range(conn, stock_start, stock_end,
                     AND d.sku_producto = s.sku_producto
                     AND d.id_sucursal = s.id_sucursal
                 """
-                _xj_df = pd.read_sql(
-                    _xj_sql, conn, params=prm_base,
-                )
+                _xj_df = _run_sql(conn, _xj_sql, prm_base)
                 st.session_state["vp_crossjoin_diag"] = _xj_df
             except Exception as _xe:
                 st.session_state["vp_crossjoin_diag"] = f"ERROR: {_xe}"
@@ -771,7 +787,7 @@ def _compute_vp_range(conn, stock_start, stock_end,
         sql_ts = _sql_vp_tienda_by_store(
             dias_ventana, mix_values, perfil_only,
         )
-        df_ts = norm_cols(pd.read_sql(sql_ts, conn, params=prm_base))
+        df_ts = norm_cols(_run_sql(conn, sql_ts, prm_base))
         if not df_ts.empty:
             all_by_store.append(df_ts)
 
@@ -780,13 +796,13 @@ def _compute_vp_range(conn, stock_start, stock_end,
             dias_ventana, mix_values, perfil_only,
             filter_cd_instock=filter_cd_instock,
         )
-        df_td = norm_cols(pd.read_sql(sql_td, conn, params=prm_detail))
+        df_td = norm_cols(_run_sql(conn, sql_td, prm_detail))
         if not df_td.empty:
             all_detail.append(df_td)
 
         # ── CD VP ──
         sql_c = _sql_vp_cd(dias_ventana, mix_values)
-        df_c = norm_cols(pd.read_sql(sql_c, conn, params=prm_cd))
+        df_c = norm_cols(_run_sql(conn, sql_c, prm_cd))
         if not df_c.empty:
             all_cd.append(df_c)
 
