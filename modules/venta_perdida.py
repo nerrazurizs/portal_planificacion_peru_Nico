@@ -1058,7 +1058,8 @@ def _run_diagnostics(conn, stock_start, stock_end, demand_start, demand_end):
 
     # 2. Stock rows by tipo almacen (for the date range)
     try:
-        df_stock = pd.read_sql(
+        df_stock = _run_sql(
+            conn,
             f"SELECT COALESCE(CAST(al.cod_tipoalmacen AS VARCHAR), "
             f"       'SIN_MATCH') AS tipo, "
             f"       COUNT(*) AS filas, "
@@ -1068,7 +1069,7 @@ def _run_diagnostics(conn, stock_start, stock_end, demand_start, demand_end):
             f"    ON a.cod_bodega = al.cod_almacen "
             f"WHERE a.fecha >= %s AND a.fecha <= %s "
             f"GROUP BY 1 ORDER BY 2 DESC",
-            conn, params=[str(stock_start), str(stock_end)],
+            [str(stock_start), str(stock_end)],
         )
         results["stock_por_tipo"] = df_stock
     except Exception:
@@ -1076,7 +1077,8 @@ def _run_diagnostics(conn, stock_start, stock_end, demand_start, demand_end):
 
     # 3. Perfil distribution (tiendas tipo=9)
     try:
-        df_perfil = pd.read_sql(
+        df_perfil = _run_sql(
+            conn,
             f"SELECT COALESCE(a.perfil, 'NULL') AS perfil, COUNT(*) AS filas "
             f"FROM {_INSTOCK} a "
             f"INNER JOIN db_dimensiones.dim.dt_almacen al "
@@ -1084,7 +1086,7 @@ def _run_diagnostics(conn, stock_start, stock_end, demand_start, demand_end):
             f"WHERE a.fecha >= %s AND a.fecha <= %s "
             f"  AND al.cod_tipoalmacen = '9' "
             f"GROUP BY 1",
-            conn, params=[str(stock_start), str(stock_end)],
+            [str(stock_start), str(stock_end)],
         )
         results["perfil"] = df_perfil
     except Exception:
@@ -1092,7 +1094,8 @@ def _run_diagnostics(conn, stock_start, stock_end, demand_start, demand_end):
 
     # 4. VCM demand rows for tiendas tipo=9
     try:
-        df_demand = pd.read_sql(
+        df_demand = _run_sql(
+            conn,
             f"SELECT COUNT(*) AS filas, "
             f"       COUNT(DISTINCT v.sku_producto) AS skus, "
             f"       SUM(v.cantidad) AS total_qty "
@@ -1103,7 +1106,7 @@ def _run_diagnostics(conn, stock_start, stock_end, demand_start, demand_end):
             f"WHERE v.fecha >= %s AND v.fecha <= %s "
             f"  AND v.cantidad > 0 "
             f"  AND al.cod_tipoalmacen = '9'",
-            conn, params=[str(demand_start), str(demand_end)],
+            [str(demand_start), str(demand_end)],
         )
         results["demanda_tienda"] = df_demand
     except Exception:

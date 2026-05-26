@@ -582,8 +582,8 @@ def _detect_granular_columns(df):
 
 def _load_mirror_history(conn, espejo_sku, start_date, end_date):
     """Load monthly sales by sucursal+canal for a mirror SKU."""
-    df = pd.read_sql(QUERY_MIRROR_HIST_MONTHLY, conn,
-                     params=[espejo_sku, str(start_date), str(end_date)])
+    df = run_sql(conn, QUERY_MIRROR_HIST_MONTHLY,
+                 [espejo_sku, str(start_date), str(end_date)])
     df.columns = [c.upper() for c in df.columns]
     if "PERIODO" in df.columns:
         df["PERIODO"] = pd.to_datetime(df["PERIODO"])
