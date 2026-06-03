@@ -45,6 +45,7 @@ PLANNER_MODULES = [
     "Generador Forecast",
     "Proyeccion Stock",
     "Plan de Compras & OTB",
+    "In-Out bound",
     "Forecast Diario",
     "Ventas",
     "Dashboard Stock",

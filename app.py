@@ -57,6 +57,7 @@ from modules.analisis_venta import render_analisis_venta
 from modules.analisis_contenedor import render_analisis_contenedor
 from modules.optimizador_compras import render_optimizador_compras
 from modules.analisis_forecast import render_analisis_forecast
+from modules.inbound import render_inbound
 from db.cache import cached_query as cq, clear_all as clear_query_cache, last_refresh_label, auto_refresh_if_new_day
 from utils.ui_animations import lottie_spinner, show_lottie, animated_kpi_row
 
@@ -285,6 +286,7 @@ def main_app():
             ("🎲", "Generador Forecast"),
             ("📈", "Proyeccion Stock"),
             ("📋", "Plan de Compras & OTB"),
+            ("📦", "In-Out bound"),
             ("💡", "Simulador Rentab."),
             ("📅", "Forecast Diario"),
             ("🔄", "Redistribucion Stock"),
@@ -502,6 +504,7 @@ def main_app():
         "Forecast Diario": render_forecast_diario,
         "Resumen Compra": render_resumen_compra,
         "Plan de Compras & OTB": render_plan_compras,
+        "In-Out bound": render_inbound,
         "Flujo de Costos": render_flujo_costos,
         "InStock Historico": render_instock_historico,
         # Pasillo Infinito: pendiente validar tabla db_pos.fct.ft_venta_pasillo_infinito en Peru
