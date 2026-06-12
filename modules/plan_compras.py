@@ -27,12 +27,14 @@ from utils.filters import norm_cols, human_format
 from utils.export import download_buttons
 from utils.budget import load_budget
 from utils.ui_animations import lottie_spinner, show_empty_state, show_success
+from utils.file_persistence import save_input_file, get_saved_file_path, get_saved_file_info
+from utils.auth import get_current_user
 from config import COLORS, TC_USD_DEFAULT, dorel_layout, apply_pm_filter
 
 # ─── Constantes ────────────────────────────────────────────────────────────────
 def _get_tc():
     """TC USD/PEN desde sidebar (session_state) o default del config."""
-    return st.session_state.get("tc_usd_clp", TC_USD_DEFAULT)
+    return st.session_state.get("tc_usd_pen", TC_USD_DEFAULT)
 TRANSIT_DAYS = 47         # Días tránsito marítimo (consistente con SQL DATEADD(day,47,...))
 MESES_ES = {
     1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr",  5: "May",  6: "Jun",
@@ -1514,10 +1516,11 @@ def _render_stock_cierre_tabla(conn):
       Meses de stock (todos los meses)   → MOI
     """
     from modules.flujo_costos import (
-        _fetch_ventas, _fetch_stock, _fetch_pos,
+        _fetch_ventas, _fetch_stock, _fetch_pos_enriched,
         _compute_transitos, _compute_compras_pry,
         _load_factor_override, _load_budget_df, _load_fcst_override_df,
         _all_periods, _closed_set, _build_matrix, _period_label,
+        _consolidate_pos,
     )
 
     today    = datetime.today()
@@ -1536,8 +1539,12 @@ def _render_stock_cierre_tabla(conn):
     try:
         df_ventas = _fetch_ventas(_cid, _conn=conn)
         df_stock  = _fetch_stock(_cid,  _conn=conn)
-        # Usar datos raw de POs — formato correcto para _compute_transitos
-        df_pos_fc = _fetch_pos(_cid,    _conn=conn)
+        # Usar datos compartidos por render_plan_compras (idénticos a _generar_plan_compra)
+        _shared   = st.session_state.get("_pc_df_pos_shared")
+        if _shared is not None and not _shared.empty:
+            df_pos_fc = _consolidate_pos(_shared)
+        else:
+            df_pos_fc = _fetch_pos_enriched(_cid, _conn=conn)
     except Exception as e:
         st.warning(f"Error cargando datos para tabla Stock cierre: {e}")
         return
@@ -1659,8 +1666,38 @@ def _render_exportar_plan_compra(conn, df_pos, maestra):
         "de **proy_result.parquet**. Sube el archivo de factores para calcular montos en soles."
     )
 
+    # ── Factor guardado en disco ──────────────────────────────────────────────
+    _saved_factor_path = get_saved_file_path("factor_importacion")
+    _saved_factor_info = get_saved_file_info("factor_importacion")
+
+    # Fallback: factor_override.xlsx (mismo formato, usado por Flujo de Costos)
+    _FACTOR_OVERRIDE = Path(__file__).resolve().parent.parent / "data" / "inputs" / "factor_override.xlsx"
+
+    if _saved_factor_path is not None:
+        _factor_source = _saved_factor_path
+        _ts  = (_saved_factor_info or {}).get("uploaded_at", "")[:16].replace("T", " ")
+        _who = (_saved_factor_info or {}).get("uploaded_by_name",
+               (_saved_factor_info or {}).get("uploaded_by", ""))
+        _kb  = round((_saved_factor_info or {}).get("size_bytes", 0) / 1024, 1)
+        st.success(
+            f"✅ **{(_saved_factor_info or {}).get('filename', 'FactordeImportacion.xlsx')}** "
+            f"cargado ({_kb} KB) — subido por **{_who}** el {_ts}"
+        )
+        _uploader_label = "🔄 Actualizar FactordeImportacion.xlsx (opcional)"
+    elif _FACTOR_OVERRIDE.exists():
+        _factor_source  = _FACTOR_OVERRIDE
+        _kb_ov = round(_FACTOR_OVERRIDE.stat().st_size / 1024, 1)
+        st.info(
+            f"📋 Usando **factor_override.xlsx** ({_kb_ov} KB) como archivo base de factores. "
+            "Sube un archivo nuevo abajo para reemplazarlo."
+        )
+        _uploader_label = "📂 Cargar FactordeImportacion.xlsx (reemplaza el archivo base)"
+    else:
+        _factor_source  = None
+        _uploader_label = "📂 Cargar FactordeImportacion.xlsx"
+
     uploaded = st.file_uploader(
-        "📂 Cargar FactordeImportacion.xlsx",
+        _uploader_label,
         type=["xlsx"],
         key="uploader_factor_importacion",
         help=(
@@ -1670,21 +1707,37 @@ def _render_exportar_plan_compra(conn, df_pos, maestra):
         ),
     )
 
-    if uploaded is None:
+    # Si el usuario subió un archivo nuevo, guardarlo y usarlo
+    if uploaded is not None:
+        _cur_user = get_current_user() or {"email": "unknown", "nombre": "Desconocido"}
+        save_input_file("factor_importacion", uploaded, _cur_user)
+        _factor_source = get_saved_file_path("factor_importacion")
+        st.toast("✅ FactordeImportacion.xlsx guardado")
+
+    if _factor_source is None:
         st.info("Sube el archivo **FactordeImportacion.xlsx** para habilitar la generación.")
         return
 
     if st.button("🚀 Generar Resumen", key="btn_gen_plan_compra", type="primary"):
         with st.spinner("Procesando datos..."):
             try:
-                df_result = _generar_plan_compra(df_pos, maestra, uploaded)
+                df_result = _generar_plan_compra(df_pos, maestra, _factor_source)
             except Exception as e:
                 st.error(f"Error al generar el resumen: {e}")
-                return
+                df_result = None
 
         if df_result is None or df_result.empty:
             st.warning("No se generaron datos. Verifica los filtros y el parquet.")
-            return
+            st.session_state.pop("_fc_resumen_generado", None)
+            st.session_state.pop("_fc_excel_cache", None)
+        else:
+            # Guardar resultado y limpiar caché Excel para regenerar con datos frescos
+            st.session_state["_fc_resumen_generado"] = df_result
+            st.session_state.pop("_fc_excel_cache", None)
+
+    # ── Mostrar resultado (persiste entre re-runs vía session_state) ──────────
+    if "_fc_resumen_generado" in st.session_state:
+        df_result = st.session_state["_fc_resumen_generado"]
 
         ft_rows = int((df_result["Fuente"] == "ft_compras").sum())
         pq_rows = int((df_result["Fuente"] == "proy_result.parquet").sum())
@@ -1695,7 +1748,69 @@ def _render_exportar_plan_compra(conn, df_pos, maestra):
         col3.metric("Compras Proyectadas", f"{pq_rows:,}")
 
         st.dataframe(df_result, use_container_width=True, height=420)
-        download_buttons(df_result, "resumen_plan_compra")
+
+        # ── Botones de descarga ──────────────────────────────────────────────
+        _dl_col1, _dl_col2 = st.columns(2)
+
+        # CSV — siempre disponible
+        _ts_fc = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+        _csv_bytes = df_result.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+        _dl_col1.download_button(
+            "Descargar CSV",
+            _csv_bytes,
+            f"resumen_plan_compra_{_ts_fc}.csv",
+            "text/csv",
+            key="dl_csv_resumen_plan_compra",
+        )
+
+        # Excel — generado con xlsxwriter, cacheado en session_state
+        if "_fc_excel_cache" not in st.session_state:
+            try:
+                _buf_fc = io.BytesIO()
+                with pd.ExcelWriter(_buf_fc, engine="xlsxwriter") as _w_fc:
+                    _wb_fc = _w_fc.book
+                    _ws_fc = _wb_fc.add_worksheet("Plan Compra")
+                    _fmt_hdr = _wb_fc.add_format({"bold": True, "bg_color": "#366092",
+                                                   "font_color": "#FFFFFF", "font_size": 9})
+                    _fmt_num = _wb_fc.add_format({"font_size": 9, "num_format": "#,##0.00"})
+                    _fmt_def = _wb_fc.add_format({"font_size": 9})
+                    _num_cols = {"Amount (Moneda Orig.)", "Factor Importación",
+                                 "Amount Soles c/Factor", "Compra Unds", "Días en Agua"}
+                    # Cabeceras
+                    for _ci, _cn in enumerate(df_result.columns):
+                        _ws_fc.write(0, _ci, _cn, _fmt_hdr)
+                    # Datos — sanitizar tipos
+                    _df_fc = df_result.copy()
+                    for _wc in _df_fc.columns:
+                        if pd.api.types.is_datetime64_any_dtype(_df_fc[_wc]):
+                            _df_fc[_wc] = _df_fc[_wc].dt.strftime("%Y-%m-%d").fillna("")
+                        elif pd.api.types.is_bool_dtype(_df_fc[_wc]):
+                            _df_fc[_wc] = _df_fc[_wc].astype(int)
+                        elif _wc in _num_cols:
+                            _df_fc[_wc] = pd.to_numeric(_df_fc[_wc], errors="coerce").fillna(0)
+                        else:
+                            _df_fc[_wc] = _df_fc[_wc].fillna("").astype(str)
+                    for _ci, _cn in enumerate(_df_fc.columns):
+                        _fmt_c = _fmt_num if _cn in _num_cols else _fmt_def
+                        _ws_fc.write_column(1, _ci, _df_fc[_cn].tolist(), _fmt_c)
+                        _max_l = _df_fc[_cn].astype(str).str.len().max()
+                        _w = min(max(len(_cn), int(_max_l) if pd.notna(_max_l) else 0) + 2, 35)
+                        _ws_fc.set_column(_ci, _ci, _w)
+                    _ws_fc.freeze_panes(1, 0)
+                st.session_state["_fc_excel_cache"] = _buf_fc.getvalue()
+            except Exception as _e_xl:
+                st.warning(f"⚠️ No se pudo generar el Excel: {_e_xl}. Usa el CSV.")
+                st.session_state.pop("_fc_excel_cache", None)
+
+        if "_fc_excel_cache" in st.session_state:
+            _xl_bytes = st.session_state["_fc_excel_cache"]
+            _dl_col2.download_button(
+                f"Descargar Excel ({len(df_result):,} filas)",
+                _xl_bytes,
+                f"resumen_plan_compra_{_ts_fc}.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_excel_resumen_plan_compra",
+            )
 
 
 # ─── Entry point ───────────────────────────────────────────────────────────────
@@ -1742,6 +1857,8 @@ def render_plan_compras(conn):
     # Enriquecer POs con factor importación y costos CLP
     df_pos = _enrich_pos(df_pos_raw, maestra)
     df_pos = apply_pm_filter(df_pos)
+    # Compartir con Flujo de Costos para garantizar datos idénticos en TT S/.
+    st.session_state["_pc_df_pos_shared"] = df_pos
 
     # ── Obtener df_proy de session_state si está disponible ────────────────
     df_proy = st.session_state.get("df_proy", None)
