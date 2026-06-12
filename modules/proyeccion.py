@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
-from config import dorel_layout, apply_pm_filter
+from config import dorel_layout, apply_pm_filter, TC_USD_DEFAULT
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, numbers
 from openpyxl.utils import get_column_letter
 
@@ -1370,7 +1370,7 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
         df_sim = df_sim.merge(precios_mensuales, on=["SKU_PRODUCTO", "PERIODO_MES"], how="left")
 
     # 10d. Cost — merge from maestra (simulation doesn't carry cost columns)
-    # Fallback chain: ULTIMO_COSTO → COSTO_FOB_USD × FACTOR_IMPORTACION × 950 (USD→CLP)
+    # Fallback chain: ULTIMO_COSTO → COSTO_FOB_USD × FACTOR_IMPORTACION × TC (USD→PEN)
     # FACTOR_IMPORTACION fallback: SKU → SUBLINEA-MARCA → LINEA-MARCA → AREA-MARCA
     #                                   → SUBLINEA → LINEA → AREA
     cost_cols_needed = [c for c in ["ULTIMO_COSTO", "COSTO_FOB_USD", "FACTOR_IMPORTACION"]
@@ -1434,14 +1434,14 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
     df_sim["COSTO_UNITARIO"] = df_sim.get("ULTIMO_COSTO", pd.Series(0, index=df_sim.index))
 
     # Fallback: where ULTIMO_COSTO is 0 or NaN, use COSTO_FOB_USD × FACTOR_IMPORTACION × TC
-    TC_USD_CLP = st.session_state.get("tc_usd_clp", 950)
+    TC_USD_PEN = st.session_state.get("tc_usd_pen", TC_USD_DEFAULT)
     mask_sin_costo = (df_sim["COSTO_UNITARIO"].isna()) | (df_sim["COSTO_UNITARIO"] <= 0)
     if "COSTO_FOB_USD" in df_sim.columns and "FACTOR_IMPORTACION" in df_sim.columns:
-        costo_landed = df_sim["COSTO_FOB_USD"] * df_sim["FACTOR_IMPORTACION"] * TC_USD_CLP
+        costo_landed = df_sim["COSTO_FOB_USD"] * df_sim["FACTOR_IMPORTACION"] * TC_USD_PEN
         df_sim.loc[mask_sin_costo, "COSTO_UNITARIO"] = costo_landed[mask_sin_costo]
     elif "COSTO_FOB_USD" in df_sim.columns:
-        costo_fob_clp = df_sim["COSTO_FOB_USD"] * TC_USD_CLP
-        df_sim.loc[mask_sin_costo, "COSTO_UNITARIO"] = costo_fob_clp[mask_sin_costo]
+        costo_fob_pen = df_sim["COSTO_FOB_USD"] * TC_USD_PEN
+        df_sim.loc[mask_sin_costo, "COSTO_UNITARIO"] = costo_fob_pen[mask_sin_costo]
 
     df_sim["COSTO_UNITARIO"] = df_sim["COSTO_UNITARIO"].fillna(0)
 
@@ -2488,13 +2488,13 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
 
     # Primary cost: ULTIMO_COSTO
     df_sim["COSTO_UNITARIO"] = df_sim.get("ULTIMO_COSTO", pd.Series(0, index=df_sim.index))
-    TC_USD_CLP = st.session_state.get("tc_usd_clp", 950)
+    TC_USD_PEN = st.session_state.get("tc_usd_pen", TC_USD_DEFAULT)
     mask_sin_costo = (df_sim["COSTO_UNITARIO"].isna()) | (df_sim["COSTO_UNITARIO"] <= 0)
     if "COSTO_FOB_USD" in df_sim.columns and "FACTOR_IMPORTACION" in df_sim.columns:
-        costo_landed = df_sim["COSTO_FOB_USD"] * df_sim["FACTOR_IMPORTACION"] * TC_USD_CLP
+        costo_landed = df_sim["COSTO_FOB_USD"] * df_sim["FACTOR_IMPORTACION"] * TC_USD_PEN
         df_sim.loc[mask_sin_costo, "COSTO_UNITARIO"] = costo_landed[mask_sin_costo]
     elif "COSTO_FOB_USD" in df_sim.columns:
-        df_sim.loc[mask_sin_costo, "COSTO_UNITARIO"] = df_sim.loc[mask_sin_costo, "COSTO_FOB_USD"] * TC_USD_CLP
+        df_sim.loc[mask_sin_costo, "COSTO_UNITARIO"] = df_sim.loc[mask_sin_costo, "COSTO_FOB_USD"] * TC_USD_PEN
     df_sim["COSTO_UNITARIO"] = df_sim["COSTO_UNITARIO"].fillna(0)
 
     df_sim["ORIGEN_COSTO"] = np.where(
@@ -3377,7 +3377,7 @@ README_DATA = [
     ["Costos", "FLAG_SIN_COSTO", "Flag booleano: True si el SKU no tiene costo valido (ORIGEN_COSTO=SIN_COSTO o COSTO_UNITARIO<=0). Util para filtrar y limpiar calculos de margen"],
     ["Costos", "", "JERARQUIA DE FALLBACK para COSTO_UNITARIO:"],
     ["Costos", "", "  1) ULTIMO_COSTO (del sistema ERP, si existe y > 0)"],
-    ["Costos", "", "  2) COSTO_FOB_USD x FACTOR_IMPORTACION x 950 (TC USD/CLP referencia)"],
+    ["Costos", "", "  2) COSTO_FOB_USD x FACTOR_IMPORTACION x TC (USD/PEN del sidebar)"],
     ["Costos", "", "  3) Si falta FACTOR_IMPORTACION: se imputa promedio por Sublinea+Marca, luego Linea+Marca, luego Area+Marca, luego Sublinea, Linea, Area"],
     ["Costos", "", "  4) 0 (SIN_COSTO) como ultimo recurso"],
     ["Costos", "", ""],
@@ -3580,7 +3580,7 @@ README_DATA = [
     ["LOGICA SIMULACION", "", "  5) No hay reposicion automatica durante el mes (solo compras planificadas en el plan de compras)"],
     ["LOGICA SIMULACION", "", "  6) Lost sales son definitivas: demanda no satisfecha no se recupera en dias posteriores"],
     ["LOGICA SIMULACION", "", "  7) Pro-rateo CD: si no alcanza stock para Etail + Mayor, se reparte proporcionalmente"],
-    ["LOGICA SIMULACION", "", "  8) Tipo de cambio referencia: USD/CLP = 950 para calculo de landed cost (cuando falta costo sistema)"],
+    ["LOGICA SIMULACION", "", "  8) Tipo de cambio referencia: USD/PEN del sidebar para calculo de landed cost (cuando falta costo sistema)"],
     ["LOGICA SIMULACION", "", "  9) Factor de importacion: si no existe para un SKU, se imputa promedio por Sublinea, Linea o Area"],
     ["LOGICA SIMULACION", "", " 10) Para HISTORICO, la venta restricta = venta real (no hay simulacion, es dato observado)"],
     ["LOGICA SIMULACION", "", ""],

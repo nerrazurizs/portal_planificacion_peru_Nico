@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from config import get_css, COLORS, PM_NAMES, apply_pm_filter
+from config import get_css, COLORS, PM_NAMES, apply_pm_filter, TC_USD_DEFAULT
 from db.connection import get_snowflake_connection, get_active_connection
 from utils.auth import (
     authenticate,
@@ -377,23 +377,24 @@ def main_app():
     def _fetch_tc_live():
         try:
             import yfinance as yf
-            t = yf.Ticker("USDCLP=X")
+            t = yf.Ticker("USDPEN=X")
             h = t.history(period="1d")
             if not h.empty:
-                return round(float(h["Close"].iloc[-1]), 1)
+                return round(float(h["Close"].iloc[-1]), 2)
         except Exception:
             pass
         return None
 
     tc_live = _fetch_tc_live()
-    _tc_help = "Tipo de cambio USD→CLP para valorización de costos. Budget: 950."
+    _tc_help = f"Tipo de cambio USD→PEN para valorización de costos. Budget: {TC_USD_DEFAULT:.2f}."
     if tc_live:
-        _tc_help += f" TC actual de mercado: ${tc_live:,.0f}"
+        _tc_help += f" TC actual de mercado: S/ {tc_live:,.2f}"
 
     st.sidebar.number_input(
-        f"TC USD/CLP" + (f"  *(actual: ${tc_live:,.0f})*" if tc_live else ""),
-        min_value=500, max_value=1500, value=950, step=10,
-        key="tc_usd_clp",
+        "TC USD/PEN" + (f"  *(actual: S/ {tc_live:,.2f})*" if tc_live else ""),
+        min_value=2.0, max_value=8.0, value=TC_USD_DEFAULT, step=0.05,
+        format="%.2f",
+        key="tc_usd_pen",
         help=_tc_help,
     )
 

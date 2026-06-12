@@ -32,7 +32,7 @@ from config import COLORS, TC_USD_DEFAULT, dorel_layout, apply_pm_filter
 # ─── Constantes ────────────────────────────────────────────────────────────────
 def _get_tc():
     """TC USD/PEN desde sidebar (session_state) o default del config."""
-    return st.session_state.get("tc_usd_clp", TC_USD_DEFAULT)
+    return st.session_state.get("tc_usd_pen", TC_USD_DEFAULT)
 TRANSIT_DAYS = 47         # Días tránsito marítimo (consistente con SQL DATEADD(day,47,...))
 MESES_ES = {
     1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr",  5: "May",  6: "Jun",

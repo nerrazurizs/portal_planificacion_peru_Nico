@@ -49,3 +49,6 @@ data/forecast_snapshots/metadata.json
 
 # Backend virtualenv
 backend/.venv/
+
+# Root virtualenv
+venv/
