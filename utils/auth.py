@@ -44,6 +44,7 @@ PLANNER_MODULES = [
     "Tablas Syncro",
     "Generador Forecast",
     "Proyeccion Stock",
+    "Frinc Detalle",
     "Plan de Compras & OTB",
     "In-Out bound",
     "Forecast Diario",

@@ -58,6 +58,7 @@ from modules.analisis_contenedor import render_analisis_contenedor
 from modules.optimizador_compras import render_optimizador_compras
 from modules.analisis_forecast import render_analisis_forecast
 from modules.inbound import render_inbound
+from modules.dashboard_gestion import render_dashboard_gestion
 from db.cache import cached_query as cq, clear_all as clear_query_cache, last_refresh_label, auto_refresh_if_new_day
 from utils.ui_animations import lottie_spinner, show_lottie, animated_kpi_row
 
@@ -285,6 +286,7 @@ def main_app():
         "PLANIFICACION": [
             ("🎲", "Generador Forecast"),
             ("📈", "Proyeccion Stock"),
+            ("📊", "Frinc Detalle"),
             ("📋", "Plan de Compras & OTB"),
             ("📦", "In-Out bound"),
             ("💡", "Simulador Rentab."),
@@ -483,6 +485,7 @@ def main_app():
         "Torre Control S&OP": render_sop_control_tower,
         "Ventas": render_ventas,
         "Proyeccion Stock": render_proyeccion,
+        "Frinc Detalle": render_dashboard_gestion,
         "Dashboard Stock": render_stock_dashboard,
         "Dashboard Stock 2.0": render_stock_dashboard_v2,
         "Caso de Negocio": render_business_case,
