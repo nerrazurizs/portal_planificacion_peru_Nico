@@ -102,8 +102,8 @@ _COMPRAS = f"""(
             TRY_TO_DATE(CAST(f.fecha_ingreso_cd AS VARCHAR), 'YYYY-MM-DD'),
             TRY_TO_DATE(CAST(f.fecha_ingreso_cd AS VARCHAR), 'YYYYMMDD')
         )                                                            AS fecha_recepcion_en_cd,
-        CAST(f.tipocambio AS FLOAT)                                  AS paridad_moneda,
-        CAST(f.tipocambio AS FLOAT)                                  AS dolar_sistema,
+        TRY_CAST(f.tipocambio AS FLOAT)                              AS paridad_moneda,
+        TRY_CAST(f.tipocambio AS FLOAT)                              AS dolar_sistema,
         CAST(f.moneda AS VARCHAR)                                    AS cod_moneda,
         CAST(f.codigo_proveedor_oc AS VARCHAR)                       AS cod_proveedor,
         f.situacion                                                  AS nom_status,
@@ -1018,7 +1018,7 @@ vtas_desde_ing AS (
     FROM {_VCM} v
     INNER JOIN qty_ult_ing q ON v.sku_producto = q.sku_producto
     WHERE v.fecha >= q.fecha_ult_ing_cd
-      AND COALESCE(v.flg_eliminado, 0) = 0
+      AND COALESCE(NULLIF(CAST(v.flg_eliminado AS VARCHAR), ''), '0') = '0'
     GROUP BY v.sku_producto
 )
 SELECT
