@@ -19,7 +19,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-from config import COLORS, apply_pm_filter
+from config import COLORS, apply_pm_filter, TC_USD_DEFAULT
 from db.queries import (
     QUERY_MAESTRA, QUERY_ETA_PENDIENTE_POR_SKU,
     _VCM, _INSTOCK, _INSTOCK_CD, _PROD,
@@ -1151,19 +1151,62 @@ def _hdr(title: str) -> str:
     )
 
 
+def _vp_sym() -> str:
+    """Símbolo de la moneda de despliegue seleccionada en el toggle."""
+    return "$" if st.session_state.get("vp_moneda") == "USD ($)" else "S/"
+
+
+def _vp_div() -> float:
+    """Divisor para convertir montos en soles a la moneda de despliegue."""
+    if st.session_state.get("vp_moneda") == "USD ($)":
+        tc = st.session_state.get("tc_usd_pen", TC_USD_DEFAULT) or TC_USD_DEFAULT
+        try:
+            tc = float(tc)
+        except (TypeError, ValueError):
+            tc = TC_USD_DEFAULT
+        return tc if tc > 0 else TC_USD_DEFAULT
+    return 1.0
+
+
+# Columnas monetarias (en soles) que deben convertirse cuando se elige USD.
+_VP_MONEY_COLS = ("VP_PESOS", "PRECIO_VCM", "ULTIMO_COSTO", "PRECIO_USADO")
+
+
+def _vp_convert(df):
+    """Devuelve una copia con las columnas monetarias en la moneda elegida.
+
+    La sesión siempre guarda los datos en soles; aquí se convierten a USD
+    (dividiendo por el TC USD/PEN) solo para el despliegue. Si la moneda es
+    soles, retorna el df sin tocar.
+    """
+    div = _vp_div()
+    if df is None or getattr(df, "empty", True) or div == 1.0:
+        return df
+    out = df.copy()
+    for c in _VP_MONEY_COLS:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0) / div
+    return out
+
+
 def _fmt_currency(val: float) -> str:
-    """Format as compact currency: $1.2B, $345M, $12K, $1,234."""
+    """Format as compact currency: 1.2B, 345M, 12K, 1,234 con el símbolo activo.
+
+    El valor ya viene en la moneda de despliegue (convertido en _vp_convert),
+    aquí solo se le antepone el símbolo (S/ o $).
+    """
+    sym = _vp_sym()
     abs_v = abs(val)
     sign = "-" if val < 0 else ""
     if abs_v >= 1_000_000_000:
-        return f"${sign}{abs_v / 1_000_000_000:,.1f}B"
+        return f"{sign}{sym} {abs_v / 1_000_000_000:,.1f}B"
     if abs_v >= 1_000_000:
-        return f"${sign}{abs_v / 1_000_000:,.1f}M"
+        return f"{sign}{sym} {abs_v / 1_000_000:,.1f}M"
     if abs_v >= 10_000:
-        return f"${sign}{abs_v / 1_000:,.0f}K"
+        return f"{sign}{sym} {abs_v / 1_000:,.0f}K"
     if abs_v >= 1_000:
-        return f"${sign}{abs_v:,.0f}"
-    return f"${sign}{abs_v:,.1f}"
+        return f"{sign}{sym} {abs_v:,.0f}"
+    return f"{sign}{sym} {abs_v:,.1f}"
 
 
 def _instock_dot(pct: float) -> str:
@@ -1320,7 +1363,7 @@ def _chart_evolucion(df_tienda, df_cd, df_detail_full=None):
         margin=dict(l=20, r=20, t=40, b=20),
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
-    fig.update_yaxes(title_text="Venta Perdida ($)", secondary_y=False)
+    fig.update_yaxes(title_text=f"Venta Perdida ({_vp_sym()})", secondary_y=False)
     fig.update_yaxes(title_text="InStock %", secondary_y=True, range=[0, 105])
 
     return fig
@@ -1358,13 +1401,13 @@ def _chart_top_skus(df, value_col="VP_PESOS", n=20, title="Top 20 SKUs"):
             y=agg["LABEL"].values[::-1],
             orientation="h",
             marker_color=COLORS.get("primary", "#065E8B"),
-            text=[f"${v:,.0f}" for v in agg[value_col].values[::-1]],
+            text=[f"{_vp_sym()} {v:,.0f}" for v in agg[value_col].values[::-1]],
             textposition="outside",
         )
     )
     fig.update_layout(
         title=title,
-        xaxis_title="Venta Perdida ($)",
+        xaxis_title=f"Venta Perdida ({_vp_sym()})",
         height=max(400, n * 28),
         margin=dict(l=20, r=20, t=40, b=20),
     )
@@ -1384,7 +1427,7 @@ def _chart_vp_por_dimension(df, dim_col, title="VP por Dimension"):
         go.Bar(
             x=agg[dim_col], y=agg["VP_PESOS"],
             marker_color=COLORS.get("accent", "#23CED3"),
-            text=[f"${v:,.0f}" for v in agg["VP_PESOS"]],
+            text=[f"{_vp_sym()} {v:,.0f}" for v in agg["VP_PESOS"]],
             textposition="outside",
         )
     )
@@ -1408,7 +1451,7 @@ def _chart_canal_donut(df):
                 COLORS.get("accent", "#23CED3"),
             ],
             textinfo="label+percent+value",
-            texttemplate="%{label}<br>%{percent}<br>$%{value:,.0f}",
+            texttemplate="%{label}<br>%{percent}<br>" + _vp_sym() + " %{value:,.0f}",
         )
     )
     fig.update_layout(
@@ -1436,12 +1479,13 @@ _CH_TIPO = {
 
 
 def _fmt_m(val: float) -> str:
-    """Format large currency values: S/ 1.2M  or  S/ 345K."""
+    """Format large currency values: 1.2M o 345K con el símbolo activo (ya convertido)."""
+    sym = _vp_sym()
     if abs(val) >= 1_000_000:
-        return f"S/ {val / 1_000_000:,.1f}M"
+        return f"{sym} {val / 1_000_000:,.1f}M"
     if abs(val) >= 1_000:
-        return f"S/ {val / 1_000:,.0f}K"
-    return f"S/ {val:,.0f}"
+        return f"{sym} {val / 1_000:,.0f}K"
+    return f"{sym} {val:,.0f}"
 
 
 def _html_summary_table(title, subtitle, col_headers, rows, accent_color,
@@ -1914,6 +1958,28 @@ def render_venta_perdida(conn):
     vp_desde = st.session_state["vp_desde"]
     vp_hasta = st.session_state["vp_hasta"]
 
+    # ── Toggle de moneda (S/ ↔ USD) ──
+    _mc_l, _mc_r = st.columns([3, 1])
+    with _mc_r:
+        st.radio(
+            "💱 Moneda",
+            ["S/", "USD ($)"],
+            horizontal=True,
+            key="vp_moneda",
+            help=(
+                "Convierte todos los montos del módulo (KPIs, tablas y "
+                "gráficos). USD usa el TC USD/PEN del sidebar."
+            ),
+        )
+    if st.session_state.get("vp_moneda") == "USD ($)":
+        _mc_l.caption(f"Montos en USD · TC USD/PEN = {_vp_div():.2f}")
+
+    # Conversión a la moneda elegida (copias; la sesión queda en soles)
+    df_tienda = _vp_convert(df_tienda)
+    df_cd = _vp_convert(df_cd)
+    df_by_store = _vp_convert(df_by_store)
+    df_detail = _vp_convert(df_detail)
+
     # ── KPIs — Chile-style cards ──
     vp_t = df_tienda["VP_PESOS"].sum() if not df_tienda.empty else 0
     vp_c = df_cd["VP_PESOS"].sum() if not df_cd.empty else 0
@@ -1932,9 +1998,9 @@ def render_venta_perdida(conn):
     skus_all = skus_t | skus_c
 
     # Compute TIPO_VP split from FILTERED detail (must match VP Tiendas)
-    df_detail_full = st.session_state.get(
+    df_detail_full = _vp_convert(st.session_state.get(
         "vp_detail_full", pd.DataFrame()
-    )
+    ))
     vp_quiebre = 0.0
     vp_reposicion = 0.0
     if (not df_detail.empty
@@ -2095,7 +2161,7 @@ def render_venta_perdida(conn):
     diag = st.session_state.get("vp_diagnostics")
     _store_diag = st.session_state.get("vp_store_diag")
     if df_tienda.empty:
-        with st.expander("🔧 Diagnostico VP Tiendas = $0", expanded=True):
+        with st.expander("🔧 Diagnostico VP Tiendas = S/ 0", expanded=True):
             # Store ID overlap diagnostic
             if _store_diag is not None and not _store_diag.empty:
                 st.write("**Overlap tiendas demand vs stock:**")
@@ -2136,7 +2202,7 @@ def render_venta_perdida(conn):
                 st.write(
                     f"**df_tienda resultado:** {_dbg['rows']} filas, "
                     f"VP_UNIDADES={_dbg['vp_unidades']:,.2f}, "
-                    f"VP_PESOS=${_dbg['vp_pesos']:,.0f}"
+                    f"VP_PESOS=S/ {_dbg['vp_pesos']:,.0f}"
                 )
                 if _dbg.get("columns"):
                     st.caption(f"Columnas: {_dbg['columns']}")
@@ -2202,13 +2268,13 @@ def render_venta_perdida(conn):
                 column_config={
                     "FECHA": st.column_config.DateColumn("Fecha"),
                     "VP_TIENDA": st.column_config.NumberColumn(
-                        "VP Tiendas ($)", format="$%.0f",
+                        f"VP Tiendas ({_vp_sym()})", format=f"{_vp_sym()} %.0f",
                     ),
                     "VP_CD": st.column_config.NumberColumn(
-                        "VP CD ($)", format="$%.0f",
+                        f"VP CD ({_vp_sym()})", format=f"{_vp_sym()} %.0f",
                     ),
                     "VP_TOTAL": st.column_config.NumberColumn(
-                        "VP Total ($)", format="$%.0f",
+                        f"VP Total ({_vp_sym()})", format=f"{_vp_sym()} %.0f",
                     ),
                 },
                 use_container_width=True, hide_index=True,
@@ -2322,7 +2388,7 @@ def render_venta_perdida(conn):
                     help="ESTABLECIDO / NUEVO / SIN VENTAS",
                 ),
                 "VP_PESOS": st.column_config.NumberColumn(
-                    "VP Acum ($)", format="$%.0f",
+                    f"VP Acum ({_vp_sym()})", format=f"{_vp_sym()} %.0f",
                 ),
                 "VP_UNIDADES": st.column_config.NumberColumn(
                     "VP Acum (Und)", format="%.0f",
@@ -2414,10 +2480,10 @@ def render_venta_perdida(conn):
                 go.Bar(
                     x=top_stores["LABEL"].values[::-1],
                     y=top_stores["VP_PESOS"].values[::-1],
-                    name="VP ($)",
+                    name=f"VP ({_vp_sym()})",
                     marker_color=COLORS.get("primary", "#065E8B"),
                     text=[
-                        f"${v:,.0f}"
+                        f"{_vp_sym()} {v:,.0f}"
                         for v in top_stores["VP_PESOS"].values[::-1]
                     ],
                     textposition="outside",
@@ -2443,7 +2509,7 @@ def render_venta_perdida(conn):
                 xaxis_tickangle=-45,
             )
             fig_stores.update_yaxes(
-                title_text="Venta Perdida ($)", secondary_y=False,
+                title_text=f"Venta Perdida ({_vp_sym()})", secondary_y=False,
             )
             fig_stores.update_yaxes(
                 title_text="InStock %", secondary_y=True,
@@ -2468,7 +2534,7 @@ def render_venta_perdida(conn):
                         "Nombre", width="medium",
                     ),
                     "VP_PESOS": st.column_config.NumberColumn(
-                        "VP Acum ($)", format="$%.0f",
+                        f"VP Acum ({_vp_sym()})", format=f"{_vp_sym()} %.0f",
                     ),
                     "VP_UNIDADES": st.column_config.NumberColumn(
                         "VP Acum (Und)", format="%.0f",
@@ -2589,7 +2655,7 @@ def render_venta_perdida(conn):
                     help="ESTABLECIDO / NUEVO / SIN VENTAS",
                 ),
                 "VP_PESOS": st.column_config.NumberColumn(
-                    "VP Acum ($)", format="$%.0f",
+                    f"VP Acum ({_vp_sym()})", format=f"{_vp_sym()} %.0f",
                 ),
                 "VP_UNIDADES": st.column_config.NumberColumn(
                     "VP Acum (Und)", format="%.0f",
@@ -2680,7 +2746,7 @@ def render_venta_perdida(conn):
                     textposition="outside",
                 ))
                 fig_comp.update_layout(
-                    title="VP por Canal y Tipo ($)",
+                    title=f"VP por Canal y Tipo ({_vp_sym()})",
                     height=300,
                     margin=dict(l=20, r=100, t=40, b=20),
                 )
@@ -2752,7 +2818,7 @@ def render_venta_perdida(conn):
                                     "Producto", width="large",
                                 ),
                                 "VP_PESOS": st.column_config.NumberColumn(
-                                    "VP ($)", format="$%.0f",
+                                    f"VP ({_vp_sym()})", format=f"{_vp_sym()} %.0f",
                                 ),
                                 "VP_UNIDADES": st.column_config.NumberColumn(
                                     "VP (Und)", format="%.0f",
@@ -2799,7 +2865,7 @@ def render_venta_perdida(conn):
                                     "Producto", width="large",
                                 ),
                                 "VP_PESOS": st.column_config.NumberColumn(
-                                    "VP ($)", format="$%.0f",
+                                    f"VP ({_vp_sym()})", format=f"{_vp_sym()} %.0f",
                                 ),
                                 "VP_UNIDADES": st.column_config.NumberColumn(
                                     "VP (Und)", format="%.0f",
@@ -2846,7 +2912,7 @@ def render_venta_perdida(conn):
                                     "Producto", width="large",
                                 ),
                                 "VP_PESOS": st.column_config.NumberColumn(
-                                    "VP ($)", format="$%.0f",
+                                    f"VP ({_vp_sym()})", format=f"{_vp_sym()} %.0f",
                                 ),
                                 "VP_UNIDADES": st.column_config.NumberColumn(
                                     "VP (Und)", format="%.0f",
@@ -2893,7 +2959,7 @@ def render_venta_perdida(conn):
                                     "Producto", width="large",
                                 ),
                                 "VP_PESOS": st.column_config.NumberColumn(
-                                    "VP ($)", format="$%.0f",
+                                    f"VP ({_vp_sym()})", format=f"{_vp_sym()} %.0f",
                                 ),
                                 "VP_UNIDADES": st.column_config.NumberColumn(
                                     "VP (Und)", format="%.0f",
@@ -3026,7 +3092,7 @@ def render_venta_perdida(conn):
                                 "Producto", width="large",
                             ),
                             "VP_PESOS": st.column_config.NumberColumn(
-                                "VP Quiebre ($)", format="$%.0f",
+                                f"VP Quiebre ({_vp_sym()})", format=f"{_vp_sym()} %.0f",
                             ),
                             "VP_UNIDADES": st.column_config.NumberColumn(
                                 "VP Quiebre (Und)", format="%.0f",
@@ -3166,7 +3232,7 @@ def render_venta_perdida(conn):
             st.caption(
                 f"Cada fila es un dia especifico × SKU × tienda. "
                 f"Total: **{len(df_det):,}** registros. "
-                f"Mostrando hasta 5,000 filas ordenadas por VP ($) desc."
+                f"Mostrando hasta 5,000 filas ordenadas por VP ({_vp_sym()}) desc."
             )
 
             raw_display = [c for c in [
@@ -3248,18 +3314,18 @@ def render_venta_perdida(conn):
                         "VP Und", format="%.4f",
                     ),
                     "VP_PESOS": st.column_config.NumberColumn(
-                        "VP ($)", format="$%.0f",
+                        f"VP ({_vp_sym()})", format=f"{_vp_sym()} %.0f",
                     ),
                     "PRECIO_VCM": st.column_config.NumberColumn(
-                        "Precio VCM", format="$%.0f",
+                        "Precio VCM", format=f"{_vp_sym()} %.0f",
                         help="Precio promedio VCM (neto/cantidad)",
                     ),
                     "ULTIMO_COSTO": st.column_config.NumberColumn(
-                        "Ult. Costo", format="$%.0f",
+                        "Ult. Costo", format=f"{_vp_sym()} %.0f",
                         help="Ultimo costo de vw_producto (fallback)",
                     ),
                     "PRECIO_USADO": st.column_config.NumberColumn(
-                        "Precio Usado", format="$%.0f",
+                        "Precio Usado", format=f"{_vp_sym()} %.0f",
                         help="Precio usado: VCM si >0, sino ultimo_costo",
                     ),
                 },
@@ -3310,7 +3376,7 @@ def render_venta_perdida(conn):
                         agg,
                         column_config={
                             "VP_PESOS": st.column_config.NumberColumn(
-                                "VP ($)", format="$%.0f",
+                                f"VP ({_vp_sym()})", format=f"{_vp_sym()} %.0f",
                             ),
                             "VP_UNIDADES": st.column_config.NumberColumn(
                                 "VP (Und)", format="%.0f",

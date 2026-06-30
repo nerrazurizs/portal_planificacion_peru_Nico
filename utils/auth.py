@@ -18,7 +18,9 @@ ALL_MODULES = [
     "Tablas Syncro",
     "Generador Forecast",
     "Proyeccion Stock",
+    "Frinc Detalle",
     "Plan de Compras & OTB",
+    "In-Out bound",
     "Forecast Diario",
     "Ventas",
     "Dashboard Stock",
@@ -38,6 +40,7 @@ ALL_MODULES = [
     "Fcst vs Vta Retail",
     "Analisis Venta",
     "Agotamiento",
+    "Optimizador Compras",
     # ANALISIS / JEFE+
     "Caso de Negocio",
     "Elasticidad",
@@ -53,6 +56,7 @@ ALL_MODULES = [
     "Capacidad Volumetrica",
     "Flujo de Costos",
     "Analisis Contenedor",
+    "Analisis Forecast",
 ]
 
 

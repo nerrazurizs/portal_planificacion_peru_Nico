@@ -20,8 +20,14 @@ if exist ".git\MERGE_HEAD" git merge --abort >nul 2>&1
 if exist ".git\rebase-merge" git rebase --abort >nul 2>&1
 if exist ".git\rebase-apply" git rebase --abort >nul 2>&1
 
-:: Proteger archivos locales que no deben sincronizarse
-git update-index --skip-worktree users.json >nul 2>&1
+:: Sacar users.json del control de versiones SIN borrar el archivo de disco.
+:: En origin/main users.json esta gitignored (no es parte del repo), pero en
+:: algunas PCs quedo trackeado en el indice con skip-worktree de corridas viejas.
+:: Eso hace fallar el 'git reset --hard' con "Entry 'users.json' not uptodate.
+:: Cannot merge". Limpiamos el bit y lo des-trackeamos: el archivo (los usuarios
+:: locales) se conserva intacto en disco y deja de estorbar al reset.
+git update-index --no-skip-worktree users.json >nul 2>&1
+git rm --cached users.json >nul 2>&1
 
 :: Sacar del tracking archivos de datos locales (resultados simulacion)
 git rm --cached data/inputs/metadata.json >nul 2>&1
@@ -34,17 +40,27 @@ for /f "delims=" %%f in ('git ls-files data/inputs/*.parquet 2^>nul') do (
 git checkout -- data/inputs/metadata.json >nul 2>&1
 git checkout -- data/inputs/proy_result.parquet >nul 2>&1
 
-:: Intentar pull directo (sin abrir editor)
-git pull --no-edit origin main
-if %ERRORLEVEL% EQU 0 (
+:: Sincronizar con el repositorio oficial.
+:: El portal de despliegue debe ser un ESPEJO EXACTO de origin/main. Por eso NO
+:: usamos 'git pull' (que intenta MEZCLAR y se atora en cada uno de estos casos):
+::   - "Pulling is not possible because you have unmerged files" (conflicto pegado)
+::   - "untracked working tree files would be overwritten by merge" (copias sueltas)
+::   - merge/rebase a medio terminar
+:: En su lugar: git fetch + git reset --hard origin/main, que FUERZA el estado del
+:: repo y resuelve los tres casos de una. Es seguro para los archivos locales:
+::   - users.json esta en .gitignore -> no se toca
+::   - los resultados de simulacion (data/inputs/*.parquet, metadata.json) son
+::     UNTRACKED y 'git reset --hard' nunca borra archivos untracked
+echo Sincronizando con el repositorio...
+git fetch --prune origin main
+if %ERRORLEVEL% NEQ 0 (
+    echo.
+    echo [ERROR] No se pudo conectar con GitHub. Revisa tu conexion a internet
+    echo         e intenta de nuevo. El portal sigue con la version actual.
+    echo.
     goto fin
 )
-
-:: Si fallo, usar stash como fallback
-echo Guardando configuracion local...
-git stash -q 2>nul
-git pull --no-edit origin main
-git stash pop -q 2>nul
+git reset --hard origin/main
 
 :fin
 echo.

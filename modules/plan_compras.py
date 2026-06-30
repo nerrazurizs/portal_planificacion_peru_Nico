@@ -27,12 +27,14 @@ from utils.filters import norm_cols, human_format
 from utils.export import download_buttons
 from utils.budget import load_budget
 from utils.ui_animations import lottie_spinner, show_empty_state, show_success
+from utils.file_persistence import save_input_file, get_saved_file_path, get_saved_file_info
+from utils.auth import get_current_user
 from config import COLORS, TC_USD_DEFAULT, dorel_layout, apply_pm_filter
 
 # ─── Constantes ────────────────────────────────────────────────────────────────
 def _get_tc():
     """TC USD/PEN desde sidebar (session_state) o default del config."""
-    return st.session_state.get("tc_usd_clp", TC_USD_DEFAULT)
+    return st.session_state.get("tc_usd_pen", TC_USD_DEFAULT)
 TRANSIT_DAYS = 47         # Días tránsito marítimo (consistente con SQL DATEADD(day,47,...))
 MESES_ES = {
     1: "Ene", 2: "Feb", 3: "Mar", 4: "Abr",  5: "May",  6: "Jun",
@@ -1379,86 +1381,95 @@ def _generar_plan_compra(df_pos, maestra, factor_file):
                 df_ft.loc[_mask_prov, "SKU_PRODUCTO"].map(_prov_map)
             )
 
-    # ── Proyección desde proy_result.parquet ───────────────────────────────
+    # ── Proyección desde proy_result.parquet (opcional) ────────────────────
     parquet_path = Path(__file__).resolve().parent.parent / "data" / "inputs" / "proy_result.parquet"
+    df_pq_rows = []  # lista vacía por defecto si el parquet no existe
+
     if not parquet_path.exists():
-        st.error(f"No se encontró proy_result.parquet en: {parquet_path}")
-        return None
+        st.warning(
+            "⚠️ No se encontró la proyección guardada (`proy_result.parquet`). "
+            "El resumen se genera **sólo con las OCs de FT_COMPRAS**. "
+            "Para incluir compras proyectadas, primero corre la **Proyección de Stock** "
+            "y luego vuelve aquí."
+        )
+        df_pq = pd.DataFrame()
+    else:
+        try:
+            df_pq = norm_cols(pd.read_parquet(parquet_path))
+        except Exception as e:
+            st.warning(f"⚠️ No se pudo leer proy_result.parquet ({e}). Se usarán sólo OCs de FT_COMPRAS.")
+            df_pq = pd.DataFrame()
 
-    try:
-        df_pq = norm_cols(pd.read_parquet(parquet_path))
-    except Exception as e:
-        st.error(f"Error leyendo proy_result.parquet: {e}")
-        return None
+    if not df_pq.empty:
+        df_pq["FORECAST_COMPRA"] = pd.to_numeric(
+            df_pq["FORECAST_COMPRA"] if "FORECAST_COMPRA" in df_pq.columns else 0,
+            errors="coerce",
+        ).fillna(0)
+        df_pq = df_pq[df_pq["FORECAST_COMPRA"] > 0].copy()
+        _periodo_pq = df_pq["PERIODO"] if "PERIODO" in df_pq.columns else pd.Series(dtype="datetime64[ns]")
+        eta_pq = pd.to_datetime(_periodo_pq, errors="coerce")
+        mask_ano_pq = eta_pq.dt.year == anio_actual
+        df_pq = df_pq[mask_ano_pq].copy()
+        eta_pq = eta_pq[mask_ano_pq]
 
-    df_pq["FORECAST_COMPRA"] = pd.to_numeric(
-        df_pq["FORECAST_COMPRA"] if "FORECAST_COMPRA" in df_pq.columns else 0,
-        errors="coerce",
-    ).fillna(0)
-    df_pq = df_pq[df_pq["FORECAST_COMPRA"] > 0].copy()
-    _periodo_pq = df_pq["PERIODO"] if "PERIODO" in df_pq.columns else pd.Series(dtype="datetime64[ns]")
-    eta_pq = pd.to_datetime(_periodo_pq, errors="coerce")
-    mask_ano_pq = eta_pq.dt.year == anio_actual
-    df_pq = df_pq[mask_ano_pq].copy()
-    eta_pq = eta_pq[mask_ano_pq]
+        # El parquet ya trae AREA, LINEA, SUBLINEA, MARCA, PROCEDENCIA,
+        # MIX_OFICIAL, COSTO_FOB_USD, ULTIMO_COSTO — no se necesita merge con maestra.
+        proc_pq = df_pq["PROCEDENCIA"].fillna("") if "PROCEDENCIA" in df_pq.columns else pd.Series("", index=df_pq.index)
+        df_pq["_FACTOR"] = [
+            _lookup_factor(r.get("AREA", ""), r.get("LINEA", ""), r.get("MARCA", ""), p)
+            for r, p in zip(df_pq.to_dict("records"), proc_pq)
+        ]
+        mask_imp_pq = proc_pq.str.strip().str.upper() == "IMPORTADO"
+        costo_fob = pd.to_numeric(
+            df_pq["COSTO_FOB_USD"] if "COSTO_FOB_USD" in df_pq.columns else 0,
+            errors="coerce",
+        ).fillna(0)
+        costo_loc = pd.to_numeric(
+            df_pq["ULTIMO_COSTO"] if "ULTIMO_COSTO" in df_pq.columns else 0,
+            errors="coerce",
+        ).fillna(0)
+        unds_pq = df_pq["FORECAST_COMPRA"]
 
-    # El parquet ya trae AREA, LINEA, SUBLINEA, MARCA, PROCEDENCIA,
-    # MIX_OFICIAL, COSTO_FOB_USD, ULTIMO_COSTO — no se necesita merge con maestra.
-    proc_pq = df_pq["PROCEDENCIA"].fillna("") if "PROCEDENCIA" in df_pq.columns else pd.Series("", index=df_pq.index)
-    df_pq["_FACTOR"] = [
-        _lookup_factor(r.get("AREA", ""), r.get("LINEA", ""), r.get("MARCA", ""), p)
-        for r, p in zip(df_pq.to_dict("records"), proc_pq)
-    ]
-    mask_imp_pq = proc_pq.str.strip().str.upper() == "IMPORTADO"
-    costo_fob = pd.to_numeric(
-        df_pq["COSTO_FOB_USD"] if "COSTO_FOB_USD" in df_pq.columns else 0,
-        errors="coerce",
-    ).fillna(0)
-    costo_loc = pd.to_numeric(
-        df_pq["ULTIMO_COSTO"] if "ULTIMO_COSTO" in df_pq.columns else 0,
-        errors="coerce",
-    ).fillna(0)
-    unds_pq = df_pq["FORECAST_COMPRA"]
+        df_pq["CURRENCY"] = np.where(mask_imp_pq, "USD", "PEN")
+        df_pq["AMOUNT"] = np.where(mask_imp_pq, costo_fob * unds_pq, costo_loc * unds_pq)
+        df_pq["AMOUNT_SOLES"] = np.where(
+            mask_imp_pq,
+            costo_fob * df_pq["_FACTOR"] * tc * unds_pq,
+            costo_loc * unds_pq,
+        )
+        df_pq["ETD"] = ""
+        df_pq["ETA"] = eta_pq.dt.strftime("%d/%m/%Y").fillna("").values
+        df_pq["MES ETA"] = eta_pq.dt.month.map(MESES_FULL).values
+        df_pq["Días agua"] = ""
+        df_pq["COMPRA_UNDS"] = unds_pq
+        df_pq["FUENTE"] = "proy_result.parquet"
+        df_pq["STATUS_PO"] = "Compra Proy"
+        df_pq["N_PO"] = "-"
+        df_pq["SKU"] = df_pq["SKU_PRODUCTO"]
+        nom_col_pq = "SKU_NOM_PRODUCTO" if "SKU_NOM_PRODUCTO" in df_pq.columns else "SKU_PRODUCTO"
+        df_pq["PRODUCTO"] = df_pq[nom_col_pq].fillna("")
+        df_pq["MIX"] = df_pq["MIX_OFICIAL"].fillna("") if "MIX_OFICIAL" in df_pq.columns else ""
+        # ── Lookup NOM_PROVEEDOR, COD_PROVEEDOR y SUBLINEA desde vw_producto ────
+        _pq_sku = df_pq["SKU_PRODUCTO"]
+        _maestra_idx = maestra.drop_duplicates("SKU_PRODUCTO").set_index("SKU_PRODUCTO")
 
-    df_pq["CURRENCY"] = np.where(mask_imp_pq, "USD", "PEN")
-    df_pq["AMOUNT"] = np.where(mask_imp_pq, costo_fob * unds_pq, costo_loc * unds_pq)
-    df_pq["AMOUNT_SOLES"] = np.where(
-        mask_imp_pq,
-        costo_fob * df_pq["_FACTOR"] * tc * unds_pq,
-        costo_loc * unds_pq,
-    )
-    df_pq["ETD"] = ""
-    df_pq["ETA"] = eta_pq.dt.strftime("%d/%m/%Y").fillna("").values
-    df_pq["MES ETA"] = eta_pq.dt.month.map(MESES_FULL).values
-    df_pq["Días agua"] = ""
-    df_pq["COMPRA_UNDS"] = unds_pq
-    df_pq["FUENTE"] = "proy_result.parquet"
-    df_pq["STATUS_PO"] = "Compra Proy"
-    df_pq["N_PO"] = "-"
-    df_pq["SKU"] = df_pq["SKU_PRODUCTO"]
-    nom_col_pq = "SKU_NOM_PRODUCTO" if "SKU_NOM_PRODUCTO" in df_pq.columns else "SKU_PRODUCTO"
-    df_pq["PRODUCTO"] = df_pq[nom_col_pq].fillna("")
-    df_pq["MIX"] = df_pq["MIX_OFICIAL"].fillna("") if "MIX_OFICIAL" in df_pq.columns else ""
-    # ── Lookup NOM_PROVEEDOR, COD_PROVEEDOR y SUBLINEA desde vw_producto ────
-    _pq_sku = df_pq["SKU_PRODUCTO"]
-    _maestra_idx = maestra.drop_duplicates("SKU_PRODUCTO").set_index("SKU_PRODUCTO")
+        df_pq["NOM_PROVEEDOR"] = (
+            _pq_sku.map(_maestra_idx["PROVEEDOR"]).fillna("")
+            if "PROVEEDOR" in maestra.columns else ""
+        )
+        df_pq["COD_PROVEEDOR"] = (
+            _pq_sku.map(_maestra_idx["COD_PROVEEDOR"]).fillna("")
+            if "COD_PROVEEDOR" in maestra.columns else ""
+        )
+        if "SUBLINEA" in maestra.columns:
+            if "SUBLINEA" not in df_pq.columns:
+                df_pq["SUBLINEA"] = pd.NA
+            _mask_sl = df_pq["SUBLINEA"].replace("", pd.NA).isna()
+            if _mask_sl.any():
+                df_pq.loc[_mask_sl, "SUBLINEA"] = _pq_sku[_mask_sl].map(_maestra_idx["SUBLINEA"])
 
-    df_pq["NOM_PROVEEDOR"] = (
-        _pq_sku.map(_maestra_idx["PROVEEDOR"]).fillna("")
-        if "PROVEEDOR" in maestra.columns else ""
-    )
-    df_pq["COD_PROVEEDOR"] = (
-        _pq_sku.map(_maestra_idx["COD_PROVEEDOR"]).fillna("")
-        if "COD_PROVEEDOR" in maestra.columns else ""
-    )
-    if "SUBLINEA" in maestra.columns:
-        if "SUBLINEA" not in df_pq.columns:
-            df_pq["SUBLINEA"] = pd.NA
-        _mask_sl = df_pq["SUBLINEA"].replace("", pd.NA).isna()
-        if _mask_sl.any():
-            df_pq.loc[_mask_sl, "SUBLINEA"] = _pq_sku[_mask_sl].map(_maestra_idx["SUBLINEA"])
-
-    df_pq["ORIGEN"] = proc_pq.values
+        df_pq["ORIGEN"] = proc_pq.values
+        df_pq_rows = [df_pq]
 
     # ── Concat final ────────────────────────────────────────────────────────
     COLS_SALIDA = [
@@ -1468,13 +1479,14 @@ def _generar_plan_compra(df_pos, maestra, factor_file):
         "AREA", "LINEA", "SUBLINEA", "MARCA", "MIX", "SKU", "PRODUCTO",
         "COMPRA_UNDS", "FUENTE",
     ]
-    for col in COLS_SALIDA:
-        if col not in df_ft.columns:
-            df_ft[col] = ""
-        if col not in df_pq.columns:
-            df_pq[col] = ""
+    frames_to_concat = []
+    for _frame in [df_ft] + df_pq_rows:
+        for col in COLS_SALIDA:
+            if col not in _frame.columns:
+                _frame[col] = ""
+        frames_to_concat.append(_frame[COLS_SALIDA])
 
-    df = pd.concat([df_ft[COLS_SALIDA], df_pq[COLS_SALIDA]], ignore_index=True)
+    df = pd.concat(frames_to_concat, ignore_index=True)
     df = df[df["AREA"].astype(str).isin(AREAS_VALIDAS)]
     df = df.rename(columns={
         "_FACTOR":      "Factor Importación",
@@ -1489,16 +1501,203 @@ def _generar_plan_compra(df_pos, maestra, factor_file):
     return df
 
 
-def _render_exportar_plan_compra(df_pos, maestra):
-    """Tab: carga Factor de Importación y genera resumen Plan de Compra."""
+# ─── Tabla Stock Cierre MES ────────────────────────────────────────────────────
+
+def _render_stock_cierre_tabla(conn):
+    """
+    Tabla visual 'Stock cierre MES' (año actual, 12 meses).
+    Reutiliza la lógica de Flujo de Costos para calcular los valores a nivel CIA.
+
+    Filas:
+      VENTA A COSTO DEL MES              → Vta Costo Fcst (real cerrado + fcst futuro)
+      TT RECEPCIONES EFECTIVAS DEL MES   → TT S/. + Compras Pry S/.
+      TOTAL ON HAND AL CIERRE DE MES     → Stk Final S/.
+      TOTAL ON HAND + TT CIERRE DE MES   → Stk[M] + TT_RECEPCIONES[M+1]
+      Meses de stock (todos los meses)   → MOI
+    """
+    from modules.flujo_costos import (
+        _fetch_ventas, _fetch_stock, _fetch_pos_enriched,
+        _compute_transitos, _compute_compras_pry,
+        _load_factor_override, _load_budget_df, _load_fcst_override_df,
+        _all_periods, _closed_set, _build_matrix, _period_label,
+        _consolidate_pos,
+    )
+
+    today    = datetime.today()
+    periods  = _all_periods()
+    closed   = _closed_set()
+
+    # Solo meses del año actual para esta tabla
+    curr_periods = [p for p in periods if p.year == today.year]
+    curr_labels  = [_period_label(p) for p in curr_periods]
+    cur_lbl      = _period_label(pd.Timestamp(today.year, today.month, 1))
+
+    # ── Datos ─────────────────────────────────────────────────────────────────
+    _cid       = id(conn)
+    factor_ovr = _load_factor_override()
+
+    try:
+        df_ventas = _fetch_ventas(_cid, _conn=conn)
+        df_stock  = _fetch_stock(_cid,  _conn=conn)
+        # Usar datos compartidos por render_plan_compras (idénticos a _generar_plan_compra)
+        _shared   = st.session_state.get("_pc_df_pos_shared")
+        if _shared is not None and not _shared.empty:
+            df_pos_fc = _consolidate_pos(_shared)
+        else:
+            df_pos_fc = _fetch_pos_enriched(_cid, _conn=conn)
+    except Exception as e:
+        st.warning(f"Error cargando datos para tabla Stock cierre: {e}")
+        return
+
+    df_tt  = _compute_transitos(df_pos_fc, factor_ovr)
+    df_cp  = _compute_compras_pry(factor_ovr)
+    df_bud = _load_budget_df()
+    df_fov = _load_fcst_override_df()
+
+    try:
+        df_matrix = _build_matrix(
+            ventas=df_ventas, stock=df_stock,
+            transitos=df_tt, compras_pry=df_cp,
+            budget=df_bud, fcst_override=df_fov,
+            periods=periods, closed=closed, area_filter=None,
+        )
+    except Exception as e:
+        st.warning(f"Error construyendo matriz: {e}")
+        return
+
+    # ── Extraer fila CIA ───────────────────────────────────────────────────────
+    def _cia_val(metric: str, lbl: str) -> float:
+        mask = (df_matrix["__nivel__"] == "CIA") & (df_matrix["Fecha"] == metric)
+        row  = df_matrix[mask]
+        if row.empty or lbl not in row.columns:
+            return 0.0
+        try:
+            return float(row[lbl].iloc[0] or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # ── Construir las 5 filas ──────────────────────────────────────────────────
+    vta_costo = [_cia_val("Vta Costo Fcst", lbl) for lbl in curr_labels]
+    tt_rec    = [_cia_val("TT S/.", lbl) + _cia_val("Compras Pry S/.", lbl)
+                 for lbl in curr_labels]
+    stk_hand  = [_cia_val("Stk Final S/.", lbl) for lbl in curr_labels]
+    moi       = [_cia_val("MOI", lbl) for lbl in curr_labels]
+
+    # TOTAL ON HAND + TT CIERRE = Stk[i] + TT_REC[i+1]
+    onhand_tt = []
+    for i, lbl in enumerate(curr_labels):
+        tt_next = tt_rec[i + 1] if i + 1 < len(curr_labels) else 0.0
+        onhand_tt.append(stk_hand[i] + tt_next)
+
+    # ── HTML ──────────────────────────────────────────────────────────────────
+    NAVY      = "#1F3563"
+    GREEN_HDR = "#00B050"
+    YELLOW_BG = "#FFFF00"
+    LABEL_W   = "220px"
+    CELL_W    = "90px"
+    BORDER    = "#C8CBD4"
+
+    def _fmt_int(v: float) -> str:
+        return "—" if v == 0 else f"{v:,.0f}"
+
+    def _fmt_moi(v: float) -> str:
+        return "—" if v == 0 else f"{v:.2f}"
+
+    rows_data = [
+        ("VENTA A COSTO DEL MES",           vta_costo, _fmt_int, "#FFFFFF"),
+        ("TT RECEPCIONES EFECTIVAS DEL MES", tt_rec,   _fmt_int, "#FFFFFF"),
+        ("TOTAL ON HAND AL CIERRE DE MES",   stk_hand, _fmt_int, "#FFFFFF"),
+        ("TOTAL ON HAND + TT CIERRE DE MES", onhand_tt,_fmt_int, "#FFFFFF"),
+        ("Meses de stock (todos los meses)", moi,      _fmt_moi, YELLOW_BG),
+    ]
+
+    # Header
+    th_base = (
+        f"padding:6px 10px;border:1px solid {BORDER};"
+        f"color:#FFFFFF;font-weight:bold;font-size:11px;text-align:center;"
+    )
+    header_cells = (
+        f"<th style='{th_base}background:{NAVY};width:{LABEL_W};text-align:left;'>Indicador</th>"
+    )
+    for lbl in curr_labels:
+        bg = GREEN_HDR if lbl == cur_lbl else NAVY
+        header_cells += f"<th style='{th_base}background:{bg};width:{CELL_W};'>{lbl}</th>"
+
+    # Body
+    body_rows = ""
+    for label, values, fmt_fn, row_bg in rows_data:
+        td_label = (
+            f"<td style='padding:5px 8px;border:1px solid {BORDER};"
+            f"background:{NAVY};color:#FFFFFF;font-weight:bold;"
+            f"font-size:11px;width:{LABEL_W};'>{label}</td>"
+        )
+        cells = td_label
+        for i, v in enumerate(values):
+            lbl = curr_labels[i]
+            bg  = GREEN_HDR if lbl == cur_lbl else row_bg
+            fc  = "#FFFFFF" if bg in (NAVY, GREEN_HDR) else "#000000"
+            cells += (
+                f"<td style='padding:5px 8px;border:1px solid {BORDER};"
+                f"background:{bg};color:{fc};font-size:11px;"
+                f"text-align:right;'>{fmt_fn(v)}</td>"
+            )
+        body_rows += f"<tr>{cells}</tr>"
+
+    html = (
+        "<div style='overflow-x:auto;'>"
+        "<table style='border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif;"
+        "width:100%;margin-bottom:12px;'>"
+        f"<thead><tr>{header_cells}</tr></thead>"
+        f"<tbody>{body_rows}</tbody>"
+        "</table></div>"
+    )
+    st.markdown("#### Stock Cierre MES")
+    st.html(html)
+
+
+def _render_exportar_plan_compra(conn, df_pos, maestra):
+    """Tab: tabla Stock cierre MES + carga Factor de Importación y genera resumen Plan de Compra."""
+    # ── Tabla Stock Cierre MES ─────────────────────────────────────────────────
+    _render_stock_cierre_tabla(conn)
+    st.markdown("---")
     st.markdown("#### Resumen Plan de Compra")
     st.caption(
         "Combina las OC pendientes de **FT_COMPRAS** con las compras proyectadas "
         "de **proy_result.parquet**. Sube el archivo de factores para calcular montos en soles."
     )
 
+    # ── Factor guardado en disco ──────────────────────────────────────────────
+    _saved_factor_path = get_saved_file_path("factor_importacion")
+    _saved_factor_info = get_saved_file_info("factor_importacion")
+
+    # Fallback: factor_override.xlsx (mismo formato, usado por Flujo de Costos)
+    _FACTOR_OVERRIDE = Path(__file__).resolve().parent.parent / "data" / "inputs" / "factor_override.xlsx"
+
+    if _saved_factor_path is not None:
+        _factor_source = _saved_factor_path
+        _ts  = (_saved_factor_info or {}).get("uploaded_at", "")[:16].replace("T", " ")
+        _who = (_saved_factor_info or {}).get("uploaded_by_name",
+               (_saved_factor_info or {}).get("uploaded_by", ""))
+        _kb  = round((_saved_factor_info or {}).get("size_bytes", 0) / 1024, 1)
+        st.success(
+            f"✅ **{(_saved_factor_info or {}).get('filename', 'FactordeImportacion.xlsx')}** "
+            f"cargado ({_kb} KB) — subido por **{_who}** el {_ts}"
+        )
+        _uploader_label = "🔄 Actualizar FactordeImportacion.xlsx (opcional)"
+    elif _FACTOR_OVERRIDE.exists():
+        _factor_source  = _FACTOR_OVERRIDE
+        _kb_ov = round(_FACTOR_OVERRIDE.stat().st_size / 1024, 1)
+        st.info(
+            f"📋 Usando **factor_override.xlsx** ({_kb_ov} KB) como archivo base de factores. "
+            "Sube un archivo nuevo abajo para reemplazarlo."
+        )
+        _uploader_label = "📂 Cargar FactordeImportacion.xlsx (reemplaza el archivo base)"
+    else:
+        _factor_source  = None
+        _uploader_label = "📂 Cargar FactordeImportacion.xlsx"
+
     uploaded = st.file_uploader(
-        "📂 Cargar FactordeImportacion.xlsx",
+        _uploader_label,
         type=["xlsx"],
         key="uploader_factor_importacion",
         help=(
@@ -1508,21 +1707,37 @@ def _render_exportar_plan_compra(df_pos, maestra):
         ),
     )
 
-    if uploaded is None:
+    # Si el usuario subió un archivo nuevo, guardarlo y usarlo
+    if uploaded is not None:
+        _cur_user = get_current_user() or {"email": "unknown", "nombre": "Desconocido"}
+        save_input_file("factor_importacion", uploaded, _cur_user)
+        _factor_source = get_saved_file_path("factor_importacion")
+        st.toast("✅ FactordeImportacion.xlsx guardado")
+
+    if _factor_source is None:
         st.info("Sube el archivo **FactordeImportacion.xlsx** para habilitar la generación.")
         return
 
     if st.button("🚀 Generar Resumen", key="btn_gen_plan_compra", type="primary"):
         with st.spinner("Procesando datos..."):
             try:
-                df_result = _generar_plan_compra(df_pos, maestra, uploaded)
+                df_result = _generar_plan_compra(df_pos, maestra, _factor_source)
             except Exception as e:
                 st.error(f"Error al generar el resumen: {e}")
-                return
+                df_result = None
 
         if df_result is None or df_result.empty:
             st.warning("No se generaron datos. Verifica los filtros y el parquet.")
-            return
+            st.session_state.pop("_fc_resumen_generado", None)
+            st.session_state.pop("_fc_excel_cache", None)
+        else:
+            # Guardar resultado y limpiar caché Excel para regenerar con datos frescos
+            st.session_state["_fc_resumen_generado"] = df_result
+            st.session_state.pop("_fc_excel_cache", None)
+
+    # ── Mostrar resultado (persiste entre re-runs vía session_state) ──────────
+    if "_fc_resumen_generado" in st.session_state:
+        df_result = st.session_state["_fc_resumen_generado"]
 
         ft_rows = int((df_result["Fuente"] == "ft_compras").sum())
         pq_rows = int((df_result["Fuente"] == "proy_result.parquet").sum())
@@ -1533,7 +1748,69 @@ def _render_exportar_plan_compra(df_pos, maestra):
         col3.metric("Compras Proyectadas", f"{pq_rows:,}")
 
         st.dataframe(df_result, use_container_width=True, height=420)
-        download_buttons(df_result, "resumen_plan_compra")
+
+        # ── Botones de descarga ──────────────────────────────────────────────
+        _dl_col1, _dl_col2 = st.columns(2)
+
+        # CSV — siempre disponible
+        _ts_fc = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+        _csv_bytes = df_result.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+        _dl_col1.download_button(
+            "Descargar CSV",
+            _csv_bytes,
+            f"resumen_plan_compra_{_ts_fc}.csv",
+            "text/csv",
+            key="dl_csv_resumen_plan_compra",
+        )
+
+        # Excel — generado con xlsxwriter, cacheado en session_state
+        if "_fc_excel_cache" not in st.session_state:
+            try:
+                _buf_fc = io.BytesIO()
+                with pd.ExcelWriter(_buf_fc, engine="xlsxwriter") as _w_fc:
+                    _wb_fc = _w_fc.book
+                    _ws_fc = _wb_fc.add_worksheet("Plan Compra")
+                    _fmt_hdr = _wb_fc.add_format({"bold": True, "bg_color": "#366092",
+                                                   "font_color": "#FFFFFF", "font_size": 9})
+                    _fmt_num = _wb_fc.add_format({"font_size": 9, "num_format": "#,##0.00"})
+                    _fmt_def = _wb_fc.add_format({"font_size": 9})
+                    _num_cols = {"Amount (Moneda Orig.)", "Factor Importación",
+                                 "Amount Soles c/Factor", "Compra Unds", "Días en Agua"}
+                    # Cabeceras
+                    for _ci, _cn in enumerate(df_result.columns):
+                        _ws_fc.write(0, _ci, _cn, _fmt_hdr)
+                    # Datos — sanitizar tipos
+                    _df_fc = df_result.copy()
+                    for _wc in _df_fc.columns:
+                        if pd.api.types.is_datetime64_any_dtype(_df_fc[_wc]):
+                            _df_fc[_wc] = _df_fc[_wc].dt.strftime("%Y-%m-%d").fillna("")
+                        elif pd.api.types.is_bool_dtype(_df_fc[_wc]):
+                            _df_fc[_wc] = _df_fc[_wc].astype(int)
+                        elif _wc in _num_cols:
+                            _df_fc[_wc] = pd.to_numeric(_df_fc[_wc], errors="coerce").fillna(0)
+                        else:
+                            _df_fc[_wc] = _df_fc[_wc].fillna("").astype(str)
+                    for _ci, _cn in enumerate(_df_fc.columns):
+                        _fmt_c = _fmt_num if _cn in _num_cols else _fmt_def
+                        _ws_fc.write_column(1, _ci, _df_fc[_cn].tolist(), _fmt_c)
+                        _max_l = _df_fc[_cn].astype(str).str.len().max()
+                        _w = min(max(len(_cn), int(_max_l) if pd.notna(_max_l) else 0) + 2, 35)
+                        _ws_fc.set_column(_ci, _ci, _w)
+                    _ws_fc.freeze_panes(1, 0)
+                st.session_state["_fc_excel_cache"] = _buf_fc.getvalue()
+            except Exception as _e_xl:
+                st.warning(f"⚠️ No se pudo generar el Excel: {_e_xl}. Usa el CSV.")
+                st.session_state.pop("_fc_excel_cache", None)
+
+        if "_fc_excel_cache" in st.session_state:
+            _xl_bytes = st.session_state["_fc_excel_cache"]
+            _dl_col2.download_button(
+                f"Descargar Excel ({len(df_result):,} filas)",
+                _xl_bytes,
+                f"resumen_plan_compra_{_ts_fc}.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="dl_excel_resumen_plan_compra",
+            )
 
 
 # ─── Entry point ───────────────────────────────────────────────────────────────
@@ -1580,6 +1857,8 @@ def render_plan_compras(conn):
     # Enriquecer POs con factor importación y costos CLP
     df_pos = _enrich_pos(df_pos_raw, maestra)
     df_pos = apply_pm_filter(df_pos)
+    # Compartir con Flujo de Costos para garantizar datos idénticos en TT S/.
+    st.session_state["_pc_df_pos_shared"] = df_pos
 
     # ── Obtener df_proy de session_state si está disponible ────────────────
     df_proy = st.session_state.get("df_proy", None)
@@ -1831,4 +2110,4 @@ def render_plan_compras(conn):
         _render_detalle_pos(df_filt)
 
     with tab5:
-        _render_exportar_plan_compra(df_pos, maestra)
+        _render_exportar_plan_compra(conn, df_pos, maestra)

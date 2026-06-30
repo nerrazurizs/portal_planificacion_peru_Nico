@@ -1,6 +1,6 @@
 import streamlit as st
 
-from config import get_css, COLORS, PM_NAMES, apply_pm_filter
+from config import get_css, COLORS, PM_NAMES, apply_pm_filter, TC_USD_DEFAULT
 from db.connection import get_active_connection
 from utils.auth import (
     get_current_user,
@@ -49,6 +49,10 @@ from modules.alerta_forecast import render_alerta_forecast
 from modules.flujo_costos import render_flujo_costos
 from modules.analisis_venta import render_analisis_venta
 from modules.analisis_contenedor import render_analisis_contenedor
+from modules.optimizador_compras import render_optimizador_compras
+from modules.analisis_forecast import render_analisis_forecast
+from modules.inbound import render_inbound
+from modules.dashboard_gestion import render_dashboard_gestion
 from db.cache import cached_query as cq, clear_all as clear_query_cache, last_refresh_label, auto_refresh_if_new_day
 from utils.ui_animations import lottie_spinner, show_lottie, animated_kpi_row
 
@@ -117,13 +121,16 @@ def main_app():
         "PLANIFICACION": [
             ("🎲", "Generador Forecast"),
             ("📈", "Proyeccion Stock"),
+            ("📊", "Frinc Detalle"),
             ("📋", "Plan de Compras & OTB"),
+            ("📦", "In-Out bound"),
             ("💡", "Simulador Rentab."),
             ("📅", "Forecast Diario"),
             ("🔄", "Redistribucion Stock"),
             ("📊", "Ventas Forecast 2+10"),
             ("🚦", "DDMRP Reposicion"),
             ("💸", "Flujo de Costos"),
+            ("🚢", "Optimizador Compras"),
         ],
         "ANALISIS": [
             ("📊", "Dashboard Stock"),
@@ -142,6 +149,7 @@ def main_app():
             ("📉", "Venta Perdida"),
             ("📊", "Analisis Venta"),
             ("📦", "Agotamiento"),
+            ("📈", "Analisis Forecast"),
         ],
         "OPERACION Y ALERTAS": [
             ("🗼", "Torre Control S&OP"),
@@ -206,23 +214,24 @@ def main_app():
     def _fetch_tc_live():
         try:
             import yfinance as yf
-            t = yf.Ticker("USDCLP=X")
+            t = yf.Ticker("USDPEN=X")
             h = t.history(period="1d")
             if not h.empty:
-                return round(float(h["Close"].iloc[-1]), 1)
+                return round(float(h["Close"].iloc[-1]), 2)
         except Exception:
             pass
         return None
 
     tc_live = _fetch_tc_live()
-    _tc_help = "Tipo de cambio USD→CLP para valorización de costos. Budget: 950."
+    _tc_help = f"Tipo de cambio USD→PEN para valorización de costos. Budget: {TC_USD_DEFAULT:.2f}."
     if tc_live:
-        _tc_help += f" TC actual de mercado: ${tc_live:,.0f}"
+        _tc_help += f" TC actual de mercado: S/ {tc_live:,.2f}"
 
     st.sidebar.number_input(
-        f"TC USD/CLP" + (f"  *(actual: ${tc_live:,.0f})*" if tc_live else ""),
-        min_value=500, max_value=1500, value=950, step=10,
-        key="tc_usd_clp",
+        "TC USD/PEN" + (f"  *(actual: S/ {tc_live:,.2f})*" if tc_live else ""),
+        min_value=2.0, max_value=8.0, value=TC_USD_DEFAULT, step=0.05,
+        format="%.2f",
+        key="tc_usd_pen",
         help=_tc_help,
     )
 
@@ -299,6 +308,7 @@ def main_app():
         "Torre Control S&OP": render_sop_control_tower,
         "Ventas": render_ventas,
         "Proyeccion Stock": render_proyeccion,
+        "Frinc Detalle": render_dashboard_gestion,
         "Dashboard Stock": render_stock_dashboard,
         "Dashboard Stock 2.0": render_stock_dashboard_v2,
         "Caso de Negocio": render_business_case,
@@ -321,6 +331,7 @@ def main_app():
         "Forecast Diario": render_forecast_diario,
         "Resumen Compra": render_resumen_compra,
         "Plan de Compras & OTB": render_plan_compras,
+        "In-Out bound": render_inbound,
         "Flujo de Costos": render_flujo_costos,
         "InStock Historico": render_instock_historico,
         # Pasillo Infinito: pendiente validar tabla db_pos.fct.ft_venta_pasillo_infinito en Peru
@@ -335,10 +346,12 @@ def main_app():
         "Operaciones Supply": None,
         "Venta Perdida": render_venta_perdida,
         "Analisis Venta": render_analisis_venta,
+        "Analisis Forecast": render_analisis_forecast,
         "Ventas Forecast 2+10": render_ventas_forecast_210,
         "Fcst vs Vta Retail": render_fcst_vs_vta_retail,
         "Analisis Contenedor": render_analisis_contenedor,
         "Diagnostico Tablas": render_diagnostico,
+        "Optimizador Compras": render_optimizador_compras,
     }
 
     if current == "Inicio":

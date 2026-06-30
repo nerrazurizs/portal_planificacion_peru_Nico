@@ -102,8 +102,8 @@ _COMPRAS = f"""(
             TRY_TO_DATE(CAST(f.fecha_ingreso_cd AS VARCHAR), 'YYYY-MM-DD'),
             TRY_TO_DATE(CAST(f.fecha_ingreso_cd AS VARCHAR), 'YYYYMMDD')
         )                                                            AS fecha_recepcion_en_cd,
-        CAST(f.tipocambio AS FLOAT)                                  AS paridad_moneda,
-        CAST(f.tipocambio AS FLOAT)                                  AS dolar_sistema,
+        TRY_CAST(f.tipocambio AS FLOAT)                              AS paridad_moneda,
+        TRY_CAST(f.tipocambio AS FLOAT)                              AS dolar_sistema,
         CAST(f.moneda AS VARCHAR)                                    AS cod_moneda,
         CAST(f.codigo_proveedor_oc AS VARCHAR)                       AS cod_proveedor,
         f.situacion                                                  AS nom_status,
@@ -299,6 +299,17 @@ qualify row_number() over (
     partition by cod_producto
     order by familia nulls last, modelo nulls last
 ) = 1
+"""
+
+QUERY_DT_PRODUCTO = """
+select
+    cod_producto,
+    procedencia,
+    volumen,
+    densidad
+from db_dimensiones.dim.dt_producto
+where coalesce(volumen, 0) > 0
+   or coalesce(densidad, 0) > 0
 """
 
 # -- Dashboard ejecutivo (queries livianas) --
@@ -975,14 +986,14 @@ ult_ing AS (
         MAX(c.fecha_recepcion_en_cd) AS fecha_ult_ing_cd
     FROM {_COMPRAS} c
     WHERE c.fecha_recepcion_en_cd IS NOT NULL
-      AND COALESCE(c.cantidad_carpeta_recepcionada, 0) > 0
+      AND COALESCE(TRY_CAST(c.cantidad_carpeta_recepcionada AS FLOAT), 0) > 0
     GROUP BY c.sku_producto
 ),
 qty_ult_ing AS (
     SELECT
         c.sku_producto,
         u.fecha_ult_ing_cd,
-        SUM(COALESCE(c.cantidad_carpeta_recepcionada, 0)) AS qty_recibida
+        SUM(COALESCE(TRY_CAST(c.cantidad_carpeta_recepcionada AS FLOAT), 0)) AS qty_recibida
     FROM {_COMPRAS} c
     INNER JOIN ult_ing u
         ON  c.sku_producto          = u.sku_producto
@@ -1007,7 +1018,7 @@ vtas_desde_ing AS (
     FROM {_VCM} v
     INNER JOIN qty_ult_ing q ON v.sku_producto = q.sku_producto
     WHERE v.fecha >= q.fecha_ult_ing_cd
-      AND COALESCE(v.flg_eliminado, 0) = 0
+      AND COALESCE(NULLIF(CAST(v.flg_eliminado AS VARCHAR), ''), '0') = '0'
     GROUP BY v.sku_producto
 )
 SELECT
@@ -2775,6 +2786,11 @@ WHERE a.fecha = (
 )
 AND a.stock_unidades > 0
 AND bo.nom_almacen IS NOT NULL
+AND (
+    LOWER(bo.nom_almacen) LIKE '%cdu.%'
+    OR LOWER(bo.nom_almacen) LIKE '%contenedor%'
+    OR LOWER(bo.nom_almacen) LIKE '%transito mercaderia%'
+)
 GROUP BY 1, 2, 3, 4, 5, 6, 7
 """
 
@@ -2921,4 +2937,33 @@ WHERE v.fecha >= DATEADD('week', -8, DATE_TRUNC('week', CURRENT_DATE()))
   AND v.fecha <  DATE_TRUNC('week', CURRENT_DATE())
   AND v.cantidad > 0
 GROUP BY 1, 2, 3
+"""
+
+# ============================================================
+# ANALISIS FORECAST — ventas unitarias mensuales (36 meses)
+# ============================================================
+QUERY_FORECAST_VCM_HISTORICO = f"""
+SELECT
+    a.sku_producto,
+    COALESCE(p.nom_producto, CAST(a.sku_producto AS VARCHAR)) AS nom_producto,
+    COALESCE(p.area,       'SIN ASIGNAR')                     AS area,
+    COALESCE(p.linea,      'SIN ASIGNAR')                     AS linea,
+    COALESCE(p.sublinea,   'SIN ASIGNAR')                     AS sublinea,
+    COALESCE(p.marca,      'SIN ASIGNAR')                     AS marca,
+    COALESCE(p.mix_oficial,'SIN ASIGNAR')                     AS mix_oficial,
+    CASE TRIM(a.cod_canal)
+        WHEN '03' THEN 'TIENDA'
+        WHEN '02' THEN 'MAYORISTA'
+        WHEN '06' THEN 'ETAIL'
+        ELSE COALESCE(TRIM(a.cod_canal), 'SIN CANAL')
+    END                                                       AS canal,
+    DATE_TRUNC('month', a.fecha)                              AS periodo,
+    SUM(a.cantidad)                                           AS unidades
+FROM {_VCM} a
+LEFT JOIN {_PROD} p ON a.sku_producto = p.sku_producto
+WHERE a.fecha >= DATEADD('month', -36, DATE_TRUNC('month', CURRENT_DATE()))
+  AND a.fecha <  DATE_TRUNC('month', CURRENT_DATE())
+  AND a.cantidad > 0
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9
+ORDER BY 9
 """

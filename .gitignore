@@ -27,9 +27,17 @@ frontend/node_modules/
 !data/inputs/factor_override.xlsx
 
 # Projection results and user-uploaded files handled via session_state in SiS
+
+# In-Out bound — maestra SKU con AREA/TAMANIO/TIPO_ALMACEN (default compartido)
+!data/inputs/leyendas.xlsx
+
+# Projection results cache (large files)
 data/inputs/*.parquet
 data/inputs/scenarios/
 data/forecast_snapshots/
 
 # Backend virtualenv
 backend/.venv/
+
+# Root virtualenv
+venv/
