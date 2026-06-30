@@ -12,11 +12,25 @@ No confundir con `Portal Planificacion (Camilo)\dorel-supply-portal` — ese es 
 - `db/cache.py::run_sql()` — el connector de SiS no procesa placeholders `%s` como el connector standalone. Cualquier query parametrizada debe pasar por `run_sql()`/`_run_sql` (quoting manual), nunca `pd.read_sql(sql, conn, params=...)` directo.
 - `environment.yml` es el manifiesto real de dependencias (canal `snowflake`). `requirements.txt` quedó solo para referencia histórica de desarrollo local — ya no se puede correr `streamlit run app.py` localmente porque `get_active_session()` solo existe dentro de Snowflake.
 
-## Modelo de despliegue — IMPORTANTE
+## Modelo de despliegue — IMPORTANTE (corregido 2026-06-30)
 
-**No hay integración git ni CI/CD.** La app corre en Snowflake como `DB_PLANIFICACION.PUBLIC.PORTAL_PLANIFICACION` (o el nombre que corresponda) y el código se actualiza **pegando/subiendo los archivos manualmente en el editor de Snowsight**. Este repo de GitHub es solo el lugar donde se versiona y prepara el código — la fuente de verdad de lo que está *corriendo* es lo que está pegado en Snowsight, que puede haber sido modificado ahí directamente sin que quede rastro en git.
+**Sí hay integración git nativa de Snowflake — no es pegado manual.** Existe un objeto `GIT REPOSITORY DB_SUPPLY.PUBLIC.PORTAL_PLANIFICACION_PERU_NICO` que apunta al fork del usuario (`nerrazurizs/portal_planificacion_peru_Nico`), autenticado con un PAT guardado en el secret `DB_SUPPLY.PUBLIC.github_pat`. El Streamlit app `DB_SUPPLY.PUBLIC.PORTAL_PLANIFICACION` tiene:
 
-Cuando se actualiza el portal, hay que decirle al usuario exactamente qué archivos cambiaron/se crearon para que los suba a mano.
+```sql
+ROOT_LOCATION = '@DB_SUPPLY.PUBLIC.PORTAL_PLANIFICACION_PERU_NICO/branches/sis-migration'
+MAIN_FILE = 'app.py'
+```
+
+Es decir, corre directo desde la rama `sis-migration` de ese fork. Para actualizar el portal después de pushear a `nico/sis-migration`, hay que correr en un worksheet de Snowflake:
+
+```sql
+ALTER GIT REPOSITORY DB_SUPPLY.PUBLIC.PORTAL_PLANIFICACION_PERU_NICO FETCH;
+CALL DB_SUPPLY.PUBLIC.DEPLOY_PORTAL();  -- copia los archivos fetcheados al stage que respalda la app
+```
+
+Si eso no refleja los cambios, el fallback es recrear el objeto Streamlit (`CREATE OR REPLACE STREAMLIT ...` con el mismo `ROOT_LOCATION`) — en el worksheet original aparece ejecutado dos veces, sugiriendo que en algún momento el FETCH solo no bastó.
+
+No hay necesidad de copiar/pegar archivos a mano en el editor de Snowsight — esa fue una hipótesis equivocada de una sesión anterior, descartada cuando el usuario mostró el worksheet real.
 
 ## Remotes — dos repos distintos
 
@@ -38,7 +52,7 @@ Camilo sigue agregando features directo en `origin/main` sin adaptarlas a SiS. C
    - llamadas de red salientes (`smtplib`, `requests`, etc. — SiS no tiene egress por defecto)
 5. Verificar sintaxis (`python -c "import ast; ast.parse(open(f).read())"`) de todo lo tocado.
 6. Commit, merge a `sis-migration`, push a `nico`.
-7. Avisar al usuario la lista exacta de archivos a pegar/subir en Snowsight (incluyendo archivos binarios nuevos, ej. `data/inputs/leyendas.xlsx`).
+7. Decirle al usuario que corra `ALTER GIT REPOSITORY DB_SUPPLY.PUBLIC.PORTAL_PLANIFICACION_PERU_NICO FETCH;` + `CALL DB_SUPPLY.PUBLIC.DEPLOY_PORTAL();` en un worksheet de Snowflake (ver sección de despliegue arriba) — no hace falta subir archivos a mano.
 
 ## Pendientes conocidos (no resueltos, no son bugs de esta migración)
 
