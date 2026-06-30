@@ -20,6 +20,17 @@ if exist ".git\MERGE_HEAD" git merge --abort >nul 2>&1
 if exist ".git\rebase-merge" git rebase --abort >nul 2>&1
 if exist ".git\rebase-apply" git rebase --abort >nul 2>&1
 
+:: Limpiar archivos en CONFLICTO que hayan quedado pegados de una corrida anterior.
+:: (Caso tipico: un 'git stash pop' choco con app.py y nunca se resolvio, dejando
+::  el repo en estado "needs merge". Esto NO crea MERGE_HEAD, por eso el bloque de
+::  arriba no lo detecta y el pull falla en cada actualizacion.)
+set "_STUCK="
+for /f "delims=" %%f in ('git ls-files -u 2^>nul') do set "_STUCK=1"
+if defined _STUCK (
+    echo Limpiando conflictos pendientes de una actualizacion anterior...
+    git reset -q --hard HEAD >nul 2>&1
+)
+
 :: Proteger archivos locales que no deben sincronizarse
 git update-index --skip-worktree users.json >nul 2>&1
 
@@ -45,6 +56,20 @@ echo Guardando configuracion local...
 git stash -q 2>nul
 git pull --no-edit origin main
 git stash pop -q 2>nul
+
+:: Si el 'stash pop' dejo archivos en conflicto, NO dejar el repo trabado:
+:: se mantiene la version del repositorio y el stash se conserva intacto
+:: (git no borra el stash cuando el pop falla), asi nada se pierde.
+set "_CONF="
+for /f "delims=" %%f in ('git ls-files -u 2^>nul') do set "_CONF=1"
+if defined _CONF (
+    echo.
+    echo [AVISO] Tus cambios locales chocaron con la nueva version.
+    echo         Se mantiene la version oficial del repositorio.
+    echo         Tus cambios siguen guardados — recuperalos con: git stash list
+    echo.
+    git reset -q --hard HEAD >nul 2>&1
+)
 
 :fin
 echo.
