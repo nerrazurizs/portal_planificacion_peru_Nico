@@ -20,8 +20,14 @@ if exist ".git\MERGE_HEAD" git merge --abort >nul 2>&1
 if exist ".git\rebase-merge" git rebase --abort >nul 2>&1
 if exist ".git\rebase-apply" git rebase --abort >nul 2>&1
 
-:: Proteger archivos locales que no deben sincronizarse
-git update-index --skip-worktree users.json >nul 2>&1
+:: Sacar users.json del control de versiones SIN borrar el archivo de disco.
+:: En origin/main users.json esta gitignored (no es parte del repo), pero en
+:: algunas PCs quedo trackeado en el indice con skip-worktree de corridas viejas.
+:: Eso hace fallar el 'git reset --hard' con "Entry 'users.json' not uptodate.
+:: Cannot merge". Limpiamos el bit y lo des-trackeamos: el archivo (los usuarios
+:: locales) se conserva intacto en disco y deja de estorbar al reset.
+git update-index --no-skip-worktree users.json >nul 2>&1
+git rm --cached users.json >nul 2>&1
 
 :: Sacar del tracking archivos de datos locales (resultados simulacion)
 git rm --cached data/inputs/metadata.json >nul 2>&1
