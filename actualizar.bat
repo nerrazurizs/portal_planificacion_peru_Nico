@@ -20,17 +20,6 @@ if exist ".git\MERGE_HEAD" git merge --abort >nul 2>&1
 if exist ".git\rebase-merge" git rebase --abort >nul 2>&1
 if exist ".git\rebase-apply" git rebase --abort >nul 2>&1
 
-:: Limpiar archivos en CONFLICTO que hayan quedado pegados de una corrida anterior.
-:: (Caso tipico: un 'git stash pop' choco con app.py y nunca se resolvio, dejando
-::  el repo en estado "needs merge". Esto NO crea MERGE_HEAD, por eso el bloque de
-::  arriba no lo detecta y el pull falla en cada actualizacion.)
-set "_STUCK="
-for /f "delims=" %%f in ('git ls-files -u 2^>nul') do set "_STUCK=1"
-if defined _STUCK (
-    echo Limpiando conflictos pendientes de una actualizacion anterior...
-    git reset -q --hard HEAD >nul 2>&1
-)
-
 :: Proteger archivos locales que no deben sincronizarse
 git update-index --skip-worktree users.json >nul 2>&1
 
@@ -45,31 +34,27 @@ for /f "delims=" %%f in ('git ls-files data/inputs/*.parquet 2^>nul') do (
 git checkout -- data/inputs/metadata.json >nul 2>&1
 git checkout -- data/inputs/proy_result.parquet >nul 2>&1
 
-:: Intentar pull directo (sin abrir editor)
-git pull --no-edit origin main
-if %ERRORLEVEL% EQU 0 (
+:: Sincronizar con el repositorio oficial.
+:: El portal de despliegue debe ser un ESPEJO EXACTO de origin/main. Por eso NO
+:: usamos 'git pull' (que intenta MEZCLAR y se atora en cada uno de estos casos):
+::   - "Pulling is not possible because you have unmerged files" (conflicto pegado)
+::   - "untracked working tree files would be overwritten by merge" (copias sueltas)
+::   - merge/rebase a medio terminar
+:: En su lugar: git fetch + git reset --hard origin/main, que FUERZA el estado del
+:: repo y resuelve los tres casos de una. Es seguro para los archivos locales:
+::   - users.json esta en .gitignore -> no se toca
+::   - los resultados de simulacion (data/inputs/*.parquet, metadata.json) son
+::     UNTRACKED y 'git reset --hard' nunca borra archivos untracked
+echo Sincronizando con el repositorio...
+git fetch --prune origin main
+if %ERRORLEVEL% NEQ 0 (
+    echo.
+    echo [ERROR] No se pudo conectar con GitHub. Revisa tu conexion a internet
+    echo         e intenta de nuevo. El portal sigue con la version actual.
+    echo.
     goto fin
 )
-
-:: Si fallo, usar stash como fallback
-echo Guardando configuracion local...
-git stash -q 2>nul
-git pull --no-edit origin main
-git stash pop -q 2>nul
-
-:: Si el 'stash pop' dejo archivos en conflicto, NO dejar el repo trabado:
-:: se mantiene la version del repositorio y el stash se conserva intacto
-:: (git no borra el stash cuando el pop falla), asi nada se pierde.
-set "_CONF="
-for /f "delims=" %%f in ('git ls-files -u 2^>nul') do set "_CONF=1"
-if defined _CONF (
-    echo.
-    echo [AVISO] Tus cambios locales chocaron con la nueva version.
-    echo         Se mantiene la version oficial del repositorio.
-    echo         Tus cambios siguen guardados — recuperalos con: git stash list
-    echo.
-    git reset -q --hard HEAD >nul 2>&1
-)
+git reset --hard origin/main
 
 :fin
 echo.
