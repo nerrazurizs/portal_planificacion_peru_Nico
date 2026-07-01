@@ -44,6 +44,8 @@ PLANNER_MODULES = [
     "Tablas Syncro",
     "Generador Forecast",
     "Proyeccion Stock",
+    "Diagnostico Fcst Manual",
+    "Correccion Fcst Compra",
     "Frinc Detalle",
     "Plan de Compras & OTB",
     "In-Out bound",

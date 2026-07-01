@@ -42,6 +42,7 @@ from db.queries import (
     QUERY_FORECAST_VCM_HISTORICO,
     QUERY_COMEX_FULL,
     QUERY_DASHBOARD_COMEX,
+    QUERY_CUMPLIMIENTO_COMEX,
     QUERY_DASHBOARD_VENTAS_MTD,
     QUERY_DT_TIENDA,
     QUERY_INSTOCK_DAILY_CD,
@@ -623,6 +624,14 @@ def dashboard_comex(_conn_id, _conn=None) -> pd.DataFrame:
     return _run(QUERY_DASHBOARD_COMEX, _conn)
 
 
+@st.cache_data(ttl=TTL_COMEX, show_spinner=False)
+def cumplimiento_comex(_conn_id, _conn=None) -> pd.DataFrame:
+    """Comex purchases en transito / ya ingresadas con fechas comprometidas (PO),
+    estimadas vigentes y reales, para medir cumplimiento de embarque e ingreso a almacen.
+    """
+    return _run(QUERY_CUMPLIMIENTO_COMEX, _conn)
+
+
 @st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
 def leadtimes(_conn_id, _conn=None) -> pd.DataFrame:
     """Lead times per SKU from coo_rel_proveedor_sku + maestra dims. Cached 24h."""
@@ -1163,6 +1172,10 @@ class cached_query:
     @staticmethod
     def dashboard_comex(conn):
         return dashboard_comex(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def cumplimiento_comex(conn):
+        return cumplimiento_comex(cached_query._cid(conn), _conn=conn)
 
     @staticmethod
     def leadtimes(conn):

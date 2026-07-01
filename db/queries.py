@@ -336,6 +336,55 @@ where c.fecha_recepcion_en_cd is null
   and c.cantidad_final_corregida > 0
 """
 
+QUERY_CUMPLIMIENTO_COMEX = f"""
+with ingresos as (
+    select
+        trim(numero_oc)          as po,
+        trim(codigo_producto_oc) as sku_producto,
+        max(coalesce(
+            try_to_date(cast(fecha_ingreso_cd as varchar), 'YYYY-MM-DD'),
+            try_to_date(cast(fecha_ingreso_cd as varchar), 'YYYYMMDD')
+        ))                        as fecha_real_ingreso_almacen
+    from db_supply.fct.ft_compras
+    group by 1, 2
+)
+select
+    trim(c.po_numpedidocompra)  as po,
+    trim(c.si_codigoproducto)   as sku_producto,
+    c.si_descripcionproducto    as sku_nom_producto_comex,
+    c.estadoimportacion         as estado_importacion,
+    c.po_nombrepo                as nom_proveedor_comex,
+    c.po_codigoproveedor          as cod_proveedor,
+    c.po_cantidadpedida           as cantidad_pedida,
+    c.po_cantidadentregada        as cantidad_entregada,
+    c.po_valortotal               as valor_total_po,
+    c.valorizado_mn               as valorizado_mn,
+    c.ditms_almacen               as cod_almacen,
+    try_to_date(cast(c.po_fechadelivery as varchar), 'YYYYMMDD')             as po_fecha_delivery,
+    try_to_date(cast(c.po_fechaembarque as varchar), 'YYYYMMDD')            as po_fecha_embarque,
+    coalesce(
+        try_to_date(cast(c.di_etd as varchar), 'YYYYMMDD'),
+        try_to_date(cast(c.di_fechaembarque as varchar), 'YYYYMMDD')
+    )                                                                       as fecha_etd_real,
+    coalesce(
+        try_to_date(cast(c.di_fechaembarqueestimada as varchar), 'YYYYMMDD'),
+        try_to_date(cast(c.po_fechaembarque as varchar), 'YYYYMMDD')
+    )                                                                       as fecha_etd_estimado_vigente,
+    try_to_date(cast(c.di_fechaetacallao as varchar), 'YYYYMMDD')           as fecha_eta_puerto,
+    try_to_date(cast(c.po_fecha_ingalmacenestimado as varchar), 'YYYYMMDD') as po_fecha_ingreso_almacen_estimado,
+    try_to_date(cast(c.dinv_fechaingalmacenestimada as varchar), 'YYYYMMDD') as fecha_ingreso_almacen_estimado_vigente,
+    i.fecha_real_ingreso_almacen,
+    p.area, p.linea, p.sublinea, p.marca, p.nom_producto,
+    p.proveedor as nom_proveedor_maestra
+from db_supply.fct.ft_cubo_comex c
+left join ingresos i
+    on trim(c.po_numpedidocompra) = i.po
+    and trim(c.si_codigoproducto) = i.sku_producto
+left join {{_PROD}} p
+    on trim(c.si_codigoproducto) = p.sku_producto
+where c.estadoimportacion in ('Transito', 'Recibido', 'Cerrado')
+"""
+
 QUERY_COMEX_BASE = f"""
 SELECT *
 FROM {_COMPRAS} c

@@ -75,6 +75,24 @@ METRICAS = [
     "MOI",
 ]
 
+# Pestaña "Flujo de Unidades" — mismas filas Neta/Aporte/Mrg%/Vta Costo (sin
+# cambio, siguen en S/.); Stk/TT/Compras Pry pasan a unidades y se agrega Vta Unds.
+METRICAS_UNDS = [
+    "Stk Final Unds",
+    "Neta Budget",
+    "Aporte Budget",
+    "Mrg% Budget",
+    "Vta Costo Budget",
+    "Neta Fcst/Real",
+    "Aporte Fcst/Real",
+    "Mrg% Fcst/Real",
+    "Vta Costo Fcst",
+    "TT Unds",
+    "Compras Pry Unds",
+    "Vta Unds",
+    "MOI",
+]
+
 _METRICAS_PCT = {"Mrg% Budget", "Mrg% Fcst/Real"}
 _METRICAS_MOI = {"MOI"}
 
@@ -102,8 +120,9 @@ SELECT
     DATE_TRUNC('month', a.fecha)                                    AS PERIODO,
     UPPER(TRIM(COALESCE(p.area,  'SIN AREA')))                      AS AREA,
     UPPER(TRIM(COALESCE(p.linea, 'SIN LINEA')))                     AS LINEA,
-    SUM(CASE WHEN a.cantidad > 0 AND a.neto > 0 THEN a.neto   ELSE 0 END) AS NETA_REAL,
-    SUM(CASE WHEN a.cantidad > 0 AND a.neto > 0 THEN a.aporte ELSE 0 END) AS APORTE_REAL
+    SUM(CASE WHEN a.cantidad > 0 AND a.neto > 0 THEN a.neto     ELSE 0 END) AS NETA_REAL,
+    SUM(CASE WHEN a.cantidad > 0 AND a.neto > 0 THEN a.aporte   ELSE 0 END) AS APORTE_REAL,
+    SUM(CASE WHEN a.cantidad > 0 AND a.neto > 0 THEN a.cantidad ELSE 0 END) AS UNDS_REAL
 FROM {_VCM} a
 LEFT JOIN {_PROD} p ON a.sku_producto = p.sku_producto
 WHERE a.fecha >= DATE_TRUNC('year', DATEADD('year', -1, CURRENT_DATE()))
@@ -121,6 +140,29 @@ SELECT
     UPPER(TRIM(COALESCE(p.area,  'SIN AREA')))                      AS AREA,
     UPPER(TRIM(COALESCE(p.linea, 'SIN LINEA')))                     AS LINEA,
     SUM(snap.stock_costo)                                           AS STOCK_COSTO
+FROM db_supply.hst.ht_in_stock snap
+LEFT JOIN {_PROD} p ON snap.sku_producto = p.sku_producto
+WHERE snap.fecha IN (
+    SELECT MAX(t.fecha)
+    FROM db_supply.hst.ht_in_stock t
+    WHERE t.fecha >= DATE_TRUNC('year', DATEADD('year', -1, CURRENT_DATE()))
+      AND t.fecha <  CURRENT_DATE()
+    GROUP BY DATE_TRUNC('month', t.fecha)
+)
+{_CD_EXCL}
+  AND UPPER(TRIM(COALESCE(p.area, ''))) IN ({_AREAS_SQL})
+{_LINEAS_SQL_EXCL}
+GROUP BY 1, 2, 3
+"""
+
+# Igual a _Q_STOCK pero en unidades (stock_unidades en vez de stock_costo) —
+# alimenta "Stk Final Unds" en la pestaña Flujo de Unidades.
+_Q_STOCK_UNDS = f"""
+SELECT
+    DATE_TRUNC('month', snap.fecha)                                 AS PERIODO,
+    UPPER(TRIM(COALESCE(p.area,  'SIN AREA')))                      AS AREA,
+    UPPER(TRIM(COALESCE(p.linea, 'SIN LINEA')))                     AS LINEA,
+    SUM(snap.stock_unidades)                                        AS STOCK_UNDS
 FROM db_supply.hst.ht_in_stock snap
 LEFT JOIN {_PROD} p ON snap.sku_producto = p.sku_producto
 WHERE snap.fecha IN (
@@ -177,6 +219,7 @@ def _fetch_ventas(_cid, _conn=None) -> pd.DataFrame:
     df["PERIODO"]     = pd.to_datetime(df["PERIODO"])
     df["NETA_REAL"]   = pd.to_numeric(df["NETA_REAL"],   errors="coerce").fillna(0)
     df["APORTE_REAL"] = pd.to_numeric(df["APORTE_REAL"], errors="coerce").fillna(0)
+    df["UNDS_REAL"]   = pd.to_numeric(df["UNDS_REAL"],   errors="coerce").fillna(0)
     return df
 
 @st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
@@ -184,6 +227,13 @@ def _fetch_stock(_cid, _conn=None) -> pd.DataFrame:
     df = norm_cols(pd.read_sql(_Q_STOCK, _conn))
     df["PERIODO"]     = pd.to_datetime(df["PERIODO"])
     df["STOCK_COSTO"] = pd.to_numeric(df["STOCK_COSTO"], errors="coerce").fillna(0)
+    return df
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def _fetch_stock_unds(_cid, _conn=None) -> pd.DataFrame:
+    df = norm_cols(pd.read_sql(_Q_STOCK_UNDS, _conn))
+    df["PERIODO"]    = pd.to_datetime(df["PERIODO"])
+    df["STOCK_UNDS"] = pd.to_numeric(df["STOCK_UNDS"], errors="coerce").fillna(0)
     return df
 
 @st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
@@ -315,9 +365,9 @@ def _compute_transitos(df_pos: pd.DataFrame, factor_ovr: dict) -> pd.DataFrame:
         except Exception:
             pass  # Fallback al cálculo normal
 
-    # TC: misma clave que usa Plan de Compras (_get_tc → tc_usd_pen) para que
+    # TC: misma clave que usa Plan de Compras (_get_tc → tc_usd_clp) para que
     # TT S/. en Flujo de Costos coincida con Amount Soles c/Factor (ft_compras)
-    tc = float(st.session_state.get("tc_usd_pen", TC_USD_DEFAULT))
+    tc = float(st.session_state.get("tc_usd_clp", _TC_PEN_DEFAULT))
     if df_pos is None or df_pos.empty:
         return EMPTY
 
@@ -399,6 +449,72 @@ def _compute_transitos(df_pos: pd.DataFrame, factor_ovr: dict) -> pd.DataFrame:
 
     return (df.groupby(["PERIODO", "AREA", "LINEA"], as_index=False)["AMOUNT_SOLES"]
               .sum().rename(columns={"AMOUNT_SOLES": "TT_SOLES"}))
+
+
+def _compute_transitos_unds(df_pos: pd.DataFrame) -> pd.DataFrame:
+    """
+    Igual a _compute_transitos pero en unidades: suma QTY_PENDIENTE en vez de
+    valorizar. Alimenta 'TT Unds' en la pestaña Flujo de Unidades.
+    """
+    EMPTY = pd.DataFrame(columns=["PERIODO", "AREA", "LINEA", "TT_UNDS"])
+
+    # ── Atajo: si existe el Resumen Plan Compra generado, usarlo directamente ──
+    _resumen = st.session_state.get("_fc_resumen_generado")
+    if _resumen is not None and not _resumen.empty and "Fuente" in _resumen.columns:
+        try:
+            df_ft = _resumen[_resumen["Fuente"] == "ft_compras"].copy()
+            if not df_ft.empty and "ETA" in df_ft.columns and "Compra Unds" in df_ft.columns:
+                eta_s = pd.to_datetime(df_ft["ETA"], dayfirst=True, errors="coerce")
+                df_ft["PERIODO"] = eta_s.dt.to_period("M").dt.to_timestamp()
+                df_ft["AREA"]    = df_ft["AREA"].astype(str).str.upper().str.strip()
+                df_ft["LINEA"]   = df_ft["LINEA"].astype(str).str.upper().str.strip()
+                df_ft["QTY_PENDIENTE"] = pd.to_numeric(df_ft["Compra Unds"], errors="coerce").fillna(0)
+                result = (df_ft.groupby(["PERIODO", "AREA", "LINEA"], as_index=False)["QTY_PENDIENTE"]
+                          .sum().rename(columns={"QTY_PENDIENTE": "TT_UNDS"}))
+                if not result.empty:
+                    return result
+        except Exception:
+            pass  # Fallback al cálculo normal
+
+    if df_pos is None or df_pos.empty:
+        return EMPTY
+
+    df = df_pos.copy()
+    df["QTY_PENDIENTE"] = pd.to_numeric(
+        df.get("QTY_PENDIENTE", pd.Series(0, index=df.index)), errors="coerce"
+    ).fillna(0)
+    df = df[df["QTY_PENDIENTE"] > 0].copy()
+    if "STATUS_PO" in df.columns:
+        df = df[~df["STATUS_PO"].astype(str).str.upper().str.strip().isin(_STATUS_CERRADOS)]
+    if df.empty:
+        return EMPTY
+
+    for c in ("AREA", "LINEA"):
+        if c not in df.columns:
+            df[c] = f"SIN {c}"
+    df["AREA"]  = df["AREA"].astype(str).str.upper().str.strip()
+    df["LINEA"] = df["LINEA"].astype(str).str.upper().str.strip()
+
+    eta = pd.to_datetime(df.get("ETA_CALC", pd.Series(dtype="datetime64[ns]")), errors="coerce")
+    if hasattr(eta, "dt") and getattr(eta.dt, "tz", None) is not None:
+        eta = eta.dt.tz_localize(None)
+    today = datetime.today()
+    cur_month = pd.Timestamp(today.year, today.month, 1)
+    keep = (eta.dt.year.fillna(0).astype(int) == today.year) | eta.isna()
+    df, eta = df[keep].copy(), eta[keep].copy()
+    eta = eta.apply(lambda ts: cur_month if pd.notna(ts) and ts < cur_month else ts)
+    eta = eta.fillna(cur_month)
+    df = df.copy()
+    df["PERIODO"] = eta.dt.to_period("M").dt.to_timestamp()
+
+    df = df[df["AREA"].isin(_AREAS_INTERNAS)].copy()
+    df = df[~df.apply(lambda r: _is_linea_excluded(r["AREA"], r["LINEA"]), axis=1)].copy()
+
+    if df.empty or "PERIODO" not in df.columns:
+        return EMPTY
+
+    return (df.groupby(["PERIODO", "AREA", "LINEA"], as_index=False)["QTY_PENDIENTE"]
+              .sum().rename(columns={"QTY_PENDIENTE": "TT_UNDS"}))
 
 # ─── Compras Proyectadas ────────────────────────────────────────────────────────
 
@@ -494,6 +610,189 @@ def _compute_compras_pry(factor_ovr: dict) -> pd.DataFrame:
     df = df[~df.apply(lambda r: _is_linea_excluded(r["AREA"], r["LINEA"]), axis=1)]
 
     return df.groupby(["PERIODO", "AREA", "LINEA"], as_index=False)["COMPRA_PRY_SOLES"].sum()
+
+
+def _compute_compras_pry_unds() -> pd.DataFrame:
+    """
+    Igual a _compute_compras_pry pero en unidades: suma FORECAST_COMPRA en vez
+    de valorizar. Alimenta 'Compras Pry Unds' en Flujo de Unidades.
+    """
+    EMPTY = pd.DataFrame(columns=["PERIODO", "AREA", "LINEA", "COMPRA_PRY_UNDS"])
+
+    # ── Atajo: si existe el Resumen Plan Compra generado, usarlo directamente ──
+    _resumen = st.session_state.get("_fc_resumen_generado")
+    if _resumen is not None and not _resumen.empty and "Fuente" in _resumen.columns:
+        try:
+            df_pq = _resumen[_resumen["Fuente"] == "proy_result.parquet"].copy()
+            if not df_pq.empty and "ETA" in df_pq.columns and "Compra Unds" in df_pq.columns:
+                eta_s = pd.to_datetime(df_pq["ETA"], dayfirst=True, errors="coerce")
+                df_pq["PERIODO"] = eta_s.dt.to_period("M").dt.to_timestamp()
+                df_pq["AREA"]    = df_pq["AREA"].astype(str).str.upper().str.strip()
+                df_pq["LINEA"]   = df_pq["LINEA"].astype(str).str.upper().str.strip()
+                df_pq["FORECAST_COMPRA"] = pd.to_numeric(df_pq["Compra Unds"], errors="coerce").fillna(0)
+                result = (df_pq.groupby(["PERIODO", "AREA", "LINEA"], as_index=False)["FORECAST_COMPRA"]
+                          .sum().rename(columns={"FORECAST_COMPRA": "COMPRA_PRY_UNDS"}))
+                if not result.empty:
+                    return result
+        except Exception:
+            pass
+
+    parquet = _DATA_DIR / "proy_result.parquet"
+
+    if parquet.exists():
+        try:
+            df = norm_cols(pd.read_parquet(parquet))
+        except Exception as e:
+            st.warning(f"Error leyendo proy_result.parquet: {e}")
+            df = pd.DataFrame()
+    else:
+        df = pd.DataFrame()
+
+    if df.empty and "df_proy" in st.session_state:
+        df_ss = st.session_state["df_proy"]
+        if isinstance(df_ss, pd.DataFrame) and not df_ss.empty:
+            df = norm_cols(df_ss.copy())
+
+    if df.empty or "FORECAST_COMPRA" not in df.columns or "PERIODO" not in df.columns:
+        return EMPTY
+
+    df["FORECAST_COMPRA"] = pd.to_numeric(df["FORECAST_COMPRA"], errors="coerce").fillna(0)
+    df = df[df["FORECAST_COMPRA"] > 0].copy()
+    df["_PER"] = pd.to_datetime(df["PERIODO"], errors="coerce")
+    df = df[df["_PER"].dt.year == datetime.today().year].copy()
+    if df.empty:
+        return EMPTY
+
+    for c in ("AREA", "LINEA"):
+        if c not in df.columns:
+            df[c] = f"SIN {c}"
+    df["AREA"]  = df["AREA"].astype(str).str.upper().str.strip()
+    df["LINEA"] = df["LINEA"].astype(str).str.upper().str.strip()
+
+    df["PERIODO"] = df["_PER"].dt.to_period("M").dt.to_timestamp()
+    df = df[df["AREA"].isin(_AREAS_INTERNAS)]
+    df = df[~df.apply(lambda r: _is_linea_excluded(r["AREA"], r["LINEA"]), axis=1)]
+    if df.empty:
+        return EMPTY
+
+    return (df.groupby(["PERIODO", "AREA", "LINEA"], as_index=False)["FORECAST_COMPRA"]
+              .sum().rename(columns={"FORECAST_COMPRA": "COMPRA_PRY_UNDS"}))
+
+
+def _compute_ventas_pry() -> pd.DataFrame:
+    """
+    Lee proy_result.parquet (columnas VN_RES_TOTAL / APORTE_RES_TOTAL) y agrega
+    por PERIODO/AREA/LINEA. Reemplaza la fuente de 'Neta Fcst/Real' y
+    'Aporte Fcst/Real' en Flujo de Costos: antes esas filas venían de ventas
+    reales (SQL) para meses cerrados y de budget/override para meses futuros;
+    ahora vienen directamente de la proyección (que ya combina real + forecast
+    en una sola serie) para todos los periodos.
+
+    Columnas de salida compatibles con _make_index: AREA, LINEA, PERIODO,
+    NETA_REAL, APORTE_REAL (mismo formato que usaba _fetch_ventas).
+    """
+    EMPTY = pd.DataFrame(columns=["PERIODO", "AREA", "LINEA", "NETA_REAL", "APORTE_REAL"])
+    parquet = _DATA_DIR / "proy_result.parquet"
+
+    if parquet.exists():
+        try:
+            df = norm_cols(pd.read_parquet(parquet))
+        except Exception as e:
+            st.warning(f"Error leyendo proy_result.parquet: {e}")
+            df = pd.DataFrame()
+    else:
+        df = pd.DataFrame()
+
+    if df.empty and "df_proy" in st.session_state:
+        df_ss = st.session_state["df_proy"]
+        if isinstance(df_ss, pd.DataFrame) and not df_ss.empty:
+            df = norm_cols(df_ss.copy())
+
+    if df.empty or "PERIODO" not in df.columns:
+        return EMPTY
+    if "VN_RES_TOTAL" not in df.columns or "APORTE_RES_TOTAL" not in df.columns:
+        return EMPTY
+
+    df = df.copy()
+    df["PERIODO"] = pd.to_datetime(df["PERIODO"], errors="coerce")
+    df = df.dropna(subset=["PERIODO"])
+    if df.empty:
+        return EMPTY
+
+    for c in ("AREA", "LINEA"):
+        if c not in df.columns:
+            df[c] = f"SIN {c}"
+    df["AREA"]  = df["AREA"].astype(str).str.upper().str.strip()
+    df["LINEA"] = df["LINEA"].astype(str).str.upper().str.strip()
+
+    df["NETA_REAL"]   = pd.to_numeric(df["VN_RES_TOTAL"],     errors="coerce").fillna(0)
+    df["APORTE_REAL"] = pd.to_numeric(df["APORTE_RES_TOTAL"], errors="coerce").fillna(0)
+
+    df = df[df["AREA"].isin(_AREAS_INTERNAS)]
+    df = df[~df.apply(lambda r: _is_linea_excluded(r["AREA"], r["LINEA"]), axis=1)]
+    if df.empty:
+        return EMPTY
+
+    return df.groupby(["PERIODO", "AREA", "LINEA"], as_index=False)[["NETA_REAL", "APORTE_REAL"]].sum()
+
+
+def _compute_ventas_unds_pry() -> pd.DataFrame:
+    """
+    Lee proy_result.parquet y agrega VENTA_FUL_TOTAL_UND (unidades vendidas
+    Tienda+Etail+Mayor) por PERIODO/AREA/LINEA. Alimenta la fila 'Vta Unds' en
+    Flujo de Unidades para los meses futuros (forecast); los meses cerrados
+    usan unidades reales (UNDS_REAL de _fetch_ventas).
+    Si la columna VENTA_FUL_TOTAL_UND no está calculada en el parquet, se
+    deriva sumando VENTA_FUL_TIENDA_UND + VENTA_FUL_ETAIL_UND + VENTA_FUL_MAYOR_UND.
+    """
+    EMPTY = pd.DataFrame(columns=["PERIODO", "AREA", "LINEA", "VENTA_FUL_TOTAL_UND"])
+    parquet = _DATA_DIR / "proy_result.parquet"
+
+    if parquet.exists():
+        try:
+            df = norm_cols(pd.read_parquet(parquet))
+        except Exception as e:
+            st.warning(f"Error leyendo proy_result.parquet: {e}")
+            df = pd.DataFrame()
+    else:
+        df = pd.DataFrame()
+
+    if df.empty and "df_proy" in st.session_state:
+        df_ss = st.session_state["df_proy"]
+        if isinstance(df_ss, pd.DataFrame) and not df_ss.empty:
+            df = norm_cols(df_ss.copy())
+
+    if df.empty or "PERIODO" not in df.columns:
+        return EMPTY
+
+    df = df.copy()
+    if "VENTA_FUL_TOTAL_UND" not in df.columns:
+        _parts = [c for c in ("VENTA_FUL_TIENDA_UND", "VENTA_FUL_ETAIL_UND", "VENTA_FUL_MAYOR_UND")
+                  if c in df.columns]
+        if not _parts:
+            return EMPTY
+        df["VENTA_FUL_TOTAL_UND"] = sum(
+            pd.to_numeric(df[c], errors="coerce").fillna(0) for c in _parts
+        )
+
+    df["PERIODO"] = pd.to_datetime(df["PERIODO"], errors="coerce")
+    df = df.dropna(subset=["PERIODO"])
+    if df.empty:
+        return EMPTY
+
+    for c in ("AREA", "LINEA"):
+        if c not in df.columns:
+            df[c] = f"SIN {c}"
+    df["AREA"]  = df["AREA"].astype(str).str.upper().str.strip()
+    df["LINEA"] = df["LINEA"].astype(str).str.upper().str.strip()
+    df["VENTA_FUL_TOTAL_UND"] = pd.to_numeric(df["VENTA_FUL_TOTAL_UND"], errors="coerce").fillna(0)
+
+    df = df[df["AREA"].isin(_AREAS_INTERNAS)]
+    df = df[~df.apply(lambda r: _is_linea_excluded(r["AREA"], r["LINEA"]), axis=1)]
+    if df.empty:
+        return EMPTY
+
+    return df.groupby(["PERIODO", "AREA", "LINEA"], as_index=False)["VENTA_FUL_TOTAL_UND"].sum()
 
 
 # ─── Diagnóstico Compras Pry S/. + TT ──────────────────────────────────────────
@@ -1022,16 +1321,20 @@ def _build_matrix(ventas, stock, transitos, compras_pry, budget, fcst_override,
     cur_month = pd.Timestamp(today.year, today.month, 1)
     labels    = [_period_label(p) for p in periods]
 
+    # "ventas" ahora proviene de _compute_ventas_pry() (proy_result.parquet:
+    # VN_RES_TOTAL/APORTE_RES_TOTAL) — cubre real (cerrado) y forecast (futuro)
+    # en una sola serie, ver _add_block más abajo.
     v_idx  = _make_index(ventas,      "NETA_REAL",        periods)
     a_idx  = _make_index(ventas,      "APORTE_REAL",      periods)
     s_idx  = _make_index(stock,       "STOCK_COSTO",      periods)
     tt_idx = _make_index(transitos,   "TT_SOLES",         periods)
     cp_idx = _make_index(compras_pry, "COMPRA_PRY_SOLES", periods)
-    bud    = _make_bud_index(budget,        periods)
-    fovr   = _make_bud_index(fcst_override, periods)   # índice forecast override
+    # "Neta Budget"/"Aporte Budget" ahora se alimentan del archivo Override
+    # Neta/Aporte Fcst futuro (antes venían del budget oficial vía `budget`).
+    fovr   = _make_bud_index(fcst_override, periods)
 
     all_pairs: set = set()
-    for d in [v_idx, a_idx, s_idx, tt_idx, cp_idx, bud, fovr]:
+    for d in [v_idx, a_idx, s_idx, tt_idx, cp_idx, fovr]:
         all_pairs.update(d.keys())
 
     # Solo áreas habilitadas; excluir líneas filtradas
@@ -1064,17 +1367,14 @@ def _build_matrix(ventas, stock, transitos, compras_pry, budget, fcst_override,
             ap        = _sum_idx(a_idx,  pairs, p)
             tt        = _sum_idx(tt_idx, pairs, p)
             cp        = _sum_idx(cp_idx, pairs, p)
-            vn_bud, ap_bud = _bud_vals(bud, pairs, p, area_f, linea_f)
+            # Budget: ahora viene del archivo Override Neta/Aporte Fcst futuro
+            vn_bud, ap_bud = _bud_vals(fovr, pairs, p, area_f, linea_f)
             mrg_bud   = (ap_bud / vn_bud * 100) if vn_bud else 0.0
 
-            if p in closed:
-                neta_fr   = neta
-                aporte_fr = ap
-            else:
-                # Forecast override tiene prioridad sobre budget para meses futuros
-                ovr_vn, ovr_ap = _bud_vals(fovr, pairs, p, area_f, linea_f)
-                neta_fr   = ovr_vn   if ovr_vn   != 0 else vn_bud
-                aporte_fr = ovr_ap   if ovr_ap   != 0 else ap_bud
+            # Fcst/Real: ahora viene de proy_result.parquet (VN_RES_TOTAL/
+            # APORTE_RES_TOTAL) para todos los periodos — real cerrado + forecast
+            neta_fr   = neta
+            aporte_fr = ap
 
             mrg_fr = (aporte_fr / neta_fr * 100) if neta_fr else 0.0
             vcf    = neta_fr - aporte_fr
@@ -1133,6 +1433,141 @@ def _build_matrix(ventas, stock, transitos, compras_pry, budget, fcst_override,
         })
 
     # DJPERU = suma de todas las áreas habilitadas
+    _add_block("DJPERU", "CIA", sorted(area_pairs))
+
+    for area in sorted(by_area.keys()):
+        area_p = [(area, l) for l in by_area[area]]
+        _add_block(area, "AREA", area_p, area_f=area)
+        for linea in sorted(by_area[area]):
+            if not linea or not linea.strip():
+                continue
+            _add_block(linea, "LINEA", [(area, linea)], area_f=area, linea_f=linea)
+
+    return pd.DataFrame(rows)
+
+
+def _build_matrix_unds(ventas, stock_unds, transitos_unds, compras_pry_unds,
+                       ventas_unds_real, ventas_unds_pry, fcst_override,
+                       periods, closed, area_filter=None):
+    """
+    Misma estructura que _build_matrix pero en unidades:
+      Stk Final Unds, TT Unds, Compras Pry Unds y nueva fila Vta Unds.
+    Neta/Aporte/Mrg%/Vta Costo (Budget y Fcst/Real) se mantienen sin cambio —
+    mismos valores en S/. que en la pestaña Flujo de Costos (mismas fuentes:
+    'ventas' = _compute_ventas_pry(), 'fcst_override' = override Neta/Aporte).
+    MOI = Stk Final Unds / promedio(Vta Unds) del año.
+    """
+    today     = datetime.today()
+    cur_month = pd.Timestamp(today.year, today.month, 1)
+
+    v_idx   = _make_index(ventas,           "NETA_REAL",           periods)
+    a_idx   = _make_index(ventas,           "APORTE_REAL",         periods)
+    su_idx  = _make_index(stock_unds,       "STOCK_UNDS",          periods)
+    ttu_idx = _make_index(transitos_unds,   "TT_UNDS",             periods)
+    cpu_idx = _make_index(compras_pry_unds, "COMPRA_PRY_UNDS",     periods)
+    vur_idx = _make_index(ventas_unds_real, "UNDS_REAL",           periods)
+    vup_idx = _make_index(ventas_unds_pry,  "VENTA_FUL_TOTAL_UND", periods)
+    fovr    = _make_bud_index(fcst_override, periods)
+
+    all_pairs: set = set()
+    for d in [v_idx, a_idx, su_idx, ttu_idx, cpu_idx, vur_idx, vup_idx, fovr]:
+        all_pairs.update(d.keys())
+
+    area_pairs = {
+        (a, l) for (a, l) in all_pairs
+        if a in _AREAS_INTERNAS
+        and (not l or not _is_linea_excluded(a, l))
+    }
+
+    if area_filter:
+        af_upper  = {a.upper() for a in area_filter}
+        area_pairs = {(a, l) for (a, l) in area_pairs if a in af_upper}
+
+    by_area: dict = defaultdict(list)
+    for (a, l) in sorted(area_pairs):
+        by_area[a].append(l)
+
+    sorted_periods = sorted(periods)
+    closed_sorted  = [p for p in sorted_periods if p < cur_month]
+    future_sorted  = [p for p in sorted_periods if p >= cur_month]
+
+    rows = []
+
+    def _add_block(label, nivel, pairs, area_f=None, linea_f=None):
+        period_vals: dict = {}
+        for p in periods:
+            stk_u = _sum_idx(su_idx,  pairs, p)
+            neta  = _sum_idx(v_idx,   pairs, p)
+            ap    = _sum_idx(a_idx,   pairs, p)
+            tt_u  = _sum_idx(ttu_idx, pairs, p)
+            cp_u  = _sum_idx(cpu_idx, pairs, p)
+
+            # Budget: igual que en Flujo de Costos (override Neta/Aporte Fcst)
+            vn_bud, ap_bud = _bud_vals(fovr, pairs, p, area_f, linea_f)
+            mrg_bud = (ap_bud / vn_bud * 100) if vn_bud else 0.0
+
+            # Fcst/Real: igual que en Flujo de Costos (proy_result.parquet)
+            neta_fr   = neta
+            aporte_fr = ap
+            mrg_fr = (aporte_fr / neta_fr * 100) if neta_fr else 0.0
+            vcf    = neta_fr - aporte_fr
+
+            # Vta Unds: real hasta el mes cerrado, proy_result.parquet en adelante
+            vta_u = _sum_idx(vur_idx, pairs, p) if p in closed else _sum_idx(vup_idx, pairs, p)
+
+            period_vals[p] = {
+                "Stk Final Unds":   stk_u,
+                "Neta Budget":      vn_bud,
+                "Aporte Budget":    ap_bud,
+                "Mrg% Budget":      mrg_bud,
+                "Vta Costo Budget": vn_bud - ap_bud,
+                "Neta Fcst/Real":   neta_fr,
+                "Aporte Fcst/Real": aporte_fr,
+                "Mrg% Fcst/Real":   mrg_fr,
+                "Vta Costo Fcst":   vcf,
+                "TT Unds":          tt_u,
+                "Compras Pry Unds": cp_u,
+                "Vta Unds":         vta_u,
+            }
+
+        # Proyección de stock en unidades (meses futuros)
+        if future_sorted:
+            prev_stk = (period_vals[closed_sorted[-1]]["Stk Final Unds"]
+                        if closed_sorted else 0.0)
+            for p in future_sorted:
+                vta_p    = period_vals[p]["Vta Unds"]
+                tt_p     = period_vals[p]["TT Unds"]
+                cp_p     = period_vals[p]["Compras Pry Unds"]
+                proj_stk = prev_stk - vta_p + tt_p + cp_p
+                period_vals[p]["Stk Final Unds"] = proj_stk
+                prev_stk = proj_stk
+
+        # MOI = Stk Final Unds / promedio(Vta Unds) del año
+        vta_by_year: dict = {}
+        for p in periods:
+            vta_by_year.setdefault(p.year, []).append(period_vals[p]["Vta Unds"])
+        avg_vta = {yr: (sum(v)/len(v)) if v else 0.0
+                   for yr, v in vta_by_year.items()}
+        for p in periods:
+            av  = avg_vta.get(p.year, 0.0)
+            stk = period_vals[p]["Stk Final Unds"]
+            period_vals[p]["MOI"] = (stk / av) if av else 0.0
+
+        rows.append({
+            "CIA": label, "Fecha": "Fecha",
+            **{_period_label(p): "" for p in periods},
+            "__nivel__": nivel, "__header__": True,
+        })
+        for met in METRICAS_UNDS:
+            row = {"CIA": label, "Fecha": met, "__nivel__": nivel, "__header__": False}
+            for p in periods:
+                row[_period_label(p)] = period_vals[p].get(met, 0.0)
+            rows.append(row)
+        rows.append({
+            "CIA": "", "Fecha": "", "__nivel__": "sep", "__header__": False,
+            **{_period_label(p): "" for p in periods},
+        })
+
     _add_block("DJPERU", "CIA", sorted(area_pairs))
 
     for area in sorted(by_area.keys()):
@@ -1381,10 +1816,10 @@ def _render_kpis(df_matrix: pd.DataFrame, closed: set):
 
 # ─── Panel de archivos (main page) ──────────────────────────────────────────────
 
-_TC_PEN_DEFAULT = TC_USD_DEFAULT   # Tipo de cambio USD→PEN por defecto (config, 3.80)
+_TC_PEN_DEFAULT = 3.60   # Tipo de cambio USD→PEN por defecto para Flujo de Costos
 
 def _get_tc_pen() -> float:
-    """TC USD→PEN. Usa session_state['fc_tc_pen'] (ingresado en el panel) o TC_USD_DEFAULT."""
+    """TC USD→PEN. Usa session_state['fc_tc_pen'] (ingresado en el panel) o 3.60."""
     return float(st.session_state.get("fc_tc_pen", _TC_PEN_DEFAULT))
 
 
@@ -1396,7 +1831,7 @@ def _render_file_panel():
         tc_col.number_input(
             "💱 TC USD → PEN (soles)",
             min_value=1.0, max_value=20.0,
-            value=TC_USD_DEFAULT,
+            value=3.60,
             step=0.05, format="%.2f",
             key="fc_tc_pen",
             help="Tipo de cambio USD a Soles peruanos. Default 3.80. "
@@ -1530,7 +1965,7 @@ def render_flujo_costos(conn):
     c1, c2, _ = st.columns([1, 1, 5])
     with c1:
         if st.button("🔄 Actualizar", key="btn_fc_ref"):
-            _fetch_ventas.clear(); _fetch_stock.clear(); _fetch_pos.clear()
+            _fetch_ventas.clear(); _fetch_stock.clear(); _fetch_stock_unds.clear(); _fetch_pos.clear()
             st.rerun()
     with c2:
         if st.button("🗑️ Limpiar caché", key="btn_fc_clr"):
@@ -1543,8 +1978,9 @@ def render_flujo_costos(conn):
     _cid = id(conn)
     with lottie_spinner("snowflake"):
         try:
-            df_ventas = _fetch_ventas(_cid, _conn=conn)
-            df_stock  = _fetch_stock(_cid,  _conn=conn)
+            df_ventas    = _fetch_ventas(_cid, _conn=conn)
+            df_stock     = _fetch_stock(_cid,  _conn=conn)
+            df_stock_und = _fetch_stock_unds(_cid, _conn=conn)
             # Usar datos enriquecidos de Plan de Compras si están disponibles
             # (garantiza números idénticos a Resumen Plan de Compra)
             _shared = _resolve_df_pos_shared()
@@ -1555,27 +1991,32 @@ def render_flujo_costos(conn):
 
     df_tt = _compute_transitos(df_pos, factor_ovr)
     df_cp = _compute_compras_pry(factor_ovr)
+    # "Neta Fcst/Real" / "Aporte Fcst/Real" — ahora desde proy_result.parquet
+    # (VN_RES_TOTAL / APORTE_RES_TOTAL), real cerrado + forecast en una sola serie
+    df_vp = _compute_ventas_pry()
+
+    # ── Datos en unidades (pestaña Flujo de Unidades) ─────────────────────────
+    df_tt_und = _compute_transitos_unds(df_pos)
+    df_cp_und = _compute_compras_pry_unds()
+    df_vup    = _compute_ventas_unds_pry()
 
     if not (_DATA_DIR / "proy_result.parquet").exists():
         if "df_proy" in st.session_state:
-            st.info("ℹ️ Usando proyección de la sesión actual para *Compras Pry S/.* (parquet no encontrado en disco).")
+            st.info("ℹ️ Usando proyección de la sesión actual para *Compras Pry S/.* y *Neta/Aporte Fcst/Real* (parquet no encontrado en disco).")
         else:
             st.warning(
-                "⚠️ Sin datos de *Compras Pry S/.* — Ve a **Proyección de Stock**, "
+                "⚠️ Sin datos de *Compras Pry S/.* ni *Neta/Aporte Fcst/Real* — Ve a **Proyección de Stock**, "
                 "carga los archivos y presiona **Procesar** para generarlos."
             )
 
-    # ── Budget + Forecast override ────────────────────────────────────────────
-    df_budget = _load_budget_df()
+    # ── Forecast override (alimenta "Neta Budget"/"Aporte Budget") ───────────
+    df_budget   = _load_budget_df()  # solo para listado de áreas disponibles
     df_fcst_ovr = _load_fcst_override_df()
 
-    if df_budget.empty:
-        st.warning("📋 Sin budget — meses futuros y filas Budget mostrarán cero.")
+    if df_fcst_ovr.empty:
+        st.warning("📋 Sin Override Neta/Aporte Fcst futuro — filas Budget mostrarán cero.")
     else:
-        src = "override" if _BUDGET_OVERRIDE_PATH.exists() else "default 2026"
-        msgs = [f"✅ Budget ({src}) · {df_budget['AREA'].nunique()} áreas"]
-        if not df_fcst_ovr.empty:
-            msgs.append("· Forecast override activo")
+        msgs = [f"✅ Override Neta/Aporte Fcst · {df_fcst_ovr['AREA'].nunique()} áreas"]
         if factor_ovr:
             msgs.append(f"· Factor override: {len(factor_ovr)} reglas")
         st.success("  ".join(msgs))
@@ -1583,8 +2024,13 @@ def render_flujo_costos(conn):
     # ── Filtro de áreas ───────────────────────────────────────────────────────
     areas_snap = (
         {str(a).upper() for a in df_ventas["AREA"].unique()}
+        | {str(a).upper() for a in df_vp["AREA"].unique()}
         | {str(a).upper() for a in df_tt["AREA"].unique()}
         | {str(a).upper() for a in df_cp["AREA"].unique()}
+        | {str(a).upper() for a in df_stock_und["AREA"].unique()}
+        | {str(a).upper() for a in df_tt_und["AREA"].unique()}
+        | {str(a).upper() for a in df_cp_und["AREA"].unique()}
+        | {str(a).upper() for a in df_vup["AREA"].unique()}
     )
     if not df_budget.empty:
         areas_snap |= {str(a).upper() for a in df_budget["AREA"].unique()}
@@ -1599,47 +2045,87 @@ def render_flujo_costos(conn):
     )
     area_filter = sel_areas if sel_areas else None
 
-    # ── Matriz ────────────────────────────────────────────────────────────────
+    # ── Periodos comunes ──────────────────────────────────────────────────────
     periods = _all_periods()
     closed  = _closed_set()
 
-    with st.spinner("Construyendo matriz…"):
-        df_matrix = _build_matrix(
-            ventas=df_ventas, stock=df_stock,
-            transitos=df_tt, compras_pry=df_cp,
-            budget=df_budget, fcst_override=df_fcst_ovr,
-            periods=periods, closed=closed, area_filter=area_filter,
+    def _leyenda():
+        leg = st.columns(6)
+        leg[0].markdown('<span style="background:#FFFF00;padding:2px 8px;border-radius:3px;font-size:11px;border:1px solid #ccc;">■ CIA</span>', unsafe_allow_html=True)
+        leg[1].markdown('<span style="background:#FFF59D;padding:2px 8px;border-radius:3px;font-size:11px;border:1px solid #ccc;">■ Área</span>', unsafe_allow_html=True)
+        leg[2].markdown('<span style="background:#FFFDE7;padding:2px 8px;border-radius:3px;font-size:11px;border:1px solid #ccc;">■ Línea</span>', unsafe_allow_html=True)
+        leg[3].markdown('<span style="background:#BDD7EE;padding:2px 8px;border-radius:3px;font-size:11px;border:1px solid #ccc;">■ Mes futuro</span>', unsafe_allow_html=True)
+        leg[4].markdown('<span style="background:#E8F8F5;padding:2px 8px;border-radius:3px;font-size:11px;border:1px solid #ccc;">■ MOI</span>', unsafe_allow_html=True)
+        leg[5].markdown('<span style="background:#1E8449;color:#fff;padding:2px 8px;border-radius:3px;font-size:11px;">■ MOI Dic</span>', unsafe_allow_html=True)
+
+    tab_costos, tab_unds = st.tabs(["💸 Flujo de Costos", "📦 Flujo de Unidades"])
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TAB 1 — Flujo de Costos (S/.)
+    # ═══════════════════════════════════════════════════════════════════════
+    with tab_costos:
+        with st.spinner("Construyendo matriz…"):
+            df_matrix = _build_matrix(
+                ventas=df_vp, stock=df_stock,
+                transitos=df_tt, compras_pry=df_cp,
+                budget=df_budget, fcst_override=df_fcst_ovr,
+                periods=periods, closed=closed, area_filter=area_filter,
+            )
+
+        if df_matrix.empty:
+            show_empty_state("Sin datos para la matriz actual.")
+        else:
+            # ── KPIs ──────────────────────────────────────────────────────────
+            st.markdown("---")
+            closed_max = max(closed) if closed else None
+            st.markdown(
+                "##### 📊 Resumen YTD — CIA"
+                + (f"  ·  Último mes cerrado: **{_period_label(closed_max)}**" if closed_max else "")
+            )
+            _render_kpis(df_matrix, closed)
+
+            # ── Diagnóstico Compras Pry + TT ─────────────────────────────────
+            _render_diagnostico_compras(factor_ovr, df_pos)
+
+            # ── Leyenda ───────────────────────────────────────────────────────
+            st.markdown("---")
+            _leyenda()
+
+            # ── Tabla ─────────────────────────────────────────────────────────
+            st.html(_build_html_table(df_matrix, periods, closed))
+
+            # ── Descarga ──────────────────────────────────────────────────────
+            with st.expander("⬇️ Descargar datos", expanded=False):
+                dl = df_matrix.drop(columns=["__nivel__","__header__"], errors="ignore")
+                download_buttons(dl, "flujo_costos")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TAB 2 — Flujo de Unidades
+    # ═══════════════════════════════════════════════════════════════════════
+    with tab_unds:
+        st.caption(
+            "Mismas filas que Flujo de Costos, pero Stk Final / TT / Compras Pry "
+            "en unidades. Neta, Aporte, Mrg% y Vta Costo (Budget y Fcst/Real) "
+            "se mantienen igual que en Flujo de Costos. Se agrega **Vta Unds**: "
+            "venta real hasta el mes cerrado y proyectada (proy_result.parquet) "
+            "en los meses futuros."
         )
+        with st.spinner("Construyendo matriz de unidades…"):
+            df_matrix_und = _build_matrix_unds(
+                ventas=df_vp, stock_unds=df_stock_und,
+                transitos_unds=df_tt_und, compras_pry_unds=df_cp_und,
+                ventas_unds_real=df_ventas, ventas_unds_pry=df_vup,
+                fcst_override=df_fcst_ovr,
+                periods=periods, closed=closed, area_filter=area_filter,
+            )
 
-    if df_matrix.empty:
-        show_empty_state("Sin datos para la matriz actual."); return
+        if df_matrix_und.empty:
+            show_empty_state("Sin datos para la matriz de unidades actual.")
+        else:
+            st.markdown("---")
+            _leyenda()
+            st.html(_build_html_table(df_matrix_und, periods, closed))
 
-    # ── KPIs ──────────────────────────────────────────────────────────────────
-    st.markdown("---")
-    closed_max = max(closed) if closed else None
-    st.markdown(
-        "##### 📊 Resumen YTD — CIA"
-        + (f"  ·  Último mes cerrado: **{_period_label(closed_max)}**" if closed_max else "")
-    )
-    _render_kpis(df_matrix, closed)
-
-    # ── Diagnóstico Compras Pry + TT ─────────────────────────────────────────
-    _render_diagnostico_compras(factor_ovr, df_pos)
-
-    # ── Leyenda ───────────────────────────────────────────────────────────────
-    st.markdown("---")
-    leg = st.columns(6)
-    leg[0].markdown('<span style="background:#FFFF00;padding:2px 8px;border-radius:3px;font-size:11px;border:1px solid #ccc;">■ CIA</span>', unsafe_allow_html=True)
-    leg[1].markdown('<span style="background:#FFF59D;padding:2px 8px;border-radius:3px;font-size:11px;border:1px solid #ccc;">■ Área</span>', unsafe_allow_html=True)
-    leg[2].markdown('<span style="background:#FFFDE7;padding:2px 8px;border-radius:3px;font-size:11px;border:1px solid #ccc;">■ Línea</span>', unsafe_allow_html=True)
-    leg[3].markdown('<span style="background:#BDD7EE;padding:2px 8px;border-radius:3px;font-size:11px;border:1px solid #ccc;">■ Mes futuro</span>', unsafe_allow_html=True)
-    leg[4].markdown('<span style="background:#E8F8F5;padding:2px 8px;border-radius:3px;font-size:11px;border:1px solid #ccc;">■ MOI</span>', unsafe_allow_html=True)
-    leg[5].markdown('<span style="background:#1E8449;color:#fff;padding:2px 8px;border-radius:3px;font-size:11px;">■ MOI Dic</span>', unsafe_allow_html=True)
-
-    # ── Tabla ─────────────────────────────────────────────────────────────────
-    st.html(_build_html_table(df_matrix, periods, closed))
-
-    # ── Descarga ──────────────────────────────────────────────────────────────
-    with st.expander("⬇️ Descargar datos", expanded=False):
-        dl = df_matrix.drop(columns=["__nivel__","__header__"], errors="ignore")
-        download_buttons(dl, "flujo_costos")
+            with st.expander("⬇️ Descargar datos", expanded=False):
+                dl_u = df_matrix_und.drop(columns=["__nivel__","__header__"], errors="ignore")
+                download_buttons(dl_u, "flujo_unidades")

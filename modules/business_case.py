@@ -11,6 +11,7 @@ Módulo independiente que permite:
 """
 
 import io
+import re
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -157,6 +158,10 @@ _SALUD_COLOR = {
     "Nuevo Sin Rotación": "#fbbf24", "Nuevo (Alto Stock)": "#60a5fa",
     "Nuevo (Normal)": "#34d399", "Nuevo (Activo)": "#10b981",
 }
+_ELAST_THRESHOLD_DESC = {
+    "Muy Elástico": "< -1.5", "Elástico": "< -1.0", "Unitario": "< -0.7",
+    "Inelástico": "< -0.3", "Muy Inelástico": "< 0", "Anómalo": "≥ 0",
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -250,11 +255,33 @@ def _enrich_bc_data(df_base, sku_db, df_perfil, abc_xyz, ventas_px,
             (_vp.get("CANTIDAD", pd.Series(dtype=float)) > 0)
             & (_vp.get("PRECIO_PROMEDIO", pd.Series(dtype=float)) > 0)
         ].copy()
-        if not _vp.empty:
+        if not _vp.empty and "PERIODO" in _vp.columns:
+            _vp["PERIODO"] = pd.to_datetime(_vp["PERIODO"], errors="coerce")
             _vp["_LN_PX"] = np.log(_vp["PRECIO_PROMEDIO"])
             _vp["_LN_QTY"] = np.log(_vp["CANTIDAD"])
+
+            # Ventana móvil ajustada a la antigüedad: SKUs con ≥12m de venta
+            # usan el último año móvil; el resto usa los últimos 6 meses
+            # móviles (no tiene sentido pedirles 12m que no existen, y evita
+            # que precios/promos muy viejos distorsionen la pendiente).
+            #
+            # NOTA: no usamos df["ANTIGUEDAD_MESES"] aquí — esa columna viene
+            # de fec_ult_ing_cd (días desde el ÚLTIMO ingreso a CD), no desde
+            # la primera venta. Un SKU de 2 años que se reabasteció hace 2
+            # meses mostraría ANTIGUEDAD_MESES=2 y quedaría mal clasificado
+            # como "nuevo". En su lugar medimos la antigüedad real con el
+            # propio span de ventas_px (primera a última venta con precio>0).
+            _today_m = pd.Timestamp.now().to_period("M").to_timestamp()
+
             _elast_rows = []
             for _esku, _egrp in _vp.groupby("SKU_PRODUCTO"):
+                _span_months = (
+                    (_egrp["PERIODO"].max().year - _egrp["PERIODO"].min().year) * 12
+                    + (_egrp["PERIODO"].max().month - _egrp["PERIODO"].min().month) + 1
+                )
+                _window_months = 12 if _span_months >= 12 else 6
+                _cutoff = _today_m - pd.DateOffset(months=_window_months)
+                _egrp = _egrp[_egrp["PERIODO"] >= _cutoff]
                 if len(_egrp) < 6:
                     continue
                 try:
@@ -463,6 +490,13 @@ def _load_bc_data(conn):
     with st.spinner("Cargando ventas 24m..."):
         try:
             data["ventas_px"] = norm_cols(cq.ventas_mensual_precio(conn))
+            if "COD_CANAL" in data["ventas_px"].columns:
+                # cod_canal viene del CHAR de origen con espacios; otros queries
+                # del repo (ej. QUERY_STOCK_BASE) ya lo TRIM-ean antes de comparar
+                # contra los códigos '02'/'03'/'06'.
+                data["ventas_px"]["COD_CANAL"] = (
+                    data["ventas_px"]["COD_CANAL"].astype(str).str.strip()
+                )
         except Exception:
             data["ventas_px"] = pd.DataFrame()
 
@@ -855,11 +889,787 @@ def _build_bc_chart(bc_sku, ventas_px, conn, show_cost=False, canal_filter=None)
     return fig, _bc_hist, _bc_proy, _bc_stock_hist
 
 
+def _build_group_chart(sku_list, ventas_px, conn, show_cost=False):
+    """Aggregate version of _build_bc_chart for a group of SKUs (Área/Línea/Marca).
+
+    Sums quantities/values across every SKU in sku_list per period and
+    recomputes weighted price/MOI on the aggregated totals (same approach
+    QUERY_STOCK_CRITICO_METRICS uses: MOI = Σstock_costo / Σcosto_prom_90_cia / 30.44).
+    Returns (fig, hist, proy, stock_hist) or None if no data.
+    """
+    if not sku_list:
+        return None
+    _today = pd.Timestamp.now().normalize()
+    _today_m = _today.to_period("M").to_timestamp()
+
+    # ── Historical price + volume (aggregate) ──
+    _g_hist = pd.DataFrame()
+    if not ventas_px.empty and "SKU_PRODUCTO" in ventas_px.columns:
+        _gv = ventas_px[ventas_px["SKU_PRODUCTO"].isin(sku_list)].copy()
+        if not _gv.empty:
+            _gv["PERIODO"] = pd.to_datetime(_gv["PERIODO"], errors="coerce")
+            for _vc in ["CANTIDAD", "NETO", "APORTE"]:
+                if _vc in _gv.columns:
+                    _gv[_vc] = pd.to_numeric(_gv[_vc], errors="coerce").fillna(0)
+            _g_hist = _gv.groupby("PERIODO", as_index=False).agg(
+                CANTIDAD=("CANTIDAD", "sum"),
+                NETO=("NETO", "sum"),
+                APORTE=("APORTE", "sum"),
+            ).sort_values("PERIODO")
+            _g_hist["PRECIO_PROM"] = np.where(
+                _g_hist["CANTIDAD"] > 0,
+                _g_hist["NETO"] / _g_hist["CANTIDAD"],
+                0,
+            )
+
+    # ── Projection (aggregate) ──
+    _g_proy = pd.DataFrame()
+    _df_proy_g = st.session_state.get("df_proy", pd.DataFrame())
+    if not _df_proy_g.empty and "SKU_PRODUCTO" in _df_proy_g.columns:
+        _bp = _df_proy_g[_df_proy_g["SKU_PRODUCTO"].isin(sku_list)].copy()
+        if "TIPO_DATO" in _bp.columns:
+            _bp = _bp[_bp["TIPO_DATO"].isin(["PROYECCION", "REAL+FC"])]
+        if not _bp.empty:
+            _bp["PERIODO"] = pd.to_datetime(_bp["PERIODO"], errors="coerce")
+            for _nc in ["VENTA_FUL_TIENDA_UND", "VENTA_FUL_ETAIL_UND",
+                        "VENTA_FUL_MAYOR_UND", "VN_RES_TOTAL",
+                        "STOCK_FINAL_TOTAL", "COSTO_UNITARIO",
+                        "COGS_RES_TOTAL", "FORECAST_COMPRA", "ETA"]:
+                if _nc in _bp.columns:
+                    _bp[_nc] = pd.to_numeric(_bp[_nc], errors="coerce").fillna(0)
+            _bp["CANTIDAD_PROY"] = (
+                _bp.get("VENTA_FUL_TIENDA_UND", 0)
+                + _bp.get("VENTA_FUL_ETAIL_UND", 0)
+                + _bp.get("VENTA_FUL_MAYOR_UND", 0)
+            )
+            # STOCK_FINAL_CLP por SKU/periodo: el costo unitario varía por SKU,
+            # no se puede multiplicar después de sumar entre SKUs.
+            _bp["STOCK_FINAL_CLP"] = (
+                _bp.get("STOCK_FINAL_TOTAL", 0) * _bp.get("COSTO_UNITARIO", 0)
+            )
+
+            _bp_agg = _bp.groupby("PERIODO", as_index=False).agg(
+                CANTIDAD_PROY=("CANTIDAD_PROY", "sum"),
+                VN_RES_TOTAL=("VN_RES_TOTAL", "sum"),
+                STOCK_FINAL=("STOCK_FINAL_TOTAL", "sum"),
+                STOCK_FINAL_CLP=("STOCK_FINAL_CLP", "sum"),
+                COGS_RES_TOTAL=("COGS_RES_TOTAL", "sum"),
+                FORECAST_COMPRA=("FORECAST_COMPRA", "sum"),
+                ETA=("ETA", "sum"),
+            ).sort_values("PERIODO").reset_index(drop=True)
+
+            _bp_agg["PRECIO_PROY"] = np.where(
+                _bp_agg["CANTIDAD_PROY"] > 0,
+                _bp_agg["VN_RES_TOTAL"] / _bp_agg["CANTIDAD_PROY"],
+                0,
+            )
+            _cogs_vals = _bp_agg["COGS_RES_TOTAL"].values
+            _cogs_fwd6 = np.zeros(len(_bp_agg))
+            for _i in range(len(_bp_agg)):
+                _window = _cogs_vals[_i:_i + 6]
+                _window_pos = _window[_window > 0]
+                _cogs_fwd6[_i] = _window_pos.mean() if len(_window_pos) > 0 else 0
+            _bp_agg["_COGS_FWD6"] = _cogs_fwd6
+            _bp_agg["MOI_PROY"] = np.where(
+                _bp_agg["_COGS_FWD6"] > 0,
+                _bp_agg["STOCK_FINAL_CLP"] / _bp_agg["_COGS_FWD6"],
+                0,
+            )
+            _bp_agg.drop(columns=["_COGS_FWD6"], inplace=True)
+            _g_proy = _bp_agg
+
+    # ── Fallback: project with historical average if no forecast ──
+    _is_fallback = False
+    if _g_proy.empty and not _g_hist.empty:
+        _is_fallback = True
+        _hist_avg_qty = _g_hist["CANTIDAD"].mean()
+        _hist_avg_px = float(np.where(
+            _g_hist["CANTIDAD"].sum() > 0,
+            _g_hist["NETO"].sum() / _g_hist["CANTIDAD"].sum(),
+            0,
+        ))
+        _fb_periods = pd.date_range(start=_today_m, periods=12, freq="MS")
+        _fb_rows = [{"PERIODO": fp, "CANTIDAD_PROY": _hist_avg_qty,
+                     "PRECIO_PROY": _hist_avg_px, "STOCK_FINAL": 0,
+                     "STOCK_FINAL_CLP": 0, "MOI_PROY": 0,
+                     "FORECAST_COMPRA": 0, "ETA": 0} for fp in _fb_periods]
+        _g_proy = pd.DataFrame(_fb_rows)
+
+    # ── Weekly stock+MOI (aggregate) ──
+    _g_stock_hist = pd.DataFrame()
+    try:
+        _all_m = norm_cols(cq.stock_critico_metrics(conn))
+        if not _all_m.empty and "SKU_PRODUCTO" in _all_m.columns:
+            _gm = _all_m[_all_m["SKU_PRODUCTO"].isin(sku_list)].copy()
+            if not _gm.empty:
+                _gm["FECHA"] = pd.to_datetime(_gm["FECHA"], errors="coerce")
+                for _sc in ["STOCK_COSTO", "STOCK_UNIDADES", "COSTO_PROM_90_CIA"]:
+                    if _sc in _gm.columns:
+                        _gm[_sc] = pd.to_numeric(_gm[_sc], errors="coerce").fillna(0)
+                _g_stock_hist = _gm.groupby("FECHA", as_index=False).agg(
+                    STOCK_COSTO=("STOCK_COSTO", "sum"),
+                    STOCK_UNIDADES=("STOCK_UNIDADES", "sum"),
+                    COSTO_PROM_90_CIA=("COSTO_PROM_90_CIA", "sum"),
+                ).sort_values("FECHA")
+                _g_stock_hist["MOI"] = np.where(
+                    _g_stock_hist["COSTO_PROM_90_CIA"] > 0,
+                    _g_stock_hist["STOCK_COSTO"] / _g_stock_hist["COSTO_PROM_90_CIA"] / 30.44,
+                    0,
+                )
+    except Exception:
+        pass
+
+    _has_hist = not _g_hist.empty
+    _has_proy = not _g_proy.empty
+    _has_stock = not _g_stock_hist.empty
+
+    if not _has_hist and not _has_proy and not _has_stock:
+        return None
+
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        vertical_spacing=0.16, row_heights=[0.5, 0.5],
+        specs=[[{"secondary_y": True}], [{"secondary_y": True}]],
+        subplot_titles=("Precio Promedio vs Volumen Vendido",
+                        "Nivel de Inventario vs MOI"),
+    )
+
+    # ── MTD real sales (aggregate) ──
+    _mtd_und = 0
+    _mtd_vn = 0
+    try:
+        _df_mtd = norm_cols(cq.ventas_mtd(conn))
+        if not _df_mtd.empty and "SKU_PRODUCTO" in _df_mtd.columns:
+            _mtd_g = _df_mtd[_df_mtd["SKU_PRODUCTO"].isin(sku_list)]
+            _mtd_und = pd.to_numeric(_mtd_g.get("CANTIDAD_MTD", 0), errors="coerce").fillna(0).sum()
+            _mtd_vn = pd.to_numeric(_mtd_g.get("NETO_MTD", 0), errors="coerce").fillna(0).sum()
+    except Exception:
+        pass
+
+    # ROW 1: Price vs Volume
+    if _has_hist:
+        fig.add_trace(
+            go.Bar(
+                x=_g_hist["PERIODO"], y=_g_hist["CANTIDAD"],
+                name="Venta Real (und)", marker_color=COLORS["primary"],
+                opacity=0.7,
+            ),
+            row=1, col=1, secondary_y=False,
+        )
+        _px_hist = _g_hist[_g_hist["PRECIO_PROM"] > 0]
+        if not _px_hist.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=_px_hist["PERIODO"], y=_px_hist["PRECIO_PROM"],
+                    name="Precio Promedio ($)", mode="lines+markers",
+                    line=dict(color=COLORS["status_at_risk"], width=2.5),
+                    marker=dict(size=5),
+                ),
+                row=1, col=1, secondary_y=True,
+            )
+
+    _g_proy_chart = _g_proy if _has_proy else pd.DataFrame()
+    if _has_proy and _mtd_und > 0:
+        _cur_month = _today_m
+        _proy_cur = _g_proy[_g_proy["PERIODO"] == _cur_month]
+        _proy_rest = _g_proy[_g_proy["PERIODO"] != _cur_month]
+        if not _proy_cur.empty:
+            _fc_total = float(_proy_cur["CANTIDAD_PROY"].iloc[0])
+            _fc_remainder = max(_fc_total - _mtd_und, 0)
+            _dia_mes = _today.day
+            _px_mtd = _mtd_vn / _mtd_und if _mtd_und > 0 else 0
+            fig.add_trace(
+                go.Bar(
+                    x=[_cur_month], y=[_mtd_und],
+                    name="Venta Real MTD",
+                    marker_color=COLORS.get("status_on_track", "#22c55e"),
+                    opacity=0.85,
+                    customdata=[[_fc_total, _dia_mes, _px_mtd]],
+                    hovertemplate=(
+                        "Real MTD: %{y:,.0f} und (al día %{customdata[1]:.0f})<br>"
+                        "FC mes: %{customdata[0]:,.0f} und<br>"
+                        "Precio MTD: $%{customdata[2]:,.0f}<extra></extra>"
+                    ),
+                ),
+                row=1, col=1, secondary_y=False,
+            )
+            if _fc_remainder > 0:
+                fig.add_trace(
+                    go.Bar(
+                        x=[_cur_month], y=[_fc_remainder],
+                        base=[_mtd_und],
+                        name="FC Restante Mes",
+                        marker_color=COLORS["tertiary_blue"],
+                        opacity=0.4, marker_pattern_shape="/",
+                        hovertemplate="FC restante: %{y:,.0f} und<extra></extra>",
+                    ),
+                    row=1, col=1, secondary_y=False,
+                )
+            _g_proy_chart = _proy_rest
+
+    if not _g_proy_chart.empty:
+        _proy_label = "Proy. Hist. (und)" if _is_fallback else "Venta Proyectada (und)"
+        fig.add_trace(
+            go.Bar(
+                x=_g_proy_chart["PERIODO"], y=_g_proy_chart["CANTIDAD_PROY"],
+                name=_proy_label,
+                marker_color=COLORS["tertiary_blue"],
+                opacity=0.5, marker_pattern_shape="/",
+            ),
+            row=1, col=1, secondary_y=False,
+        )
+    if _has_proy and not _is_fallback:
+        _px_proy = _g_proy[_g_proy["PRECIO_PROY"] > 0]
+        if not _px_proy.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=_px_proy["PERIODO"], y=_px_proy["PRECIO_PROY"],
+                    name="Precio Proyectado ($)", mode="lines+markers",
+                    line=dict(color=COLORS["status_at_risk"], width=2, dash="dash"),
+                    marker=dict(size=4),
+                ),
+                row=1, col=1, secondary_y=True,
+            )
+
+    # ROW 2: Inventory vs MOI
+    _inv_hist_col = "STOCK_COSTO" if show_cost else "STOCK_UNIDADES"
+    _inv_label = "Stock ($)" if show_cost else "Stock (und)"
+    _proy_inv_col = "STOCK_FINAL_CLP" if show_cost else "STOCK_FINAL"
+
+    if _has_stock and _inv_hist_col in _g_stock_hist.columns:
+        fig.add_trace(
+            go.Bar(
+                x=_g_stock_hist["FECHA"], y=_g_stock_hist[_inv_hist_col],
+                name=f"Stock Hist ({_inv_label})",
+                marker_color=COLORS["primary"], opacity=0.6,
+            ),
+            row=2, col=1, secondary_y=False,
+        )
+    if _has_proy and not _is_fallback and _proy_inv_col in _g_proy.columns:
+        fig.add_trace(
+            go.Bar(
+                x=_g_proy["PERIODO"], y=_g_proy[_proy_inv_col],
+                name=f"Stock Proy ({_inv_label})",
+                marker_color=COLORS["tertiary_blue"],
+                opacity=0.75, marker_pattern_shape="/",
+            ),
+            row=2, col=1, secondary_y=False,
+        )
+
+    if _has_stock and "MOI" in _g_stock_hist.columns:
+        _moi_valid = _g_stock_hist[_g_stock_hist["MOI"] > 0]
+        if not _moi_valid.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=_moi_valid["FECHA"], y=_moi_valid["MOI"],
+                    name="MOI Histórico", mode="lines+markers",
+                    line=dict(color=COLORS["status_at_risk"], width=2.5),
+                    marker=dict(size=4),
+                ),
+                row=2, col=1, secondary_y=True,
+            )
+    if _has_proy and not _is_fallback and "MOI_PROY" in _g_proy.columns:
+        _moi_proy_v = _g_proy[_g_proy["MOI_PROY"] > 0]
+        if not _moi_proy_v.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=_moi_proy_v["PERIODO"], y=_moi_proy_v["MOI_PROY"],
+                    name="MOI Proyectado", mode="lines+markers",
+                    line=dict(color=COLORS["status_at_risk"], width=2, dash="dash"),
+                    marker=dict(size=4),
+                ),
+                row=2, col=1, secondary_y=True,
+            )
+
+    fig.add_hline(y=4, line_dash="dash", line_color=COLORS["status_on_track"],
+                  annotation_text="MOI Target (4m)", annotation_position="top right",
+                  row=2, col=1, secondary_y=True)
+    fig.add_hline(y=12, line_dash="dash", line_color=COLORS["status_critical"],
+                  annotation_text="MOI Crítico (12m)", annotation_position="top right",
+                  row=2, col=1, secondary_y=True)
+
+    for _vl_yref in ["y domain", "y3 domain"]:
+        fig.add_shape(
+            type="line", x0=_today_m, x1=_today_m, y0=0, y1=1,
+            yref=_vl_yref,
+            line=dict(dash="dot", color="gray", width=1.5),
+        )
+    fig.add_annotation(
+        x=_today_m, y=1, yref="y domain",
+        text="Hoy", showarrow=False,
+        font=dict(size=10, color="gray"), yshift=10,
+    )
+
+    if _has_proy and not _is_fallback:
+        for _fc_col, _fc_name, _fc_color in [
+            ("ETA", "Recepción ETA", COLORS.get("status_en_curso", "#0ea5e9")),
+            ("FORECAST_COMPRA", "FC Compra", COLORS.get("tertiary_teal", "#14b8a6")),
+        ]:
+            if _fc_col in _g_proy.columns:
+                _fc_data = _g_proy[_g_proy[_fc_col] > 0]
+                if not _fc_data.empty:
+                    fig.add_trace(
+                        go.Bar(
+                            x=_fc_data["PERIODO"], y=_fc_data[_fc_col],
+                            name=_fc_name, marker_color=_fc_color,
+                            opacity=0.65, width=15 * 86400000,
+                            text=[f"{v:,.0f}" for v in _fc_data[_fc_col]],
+                            textposition="outside",
+                            textfont=dict(size=8, color=_fc_color),
+                        ),
+                        row=2, col=1, secondary_y=False,
+                    )
+
+    _moi_max = 15
+    if _has_stock and "MOI" in _g_stock_hist.columns:
+        _moi_max = max(_moi_max, _g_stock_hist["MOI"].max() * 1.3)
+    if _has_proy and "MOI_PROY" in _g_proy.columns:
+        _moi_max = max(_moi_max, _g_proy["MOI_PROY"].max() * 1.3)
+
+    fig.update_yaxes(title_text="Unidades Vendidas", row=1, col=1,
+                     secondary_y=False, showgrid=False)
+    fig.update_yaxes(title_text="Precio Neto ($)", row=1, col=1,
+                     secondary_y=True, showgrid=False)
+    fig.update_yaxes(title_text=_inv_label, row=2, col=1,
+                     secondary_y=False, showgrid=False)
+    fig.update_yaxes(title_text="MOI (meses)", row=2, col=1,
+                     range=[0, _moi_max], secondary_y=True, showgrid=False)
+    fig.update_xaxes(title_text="Periodo", row=2, col=1, showgrid=False)
+    fig.update_xaxes(showgrid=False, row=1, col=1)
+
+    _lo = dorel_layout(
+        height=800,
+        margin=dict(t=100),
+        legend=dict(orientation="h", yanchor="bottom",
+                    y=1.06, x=0.5, xanchor="center",
+                    font=dict(size=10)),
+    )
+    fig.update_layout(**_lo, hovermode="x unified")
+    for _ann in fig.layout.annotations:
+        if hasattr(_ann, "y") and _ann.y is not None:
+            if _ann.y > 0.7:
+                _ann.update(y=_ann.y - 0.04, font=dict(size=12))
+            else:
+                _ann.update(font=dict(size=12))
+
+    if _is_fallback:
+        fig.add_annotation(
+            text="Sin forecast — proyección basada en promedio histórico de venta",
+            xref="paper", yref="paper", x=0.5, y=1.12,
+            showarrow=False,
+            font=dict(size=11, color=COLORS.get("status_at_risk", "#f59e0b")),
+        )
+
+    return fig, _g_hist, _g_proy, _g_stock_hist
+
+
+def _build_ppt_chart_data_batch(sku_list, ventas_px, conn):
+    """Precompute historical sales + stock/MOI for every SKU in sku_list in one pass.
+
+    The PPT loop used to call _build_bc_chart per SKU, which re-fetched
+    cq.stock_critico_metrics/cq.ventas_mtd (st.cache_data returns a fresh
+    deep-copy of the whole table on every call) and rebuilt a full Plotly
+    figure (forecast, MTD split-bar, etc.) just to throw it away — for a
+    358-SKU line that's 358 cache copies + 358 Plotly figures for data we
+    don't even plot anymore (the PPT chart is historical-only). Doing the
+    groupby once for the whole line and slicing per SKU from memory is
+    orders of magnitude faster.
+
+    Returns (hist_by_sku, stock_by_sku, proy_by_sku), each a dict {sku: DataFrame}.
+    """
+    _sku_set = set(sku_list)
+    hist_by_sku = {}
+    if not ventas_px.empty and "SKU_PRODUCTO" in ventas_px.columns:
+        _hv = ventas_px[ventas_px["SKU_PRODUCTO"].isin(_sku_set)].copy()
+        if not _hv.empty:
+            _hv["PERIODO"] = pd.to_datetime(_hv["PERIODO"], errors="coerce")
+            for _vc in ["CANTIDAD", "NETO", "APORTE"]:
+                if _vc in _hv.columns:
+                    _hv[_vc] = pd.to_numeric(_hv[_vc], errors="coerce").fillna(0)
+            _hv_agg = _hv.groupby(["SKU_PRODUCTO", "PERIODO"], as_index=False).agg(
+                CANTIDAD=("CANTIDAD", "sum"), NETO=("NETO", "sum"), APORTE=("APORTE", "sum"),
+            )
+            _hv_agg["PRECIO_PROM"] = np.where(
+                _hv_agg["CANTIDAD"] > 0, _hv_agg["NETO"] / _hv_agg["CANTIDAD"], 0,
+            )
+            for _sku, _df in _hv_agg.groupby("SKU_PRODUCTO"):
+                hist_by_sku[_sku] = _df.drop(columns=["SKU_PRODUCTO"]).sort_values("PERIODO")
+
+    stock_by_sku = {}
+    try:
+        _all_stock_m = norm_cols(cq.stock_critico_metrics(conn))
+        if not _all_stock_m.empty and "SKU_PRODUCTO" in _all_stock_m.columns:
+            _sm = _all_stock_m[_all_stock_m["SKU_PRODUCTO"].isin(_sku_set)].copy()
+            if not _sm.empty:
+                _sm["FECHA"] = pd.to_datetime(_sm["FECHA"], errors="coerce")
+                for _sc in ["STOCK_COSTO", "STOCK_UNIDADES", "COSTO_PROM_90_CIA"]:
+                    if _sc in _sm.columns:
+                        _sm[_sc] = pd.to_numeric(_sm[_sc], errors="coerce").fillna(0)
+                _sm["MOI"] = np.where(
+                    _sm["COSTO_PROM_90_CIA"] > 0,
+                    _sm["STOCK_COSTO"] / _sm["COSTO_PROM_90_CIA"] / 30.44,
+                    0,
+                )
+                for _sku, _df in _sm.groupby("SKU_PRODUCTO"):
+                    stock_by_sku[_sku] = _df.sort_values("FECHA")
+    except Exception:
+        pass
+
+    # Forecast/projection (stock proyectado + MOI proyectado) — same source
+    # and formulas as _build_bc_chart, computed once for the whole line.
+    proy_by_sku = {}
+    _df_proy_all = st.session_state.get("df_proy", pd.DataFrame())
+    if not _df_proy_all.empty and "SKU_PRODUCTO" in _df_proy_all.columns:
+        _bp = _df_proy_all[_df_proy_all["SKU_PRODUCTO"].isin(_sku_set)].copy()
+        if "TIPO_DATO" in _bp.columns:
+            _bp = _bp[_bp["TIPO_DATO"].isin(["PROYECCION", "REAL+FC"])]
+        if not _bp.empty:
+            _bp["PERIODO"] = pd.to_datetime(_bp["PERIODO"], errors="coerce")
+            for _nc in ["VENTA_FUL_TIENDA_UND", "VENTA_FUL_ETAIL_UND",
+                        "VENTA_FUL_MAYOR_UND", "STOCK_FINAL_TOTAL",
+                        "COSTO_UNITARIO", "COGS_RES_TOTAL"]:
+                if _nc in _bp.columns:
+                    _bp[_nc] = pd.to_numeric(_bp[_nc], errors="coerce").fillna(0)
+            _bp["STOCK_FINAL_CLP"] = (
+                _bp.get("STOCK_FINAL_TOTAL", 0) * _bp.get("COSTO_UNITARIO", 0)
+            )
+            # Unidades proyectadas = VENTA_FUL_TOTAL_UND (Tienda+Etail+Mayor)
+            # de proy_result.parquet — para la barra de venta proyectada del
+            # gráfico superior. No hay precio futuro confiable, por eso la
+            # línea de precio del gráfico solo usa bc_hist (histórico).
+            _bp["CANTIDAD_PROY"] = (
+                _bp.get("VENTA_FUL_TIENDA_UND", 0)
+                + _bp.get("VENTA_FUL_ETAIL_UND", 0)
+                + _bp.get("VENTA_FUL_MAYOR_UND", 0)
+            )
+            for _sku, _df in _bp.sort_values("PERIODO").groupby("SKU_PRODUCTO"):
+                _df = _df.reset_index(drop=True)
+                _cogs_vals = (
+                    _df["COGS_RES_TOTAL"].to_numpy() if "COGS_RES_TOTAL" in _df.columns
+                    else np.zeros(len(_df))
+                )
+                _fwd6 = np.zeros(len(_df))
+                for _i in range(len(_df)):
+                    _window = _cogs_vals[_i:_i + 6]
+                    _window_pos = _window[_window > 0]
+                    _fwd6[_i] = _window_pos.mean() if len(_window_pos) > 0 else 0
+                _df["MOI_PROY"] = np.where(_fwd6 > 0, _df["STOCK_FINAL_CLP"] / _fwd6, 0)
+                proy_by_sku[_sku] = _df
+
+    return hist_by_sku, stock_by_sku, proy_by_sku
+
+
+def _build_ppt_history_chart(bc_hist, stock_hist, bc_proy=None, show_cost=False):
+    """Lightweight matplotlib chart (venta histórica + inventario hist/proy + MOI)
+    for the PPT, wide-format so it can be embedded near full slide width.
+
+    Renders with matplotlib instead of Plotly/kaleido: kaleido's headless-Chromium
+    PNG export can hang indefinitely on some Windows setups, which was leaving PPT
+    slides without a chart. matplotlib's Agg backend has no such dependency.
+
+    Returns a BytesIO with PNG bytes (figure already closed), or None if no data.
+    Closing the figure here — instead of leaving it open for the caller to embed
+    later — matters: a 300+ SKU PPT builds one figure per SKU, and matplotlib's
+    open-figure registry makes every subsequent plt.subplots() call slower the
+    more unclosed figures pile up (visibly: SKU 50 takes ~0.3s, SKU 300 takes ~1s+).
+    """
+    _has_hist = bc_hist is not None and not bc_hist.empty
+    _has_stock = stock_hist is not None and not stock_hist.empty
+    _has_proy = bc_proy is not None and not bc_proy.empty
+    if not _has_hist and not _has_stock and not _has_proy:
+        return None
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+
+    _primary = COLORS.get("primary", "#065E8B")
+    _price_color = "#f59e0b"
+    _moi_color = "#dc2626"
+    _proy_color = COLORS.get("tertiary_blue", "#60a5fa")
+    # Chart shows only the current calendar year (hist. through "today",
+    # proyectado for the rest) — not the full multi-year history/horizon
+    # that bc_hist/bc_proy carry, which would dilute the year-over-year
+    # view this chart is meant to give.
+    _chart_year = pd.Timestamp.now().year
+    _chart_start = pd.Timestamp(year=_chart_year, month=1, day=1)
+    _chart_end = pd.Timestamp(year=_chart_year, month=12, day=31)
+
+    def _monthly_axis(ax):
+        """All months labeled (not matplotlib's auto-thinned default)."""
+        ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%b-%y"))
+        ax.tick_params(axis="x", labelsize=6, labelrotation=90)
+
+    # Wide aspect (vs the old 9.6x5.6) so the chart can be embedded near
+    # full slide width without becoming too tall — fixed margins instead of
+    # fig.tight_layout(): tight_layout (and savefig's bbox_inches="tight")
+    # each force a full extra render pass to measure label/title extents,
+    # which doubles total render time on a 300+ SKU line. dpi=100 keeps
+    # render time and embedded PNG size down.
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13.0, 3.4), dpi=100)
+    fig.subplots_adjust(left=0.06, right=0.94, top=0.85, bottom=0.36, hspace=3.6)
+
+    if _has_hist or _has_proy:
+        if _has_hist:
+            ax1.bar(bc_hist["PERIODO"], bc_hist["CANTIDAD"], color=_primary,
+                    alpha=0.75, width=20, label="Venta real")
+        _proy_und_col = "CANTIDAD_PROY"
+        if _has_proy and _proy_und_col in bc_proy.columns:
+            ax1.bar(bc_proy["PERIODO"], bc_proy[_proy_und_col], color=_proy_color,
+                    alpha=0.55, width=20, hatch="//", label="Venta proyectada")
+        ax1.set_ylabel("Unidades vendidas", fontsize=9)
+        ax1.tick_params(axis="y", labelsize=8)
+        # Sin precio futuro confiable: la línea de precio usa solo bc_hist
+        # (histórico real), por lo que se corta naturalmente en el mes actual.
+        ax1b = None
+        if _has_hist:
+            _px = bc_hist[bc_hist["PRECIO_PROM"] > 0]
+            if not _px.empty:
+                ax1b = ax1.twinx()
+                ax1b.plot(_px["PERIODO"], _px["PRECIO_PROM"], color=_price_color,
+                          marker="o", markersize=3, linewidth=1.5, label="Precio promedio")
+                ax1b.set_ylabel("Precio Neto ($)", fontsize=9)
+                ax1b.tick_params(axis="y", labelsize=8)
+        ax1.set_xlim(_chart_start, _chart_end)
+        _monthly_axis(ax1)
+        # Real legend (not hand-drawn caption text) — its swatches/lines are
+        # pulled directly from the plotted artists' actual colors, so
+        # histórico vs proyectado is guaranteed to match what's on the chart.
+        _h1, _l1 = ax1.get_legend_handles_labels()
+        if ax1b is not None:
+            _h1b, _l1b = ax1b.get_legend_handles_labels()
+            _h1, _l1 = _h1 + _h1b, _l1 + _l1b
+        if _h1:
+            ax1.legend(_h1, _l1, loc="upper center", bbox_to_anchor=(0.5, -1.3),
+                       ncol=len(_h1), fontsize=6.5, frameon=False,
+                       handlelength=1.4, columnspacing=1.1, handletextpad=0.4)
+    else:
+        ax1.text(0.5, 0.5, "Sin historial de ventas", ha="center", va="center",
+                  fontsize=10, color=COLORS.get("status_at_risk", "#f59e0b"),
+                  transform=ax1.transAxes)
+    ax1.set_title("Venta Histórica vs Precio Promedio", fontsize=11, color=_primary)
+
+    if _has_stock or _has_proy:
+        _col = "STOCK_COSTO" if show_cost else "STOCK_UNIDADES"
+        _label = "Stock ($)" if show_cost else "Stock (und)"
+        if _has_stock and _col in stock_hist.columns:
+            ax2.bar(stock_hist["FECHA"], stock_hist[_col], color=_primary,
+                    alpha=0.6, width=5, label=f"{_label} hist.")
+
+        _proy_col = "STOCK_FINAL_CLP" if show_cost else "STOCK_FINAL_TOTAL"
+        if _has_proy and _proy_col in bc_proy.columns:
+            ax2.bar(bc_proy["PERIODO"], bc_proy[_proy_col], color=_proy_color,
+                    alpha=0.55, width=20, hatch="//", label=f"{_label} proy.")
+
+        ax2.set_ylabel(_label, fontsize=9)
+        ax2.tick_params(axis="y", labelsize=8)
+
+        ax2b = None
+        if _has_stock and "MOI" in stock_hist.columns:
+            _moi_v = stock_hist[stock_hist["MOI"] > 0]
+            if not _moi_v.empty:
+                ax2b = ax2.twinx()
+                ax2b.plot(_moi_v["FECHA"], _moi_v["MOI"], color=_moi_color,
+                          marker="o", markersize=3, linewidth=1.5, label="MOI histórico")
+        if _has_proy and "MOI_PROY" in bc_proy.columns:
+            _moi_proy_v = bc_proy[bc_proy["MOI_PROY"] > 0]
+            if not _moi_proy_v.empty:
+                if ax2b is None:
+                    ax2b = ax2.twinx()
+                # Distinct color (not just dashed-vs-solid in the same red) so
+                # histórico vs proyectado is readable on its own, without
+                # depending on a legend/caption to tell them apart.
+                ax2b.plot(_moi_proy_v["PERIODO"], _moi_proy_v["MOI_PROY"], color=_proy_color,
+                          marker="o", markersize=3, linewidth=1.5, linestyle="--",
+                          label="MOI proyectado")
+        if ax2b is not None:
+            ax2b.axhline(4, color="#16a34a", linestyle="--", linewidth=1, label="Ref. 4m")
+            ax2b.axhline(12, color=_moi_color, linestyle="--", linewidth=1, label="Ref. 12m")
+            ax2b.set_ylabel("MOI (meses)", fontsize=9)
+            ax2b.tick_params(axis="y", labelsize=8)
+
+        ax2.set_xlim(_chart_start, _chart_end)
+        _monthly_axis(ax2)
+        _h2, _l2 = ax2.get_legend_handles_labels()
+        if ax2b is not None:
+            _h2b, _l2b = ax2b.get_legend_handles_labels()
+            _h2, _l2 = _h2 + _h2b, _l2 + _l2b
+        if _h2:
+            ax2.legend(_h2, _l2, loc="upper center", bbox_to_anchor=(0.5, -1.3),
+                       ncol=min(len(_h2), 5), fontsize=6.5, frameon=False,
+                       handlelength=1.4, columnspacing=1.1, handletextpad=0.4)
+    else:
+        ax2.text(0.5, 0.5, "Sin historial de inventario", ha="center", va="center",
+                  fontsize=10, color=COLORS.get("status_at_risk", "#f59e0b"),
+                  transform=ax2.transAxes)
+    ax2.set_title("Inventario Histórico y Proyectado vs MOI", fontsize=11, color=_primary)
+
+    _buf = io.BytesIO()
+    fig.savefig(_buf, format="png", dpi=100)
+    plt.close(fig)
+    _buf.seek(0)
+    return _buf
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Diagnostics builder
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _build_bc_diagnostics(bc_row, ventas_px, df_pool, bc_hist=None, stock_bodega=None):
+def _compute_aa_comparison(sku, ventas_px, months=3):
+    """Compare the last `months` of actual sales vs the same calendar months
+    one year earlier (AA = Año Anterior), broken down by canal and by mes.
+
+    Same idea as the Frinc Detalle diagnostics in dashboard_gestion.py
+    (caida_vta_aa = vta_act < vta_aa * 0.80), adapted to business_case's
+    SKU x canal x mes ventas_px instead of a precomputed VTA_UNDS_AA column.
+
+    Returns a dict with vta_act/vta_aa/neta_act/neta_aa/delta_pct/por_debajo/
+    por_encima/channels/months_detail, or None if there isn't enough AA
+    history to compare against. `channels` is sorted worst-delta first;
+    `months_detail` has one entry per actual month with a matching AA month.
+    """
+    if ventas_px.empty or "SKU_PRODUCTO" not in ventas_px.columns:
+        return None
+    _v = ventas_px[ventas_px["SKU_PRODUCTO"] == sku].copy()
+    if _v.empty or "PERIODO" not in _v.columns:
+        return None
+    _v["PERIODO"] = pd.to_datetime(_v["PERIODO"], errors="coerce")
+    _v["CANTIDAD"] = pd.to_numeric(_v.get("CANTIDAD", 0), errors="coerce").fillna(0)
+    _v["NETO"] = pd.to_numeric(_v.get("NETO", 0), errors="coerce").fillna(0)
+
+    _today_m = pd.Timestamp.now().to_period("M").to_timestamp()
+    _act_start = _today_m - pd.DateOffset(months=months)
+    _aa_start = _act_start - pd.DateOffset(years=1)
+    _aa_end = _today_m - pd.DateOffset(years=1)
+
+    _act_mask = (_v["PERIODO"] >= _act_start) & (_v["PERIODO"] < _today_m)
+    _aa_mask = (_v["PERIODO"] >= _aa_start) & (_v["PERIODO"] < _aa_end)
+
+    _vta_act = float(_v.loc[_act_mask, "CANTIDAD"].sum())
+    _vta_aa = float(_v.loc[_aa_mask, "CANTIDAD"].sum())
+    if _vta_aa <= 0.5:
+        return None  # sin base AA confiable para comparar
+
+    # ── Per-channel breakdown (worst delta first) ──
+    _channels = []
+    if "COD_CANAL" in _v.columns:
+        _canal_names = {"03": "Retail", "06": "Etail", "02": "Mayorista"}
+        _act_by_ch = _v.loc[_act_mask].groupby("COD_CANAL")["CANTIDAD"].sum()
+        _aa_by_ch = _v.loc[_aa_mask].groupby("COD_CANAL")["CANTIDAD"].sum()
+        for _cod, _label in _canal_names.items():
+            _cb = float(_aa_by_ch.get(_cod, 0))
+            if _cb > 0.5:
+                _ca = float(_act_by_ch.get(_cod, 0))
+                _channels.append({
+                    "label": _label, "act": _ca, "aa": _cb,
+                    "delta_pct": (_ca - _cb) / _cb * 100,
+                })
+        _channels.sort(key=lambda c: c["delta_pct"])
+
+    # ── Per-month breakdown (each actual month vs its AA counterpart) ──
+    _months_detail = []
+    _act_by_month = _v.loc[_act_mask].groupby("PERIODO")["CANTIDAD"].sum()
+    _aa_by_month = _v.loc[_aa_mask].groupby("PERIODO")["CANTIDAD"].sum()
+    for _p in sorted(_act_by_month.index):
+        _p_aa = _p - pd.DateOffset(years=1)
+        _cb = float(_aa_by_month.get(_p_aa, 0))
+        if _cb > 0.5:
+            _ca = float(_act_by_month.get(_p, 0))
+            _months_detail.append({
+                "periodo": _p, "act": _ca, "aa": _cb,
+                "delta_pct": (_ca - _cb) / _cb * 100,
+            })
+
+    return {
+        "months": months,
+        "vta_act": _vta_act,
+        "vta_aa": _vta_aa,
+        "neta_act": float(_v.loc[_act_mask, "NETO"].sum()),
+        "neta_aa": float(_v.loc[_aa_mask, "NETO"].sum()),
+        "delta_pct": (_vta_act - _vta_aa) / _vta_aa * 100,
+        "por_debajo": _vta_act < _vta_aa * 0.80,
+        "por_encima": _vta_act > _vta_aa * 1.05,
+        "channels": _channels,
+        "months_detail": _months_detail,
+    }
+
+
+def _suggest_dcto_para_igualar_aa(aa_cmp, elasticidad=None):
+    """Estimate the discount % needed to bring volume back up to the AA level,
+    using the SKU's price elasticity — same formula as the discount-scenario
+    simulator (rot_new = rot_old * (1 + |elasticidad| * dcto/100)), solved for
+    the discount that closes the gap to vta_aa instead of a fixed -X%.
+
+    Returns None if there's no gap to close or volume is currently zero
+    (no elasticity-based discount can recover share with zero current sales).
+    """
+    if aa_cmp is None or not aa_cmp["por_debajo"] or aa_cmp["vta_act"] <= 0:
+        return None
+    _elast_abs = abs(float(elasticidad)) if elasticidad is not None and pd.notna(elasticidad) else 1.5
+    if _elast_abs <= 0:
+        return None
+    _gap_pct = (aa_cmp["vta_aa"] - aa_cmp["vta_act"]) / aa_cmp["vta_act"] * 100
+    return _gap_pct / _elast_abs
+
+
+def _project_year_end_con_descuento(aa_cmp, dcto_aa, elasticidad, ventas_px, sku, bc_proy):
+    """Project year-end (31-Dic) units if the AA-equalizing discount were
+    applied and sustained from now on, vs the FCST already loaded from
+    proy_result.parquet (bc_proy's CANTIDAD_PROY = VENTA_FUL_TIENDA_UND +
+    VENTA_FUL_ETAIL_UND + VENTA_FUL_MAYOR_UND, i.e. VENTA_FUL_TOTAL_UND).
+
+    Returns a dict with ytd_actual/fcst_restante_actual/fcst_restante_acelerado/
+    total_fcst_actual/total_con_descuento/n_meses_restantes/ritmo_acelerado, or
+    None if there isn't a usable FCST (bc_proy) to compare against.
+    """
+    if aa_cmp is None or dcto_aa is None or bc_proy is None or bc_proy.empty:
+        return None
+    if "PERIODO" not in bc_proy.columns:
+        return None
+    _proy_col = "CANTIDAD_PROY" if "CANTIDAD_PROY" in bc_proy.columns else None
+    if _proy_col is None:
+        return None
+
+    _hoy = pd.Timestamp.now().normalize()
+    _today_m = _hoy.to_period("M").to_timestamp()
+    _year_start = pd.Timestamp(year=_hoy.year, month=1, day=1)
+
+    _bp = bc_proy.copy()
+    _bp["PERIODO"] = pd.to_datetime(_bp["PERIODO"], errors="coerce")
+    _rem_mask = (_bp["PERIODO"] >= _today_m) & (_bp["PERIODO"].dt.year == _hoy.year)
+    _n_meses_rem = int(_rem_mask.sum())
+    if _n_meses_rem <= 0:
+        return None
+    _fcst_restante_actual = float(_bp.loc[_rem_mask, _proy_col].sum())
+
+    _ytd_actual = 0.0
+    if not ventas_px.empty and "SKU_PRODUCTO" in ventas_px.columns:
+        _v = ventas_px[ventas_px["SKU_PRODUCTO"] == sku].copy()
+        if not _v.empty and "PERIODO" in _v.columns:
+            _v["PERIODO"] = pd.to_datetime(_v["PERIODO"], errors="coerce")
+            _v["CANTIDAD"] = pd.to_numeric(_v.get("CANTIDAD", 0), errors="coerce").fillna(0)
+            _ytd_mask = (_v["PERIODO"] >= _year_start) & (_v["PERIODO"] < _today_m)
+            _ytd_actual = float(_v.loc[_ytd_mask, "CANTIDAD"].sum())
+
+    _elast_abs = abs(float(elasticidad)) if elasticidad is not None and pd.notna(elasticidad) else 1.5
+    _ritmo_actual_mensual = aa_cmp["vta_act"] / aa_cmp["months"] if aa_cmp["months"] > 0 else 0
+    _ritmo_acelerado = _ritmo_actual_mensual * (1 + _elast_abs * dcto_aa / 100)
+    _fcst_restante_acelerado = _ritmo_acelerado * _n_meses_rem
+
+    return {
+        "ytd_actual": _ytd_actual,
+        "fcst_restante_actual": _fcst_restante_actual,
+        "fcst_restante_acelerado": _fcst_restante_acelerado,
+        "total_fcst_actual": _ytd_actual + _fcst_restante_actual,
+        "total_con_descuento": _ytd_actual + _fcst_restante_acelerado,
+        "n_meses_restantes": _n_meses_rem,
+        "ritmo_acelerado": _ritmo_acelerado,
+    }
+
+
+def _build_bc_diagnostics(bc_row, ventas_px, df_pool, bc_hist=None, stock_bodega=None, bc_proy=None):
     """Build diagnostic markdown bullets for a single SKU.
 
     Returns list of markdown strings.
@@ -1167,7 +1977,7 @@ def _build_bc_diagnostics(bc_row, ventas_px, df_pool, bc_hist=None, stock_bodega
                 VN=("NETO", "sum"),
                 MESES=("PERIODO", "nunique"),
             )
-            _ch_names = {"MINOR": "Retail", "ETAIL": "Etail", "MAYOR": "Mayorista"}
+            _ch_names = {"03": "Retail", "06": "Etail", "02": "Mayorista"}
             _ch_total_und = _ch_agg["UND"].sum()
             _bc_vp_pos = _bc_vp_sku[_bc_vp_sku["CANTIDAD"] > 0]
             _last_sale_ch = (
@@ -1215,7 +2025,7 @@ def _build_bc_diagnostics(bc_row, ventas_px, df_pool, bc_hist=None, stock_bodega
             _insights.append("📦 **Sin ventas en ningún canal** los últimos 24 meses.")
 
     # ── 8. Store coverage ──
-    _ui_has_minor_sales = "MINOR" in _ui_active_channels
+    _ui_has_minor_sales = "03" in _ui_active_channels
     _bc_n_perfil = float(bc_row.get("TIENDAS_CON_PERFIL", 0) or 0)
     _bc_n_venta = float(bc_row.get("N_TIENDAS_VENTA", 0) or 0)
     _bc_n_venta_3m = float(bc_row.get("N_TIENDAS_VENTA_3M", 0) or 0)
@@ -1269,34 +2079,152 @@ def _build_bc_diagnostics(bc_row, ventas_px, df_pool, bc_hist=None, stock_bodega
     )
     if _ui_elast_unreliable:
         _reason_parts = []
+        _explain_parts = []
         if _ui_n_active <= 1:
             _reason_parts.append("solo vende en 1 canal")
+            _explain_parts.append("pocos canales activos limitan la variación de precio observable")
         if _bc_rot < 1:
             _reason_parts.append(f"rotación muy baja ({_bc_rot:.1f} und/mes)")
-        if _bc_eseg in ("Sin Dato", "No Confiable"):
+            _explain_parts.append("rotación muy baja no permite estimar una respuesta de demanda confiable")
+        if _bc_eseg == "Sin Dato":
+            _reason_parts.append("sin datos suficientes")
+            _explain_parts.append(
+                "no hay suficientes meses con venta y precio>0 para correr la regresión"
+            )
+        elif _bc_eseg == "No Confiable":
             _reason_parts.append("dato no confiable")
+            _explain_parts.append(
+                "el precio no varió lo suficiente (o la relación no es estadísticamente "
+                "significativa) para estimar una respuesta confiable, aunque haya historia"
+            )
         _insights.append(
             f"💲 **Elasticidad no confiable** "
             f"({' + '.join(_reason_parts)}). "
-            f"Sin historia suficiente para estimar respuesta a precio."
+            f"{'; '.join(_explain_parts).capitalize()}."
         )
     elif pd.notna(_bc_elast):
+        _elast_thresh = _ELAST_THRESHOLD_DESC.get(_bc_eseg, "")
+        _insights.append(
+            f"💲 Elasticidad: **{_bc_elast:.2f}** → clasifica como **{_bc_eseg}**"
+            + (f" (umbral {_elast_thresh})" if _elast_thresh else "") + "."
+        )
+        # Lectura accionable adicional solo cuando el MOI ya justifica hablar
+        # de bajar precio para mover stock (con MOI sano no aplica el consejo).
         if _bc_elast < -1.5 and _bc_moi_h >= 6:
             _insights.append(
-                f"💲 Elasticidad **{_bc_elast:.2f}** ({_bc_eseg}): "
-                f"la demanda responde fuerte a precio. "
-                f"Una rebaja podría reducir el stock significativamente."
+                "💲 La demanda responde fuerte a precio. Una rebaja podría "
+                "reducir el stock significativamente."
             )
         elif _bc_elast < -1.0 and _bc_moi_h >= 6:
             _insights.append(
-                f"💲 Elasticidad **{_bc_elast:.2f}** ({_bc_eseg}): "
-                f"hay espacio para acelerar venta con acción de precio."
+                "💲 Hay espacio para acelerar venta con acción de precio."
             )
         elif abs(_bc_elast) < 0.3 and _bc_moi_h >= 6:
             _insights.append(
-                f"💲 Elasticidad **{_bc_elast:.2f}** (Inelástico): "
-                f"bajar precio no genera más volumen. "
-                f"Considerar redistribuir o liquidar por otro canal."
+                "💲 Bajar precio no genera más volumen. Considerar "
+                "redistribuir o liquidar por otro canal."
+            )
+
+    # ── 9b. Comparación vs Año Anterior (AA) ──
+    _aa_cmp = _compute_aa_comparison(_bc_sku, ventas_px, months=3)
+    if _aa_cmp is not None:
+        if _aa_cmp["por_debajo"]:
+            _gap_und = _aa_cmp["vta_aa"] - _aa_cmp["vta_act"]
+            _insights.append(
+                f"📉 **Venta por debajo del Año Anterior (AA)**: últimos "
+                f"{_aa_cmp['months']} meses **{_aa_cmp['vta_act']:,.0f} und** vs "
+                f"**{_aa_cmp['vta_aa']:,.0f} und** AA ({_aa_cmp['delta_pct']:+.0f}%, "
+                f"-{_gap_und:,.0f} und)."
+            )
+
+            # Detalle por canal — cuál canal explica la caída
+            if _aa_cmp["channels"]:
+                _ch_lines = [
+                    f"  - **{_c['label']}**: {_c['act']:,.0f} vs {_c['aa']:,.0f} und AA "
+                    f"({_c['delta_pct']:+.0f}%)"
+                    for _c in _aa_cmp["channels"]
+                ]
+                _peor_canal = _aa_cmp["channels"][0]
+                _insights.append(
+                    "\n".join(
+                        [f"📊 **Detalle por canal vs AA** — mayor caída en "
+                         f"**{_peor_canal['label']}** ({_peor_canal['delta_pct']:+.0f}%):"]
+                        + _ch_lines
+                    )
+                )
+
+            # Detalle por mes — qué mes dentro de la ventana cayó más
+            if _aa_cmp["months_detail"]:
+                _peor_mes = min(_aa_cmp["months_detail"], key=lambda m: m["delta_pct"])
+                _mes_lbl = _peor_mes["periodo"].strftime("%b-%y")
+                _mes_lbl_aa = (_peor_mes["periodo"] - pd.DateOffset(years=1)).strftime("%b-%y")
+                _insights.append(
+                    f"📅 Mes con mayor caída vs AA: **{_mes_lbl}** "
+                    f"({_peor_mes['act']:,.0f} und) vs **{_mes_lbl_aa}** "
+                    f"({_peor_mes['aa']:,.0f} und, {_peor_mes['delta_pct']:+.0f}%)."
+                )
+
+            _dcto_aa = _suggest_dcto_para_igualar_aa(_aa_cmp, bc_row.get("ELASTICIDAD", np.nan))
+            if _dcto_aa is not None:
+                _gap_pct = _gap_und / _aa_cmp["vta_act"] * 100
+                if _dcto_aa <= 35:
+                    _insights.append(
+                        f"💡 Para igualar la venta del AA se necesitaría vender "
+                        f"~**{_gap_und:,.0f} und más** (+{_gap_pct:.0f}%). Con la "
+                        f"elasticidad del SKU, eso equivale a un descuento de "
+                        f"~**-{_dcto_aa:.0f}%** sobre el precio actual."
+                    )
+                else:
+                    _insights.append(
+                        f"⚠️ Igualar al AA requeriría un descuento de "
+                        f"~**-{_dcto_aa:.0f}%** (muy agresivo) — evaluar acción "
+                        f"comercial alternativa (bundle, exhibición) en vez de "
+                        f"solo precio."
+                    )
+
+                # Proyección de cierre de año con el descuento vs el FCST cargado
+                _aa_proy = _project_year_end_con_descuento(
+                    _aa_cmp, _dcto_aa, bc_row.get("ELASTICIDAD", np.nan),
+                    ventas_px, _bc_sku, bc_proy,
+                )
+                if _aa_proy is not None:
+                    _insights.append(
+                        f"📈 **Proyección cierre de año** sosteniendo el ritmo con "
+                        f"descuento (~{_aa_proy['ritmo_acelerado']:,.0f} und/mes) los "
+                        f"{_aa_proy['n_meses_restantes']} meses que quedan: cerraría "
+                        f"en ~**{_aa_proy['total_con_descuento']:,.0f} und** en el año "
+                        f"vs **{_aa_proy['total_fcst_actual']:,.0f} und** del FCST "
+                        f"actual cargado (Forecast/Proyección)."
+                    )
+                    if _aa_proy["fcst_restante_acelerado"] > _aa_proy["fcst_restante_actual"] * 1.10:
+                        _insights.append(
+                            f"🔧 **Corregir FCST**: el ritmo con descuento "
+                            f"(~{_aa_proy['fcst_restante_acelerado']:,.0f} und para "
+                            f"los {_aa_proy['n_meses_restantes']} meses restantes) "
+                            f"supera al forecast actual "
+                            f"(~{_aa_proy['fcst_restante_actual']:,.0f} und). Si se "
+                            f"aplica el descuento, actualizar la proyección en "
+                            f"Forecast para no quedar corto de stock."
+                        )
+                    elif _aa_proy["fcst_restante_actual"] > _aa_proy["fcst_restante_acelerado"] * 1.10:
+                        _insights.append(
+                            f"🔧 **Revisar FCST**: el forecast actual "
+                            f"(~{_aa_proy['fcst_restante_actual']:,.0f} und) ya asume "
+                            f"más venta que el ritmo acelerado con descuento "
+                            f"(~{_aa_proy['fcst_restante_acelerado']:,.0f} und) — "
+                            f"validar si ese forecast es alcanzable sin acción de precio."
+                        )
+            else:
+                _insights.append(
+                    "⚠️ Sin venta en el periodo actual — el descuento solo no "
+                    "recuperará el volumen del AA; revisar quiebre, distribución "
+                    "o vigencia del producto."
+                )
+        elif _aa_cmp["por_encima"]:
+            _insights.append(
+                f"✅ Venta **por encima del Año Anterior**: "
+                f"{_aa_cmp['vta_act']:,.0f} und vs {_aa_cmp['vta_aa']:,.0f} und AA "
+                f"({_aa_cmp['delta_pct']:+.0f}%)."
             )
 
     # ── 10. Discount scenario ──
@@ -1426,16 +2354,17 @@ def _build_bc_diagnostics(bc_row, ventas_px, df_pool, bc_hist=None, stock_bodega
                 f"perdiendo **{_margen_drop:.0f} pp de margen**. "
                 f"Alternativas a considerar:"
             ]
-            if "MINOR" in _ui_dead_channels or _bc_n_perfil <= 5:
+            if "03" in _ui_dead_channels or _bc_n_perfil <= 5:
                 _warn_lines.append("  - ampliar cobertura en tiendas")
-            if "MAYOR" in _ui_dead_channels:
+            if "02" in _ui_dead_channels:
                 _warn_lines.append('  - venta especial mayorista (ofrecer lote a "riflero")')
-            if "ETAIL" in _ui_dead_channels:
+            if "06" in _ui_dead_channels:
                 _warn_lines.append("  - activar/impulsar publicidad en RRSS y Etail")
             _warn_lines.append("  - incluir en pack o canasta promocional")
             _insights.append("\n".join(_warn_lines))
 
     return _insights
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1999,6 +2928,305 @@ def _render_scenario_simulator(df_enriched, data):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Shared group diagnostic panel — Deep Dive Jerarquía y Deep Dive SKU
+# ═══════════════════════════════════════════════════════════════════════════
+
+_DIM_FILTER_COLS = {"Línea": "LINEA", "Sublínea": "SUBLINEA", "Marca": "MARCA", "MIX": "MIX_OFICIAL"}
+
+
+def _compute_sku_sales(skus, ventas_px, months=6):
+    """Total unidades vendidas por SKU en los últimos `months` meses.
+
+    Shared base for the Pareto cut (_compute_pareto_skus) and for sorting
+    the per-SKU diagnostic list by venta (mayor a menor), since both need
+    the exact same ranking.
+    """
+    _sales = pd.Series(0.0, index=skus)
+    if ventas_px.empty or "SKU_PRODUCTO" not in ventas_px.columns:
+        return _sales
+    _v = ventas_px[ventas_px["SKU_PRODUCTO"].isin(skus)].copy()
+    if _v.empty or "PERIODO" not in _v.columns:
+        return _sales
+    _v["PERIODO"] = pd.to_datetime(_v["PERIODO"], errors="coerce")
+    _v["CANTIDAD"] = pd.to_numeric(_v.get("CANTIDAD", 0), errors="coerce").fillna(0)
+    _cutoff = pd.Timestamp.now().to_period("M").to_timestamp() - pd.DateOffset(months=months)
+    _v = _v[_v["PERIODO"] >= _cutoff]
+    return _v.groupby("SKU_PRODUCTO")["CANTIDAD"].sum().reindex(skus, fill_value=0)
+
+
+def _compute_pareto_skus(pool, ventas_px, months=6, threshold=0.80):
+    """Return the subset of pool whose cumulative venta (unidades, últimos
+    `months` meses) cubre `threshold` (80% default) del total del grupo —
+    el Pareto 80/20: los pocos SKUs que explican la mayoría de la venta.
+
+    Mirrors the FSN classification's methodology ("Pareto sobre unidades
+    vendidas") but scoped to the SKUs in `pool` instead of the whole catálogo,
+    so it reflects the 80% within whatever Línea/Sublínea/Marca/MIX is
+    currently selected.
+    """
+    if pool.empty or ventas_px.empty or "SKU_PRODUCTO" not in ventas_px.columns:
+        return pool.iloc[0:0]
+    _skus = pool["SKU_PRODUCTO"].unique().tolist()
+    _sales = _compute_sku_sales(_skus, ventas_px, months=months).sort_values(ascending=False)
+    _total = _sales.sum()
+    if _total <= 0:
+        return pool.iloc[0:0]
+
+    _cum_pct = _sales.cumsum() / _total
+    _keep = set(_cum_pct.index[_cum_pct <= threshold])
+    _over = _cum_pct[_cum_pct > threshold]
+    if not _over.empty:
+        _keep.add(_over.index[0])  # incluir el SKU que cruza el 80%, no cortar justo antes
+    return pool[pool["SKU_PRODUCTO"].isin(_keep)]
+
+
+def _render_dim_filters(pool, key_prefix, ventas_px=None, show_pareto=False):
+    """Render Línea/Sublínea/Marca/MIX multiselect filters (4 columns), and
+    return the filtered pool. Shared by Deep Dive SKU and Deep Dive
+    Jerarquía so both narrow candidates the same way.
+
+    If show_pareto=True (Deep Dive Jerarquía only), also renders a "Pareto"
+    toggle (needs ventas_px) that narrows to the SKUs making up the top 80%
+    of recent venta within whatever the dimension filters already selected.
+    """
+    _cols = st.columns(4)
+    _selected = {}
+    for _col_widget, (_label, _col) in zip(_cols, _DIM_FILTER_COLS.items()):
+        with _col_widget:
+            _opts = (
+                sorted(pool[_col].dropna().astype(str).str.strip().unique().tolist())
+                if _col in pool.columns else []
+            )
+            _opts = [o for o in _opts if o and o.upper() not in ("NAN", "NONE")]
+            _selected[_col] = st.multiselect(
+                _label, _opts, default=[], key=f"{key_prefix}_f_{_col.lower()}",
+            )
+
+    _filtered = pool.copy()
+    for _col, _sel in _selected.items():
+        if _sel and _col in _filtered.columns:
+            _filtered = _filtered[_filtered[_col].astype(str).str.strip().isin(_sel)]
+
+    if show_pareto and ventas_px is not None:
+        _pareto_on = st.checkbox(
+            "📊 Pareto — ver solo los SKUs que hacen el 80% de la venta (6m)",
+            value=False, key=f"{key_prefix}_pareto",
+        )
+        if _pareto_on:
+            _pareto_pool = _compute_pareto_skus(_filtered, ventas_px)
+            if _pareto_pool.empty:
+                st.caption("Sin datos de venta suficientes para calcular el Pareto de este grupo.")
+            else:
+                st.caption(
+                    f"Pareto: **{_pareto_pool['SKU_PRODUCTO'].nunique()}** de "
+                    f"**{_filtered['SKU_PRODUCTO'].nunique()}** SKUs explican el 80% "
+                    f"de la venta (unidades, últimos 6 meses)."
+                )
+                _filtered = _pareto_pool
+
+    return _filtered
+
+
+def _render_group_diagnostic_panel(group_pool, ventas_px, conn, group_label, key_prefix,
+                                    stock_bodega=None):
+    """Aggregate chart + KPIs + per-SKU diagnostic expanders for a group of
+    SKUs. Shared by Deep Dive Jerarquía and Deep Dive SKU so both show the
+    exact same diagnostic points for a filtered group (Área/Línea/Sublínea/
+    Marca/MIX), not just a single SKU.
+
+    Shows every SKU in the group (no cap), sorted highest-to-lowest venta
+    (Pareto ranking) — only the order is fixed, not the count.
+
+    Passes bc_hist/bc_proy/stock_bodega into _build_bc_diagnostics (batch-
+    computed once for the whole group, not per SKU) so this panel shows the
+    exact same diagnostic points as Deep Dive SKU's single-SKU view —
+    including the price-trend insight and the year-end FCST projection.
+    """
+    if group_pool.empty:
+        st.info("Sin SKUs en este grupo.")
+        return
+
+    _mode = st.radio(
+        "Mostrar inventario en", ["Unidades", "Costo ($)"],
+        index=0, horizontal=True, key=f"{key_prefix}_unit_mode",
+    )
+    _show_cost = _mode == "Costo ($)"
+
+    _skus = group_pool["SKU_PRODUCTO"].unique().tolist()
+    _chart_result = _build_group_chart(_skus, ventas_px, conn, show_cost=_show_cost)
+    if _chart_result is None:
+        st.info("Sin datos históricos ni proyección para este grupo.")
+    else:
+        st.plotly_chart(_chart_result[0], use_container_width=True, key=f"{key_prefix}_chart")
+
+    st.markdown("##### Indicadores Agregados")
+    _g = group_pool.copy()
+    for _c in ["STOCK_COSTO", "STOCK_UNIDADES", "MOI_HIST", "MOI_FC", "FC_COMPRA_CLP"]:
+        if _c not in _g.columns:
+            _g[_c] = 0
+        _g[_c] = pd.to_numeric(_g[_c], errors="coerce").fillna(0)
+
+    _stock_costo = _g["STOCK_COSTO"].sum()
+    _stock_und = _g["STOCK_UNIDADES"].sum()
+    _moi_w = np.average(_g["MOI_HIST"], weights=_g["STOCK_COSTO"]) if _stock_costo > 0 else 0
+    _moi_fc_w = (
+        np.average(_g["MOI_FC"], weights=_g["STOCK_COSTO"])
+        if _stock_costo > 0 and _g["MOI_FC"].sum() > 0 else 0
+    )
+    _ahorro_fc = _g["FC_COMPRA_CLP"].sum()
+
+    _k1, _k2, _k3, _k4, _k5 = st.columns(5)
+    _k1.metric("SKUs en grupo", f"{_g['SKU_PRODUCTO'].nunique():,}")
+    _k2.metric("Stock", _fmt_mm(_stock_costo) if _show_cost else f"{_stock_und:,.0f} und")
+    _k3.metric("MOI Hist. (ponderado)", f"{_moi_w:.0f}m" if _moi_w > 0 else "—")
+    _k4.metric("MOI Forecast (ponderado)", f"{_moi_fc_w:.0f}m" if _moi_fc_w > 0 else "—")
+    _k5.metric("Ahorro si Pausa FC", _fmt_mm(_ahorro_fc))
+
+    st.markdown("---")
+    st.markdown(f"**Diagnóstico por SKU — {group_label}**")
+    # Orden Pareto: mayor a menor venta (unidades, 6m) — mismo ranking que
+    # decide el corte del 80% en el filtro Pareto. Se muestran TODOS los SKUs
+    # del grupo (sin cap), solo se mantiene el orden.
+    _g["_VENTA_6M"] = _g["SKU_PRODUCTO"].map(
+        _compute_sku_sales(_g["SKU_PRODUCTO"].unique().tolist(), ventas_px)
+    )
+    _g_capped = _g.sort_values("_VENTA_6M", ascending=False)
+    _n_total = _g_capped["SKU_PRODUCTO"].nunique()
+    st.caption(f"{_n_total} SKUs de este grupo, ordenados de mayor a menor venta (Pareto).")
+
+    # Batch-compute bc_hist/bc_proy for just the capped SKUs (one pass, not
+    # per SKU) so each expander gets the same price-trend + FCST-projection
+    # insights that Deep Dive SKU's single-SKU view shows.
+    _capped_skus = _g_capped["SKU_PRODUCTO"].unique().tolist()
+    _hist_by_sku, _, _proy_by_sku = _build_ppt_chart_data_batch(_capped_skus, ventas_px, conn)
+
+    for _idx, (_, _row) in enumerate(_g_capped.iterrows()):
+        _sku = _row["SKU_PRODUCTO"]
+        _nom = str(_row.get("SKU_NOM_PRODUCTO", ""))[:60]
+        _accion = str(_row.get("ACCION_RAW", "OK"))
+        _moi = float(_row.get("MOI_HIST", 0) or 0)
+        _stock_u = float(_row.get("STOCK_UNIDADES", 0) or 0)
+        _label = f"{_sku} — {_nom} [{_accion}] (Stock: {_stock_u:,.0f} | MOI: {_moi:.1f}m)"
+        with st.expander(_label, expanded=(_idx == 0)):
+            _insights = _build_bc_diagnostics(
+                _row, ventas_px, _g,
+                bc_hist=_hist_by_sku.get(_sku, pd.DataFrame()),
+                stock_bodega=stock_bodega,
+                bc_proy=_proy_by_sku.get(_sku, pd.DataFrame()),
+            )
+            if _insights:
+                for _ins in _insights:
+                    st.markdown(f"- {_ins}")
+            else:
+                st.caption("Sin diagnóstico disponible para este SKU.")
+
+    # ── Generar Presentación Caso de Negocio (PPT) para todo el grupo ──
+    st.markdown("---")
+    st.markdown("#### Generar Presentación Caso de Negocio")
+    st.caption(
+        f"Genera un PowerPoint con gráficas, KPIs y diagnóstico por cada SKU "
+        f"de **{group_label}**, organizado por criticidad y tipo de mix."
+    )
+
+    if st.button(f"📊 Generar PPT {group_label}", key=f"{key_prefix}_ppt_generate"):
+        from utils.export import generate_otb_ppt
+
+        with st.spinner(f"Generando PPT para {group_label}..."):
+            _ppt_entries = []
+            _n_skus_ppt = len(_g)
+            _progress = st.progress(0, text="Preparando datos...")
+
+            # Precompute historical sales + stock/MOI + proyección for the
+            # whole group in one pass (instead of re-querying/re-plotting per
+            # SKU) — this is what makes generating a PPT for a 300+ SKU
+            # group fast.
+            _ppt_skus_all = _g["SKU_PRODUCTO"].unique().tolist()
+            _ppt_hist_by_sku, _ppt_stock_by_sku, _ppt_proy_by_sku = _build_ppt_chart_data_batch(
+                _ppt_skus_all, ventas_px, conn,
+            )
+            _ppt_ventas_px_grp = (
+                ventas_px[ventas_px["SKU_PRODUCTO"].isin(_ppt_skus_all)]
+                if not ventas_px.empty and "SKU_PRODUCTO" in ventas_px.columns
+                else ventas_px
+            )
+
+            for _idx, (_, _row) in enumerate(
+                _g.sort_values(
+                    ["_ACCION_ORDER", "STOCK_COSTO"],
+                    ascending=[True, False],
+                ).iterrows()
+            ):
+                _ppt_sku = _row["SKU_PRODUCTO"]
+                _ppt_nom = str(_row.get("SKU_NOM_PRODUCTO", ""))[:60]
+                _progress.progress(
+                    (_idx + 1) / _n_skus_ppt,
+                    text=f"SKU {_idx+1}/{_n_skus_ppt}: {_ppt_sku}",
+                )
+
+                _ppt_hist = _ppt_hist_by_sku.get(_ppt_sku, pd.DataFrame())
+                _ppt_stock_hist = _ppt_stock_by_sku.get(_ppt_sku, pd.DataFrame())
+                _ppt_proy = _ppt_proy_by_sku.get(_ppt_sku, pd.DataFrame())
+                _ppt_fig = _build_ppt_history_chart(
+                    _ppt_hist, _ppt_stock_hist, bc_proy=_ppt_proy, show_cost=False,
+                )
+                _ppt_diag = _build_bc_diagnostics(
+                    _row, _ppt_ventas_px_grp, _g,
+                    bc_hist=_ppt_hist, stock_bodega=stock_bodega, bc_proy=_ppt_proy,
+                )
+
+                _mix_raw = str(_row.get("TIPO", _row.get("MIX_OFICIAL", ""))).strip().upper()
+                if _mix_raw in ("DESCONTINUAR", "FUERA DE MIX", "FUERA MIX"):
+                    _mix_group = "Fuera de Mix"
+                elif _mix_raw in ("IN & OUT", "IN &AMP; OUT", "I&O", "IN&OUT"):
+                    _mix_group = "IN & OUT"
+                elif _mix_raw == "MIX":
+                    _mix_group = "MIX"
+                else:
+                    _mix_group = "Sin Definir"
+
+                _ppt_entries.append({
+                    "line": group_label,
+                    "accion": _row.get("ACCION_RAW", "OK"),
+                    "mix_type": _mix_group,
+                    "sku": _ppt_sku,
+                    "nombre": _ppt_nom,
+                    "fig": _ppt_fig,
+                    "diagnostics": _ppt_diag,
+                })
+
+            _progress.empty()
+
+            _line_stock = _g["STOCK_COSTO"].sum()
+            _line_stats = {
+                group_label: {
+                    "n_skus": len(_g),
+                    "stock_mm": _fmt_mm(_line_stock),
+                    "moi": 0,
+                },
+            }
+
+            _pm_name = st.session_state.get("sidebar_pm_filter", "Dorel Chile")
+            _ppt_buf = generate_otb_ppt(_pm_name, _ppt_entries, _line_stats)
+
+            _slug = re.sub(r"[^A-Za-z0-9]+", "_", group_label).strip("_")
+            st.session_state[f"{key_prefix}_ppt_buffer"] = _ppt_buf
+            st.session_state[f"{key_prefix}_ppt_filename"] = (
+                f"BC_{_slug}_{datetime.now().strftime('%Y%m%d')}.pptx"
+            )
+            st.success(f"PPT generado: {len(_ppt_entries)} SKUs.")
+
+    if st.session_state.get(f"{key_prefix}_ppt_buffer") is not None:
+        st.download_button(
+            "⬇️ Descargar PPT",
+            st.session_state[f"{key_prefix}_ppt_buffer"],
+            st.session_state.get(f"{key_prefix}_ppt_filename", "BC_reporte.pptx"),
+            "application/vnd.openxmlformats-officedocument"
+            ".presentationml.presentation",
+            key=f"{key_prefix}_ppt_download",
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Main render function
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -2242,11 +3470,13 @@ def render_business_case(conn):
     # ══════════════════════════════════════════════════════════════════════
     # TABS: Panorama → Segmentación → Simulador → Deep Dive SKU
     # ══════════════════════════════════════════════════════════════════════
-    _tab_panorama, _tab_segments, _tab_simulator, _tab_sku, _tab_activacion = st.tabs([
+    (_tab_panorama, _tab_segments, _tab_simulator, _tab_sku,
+     _tab_jerarquia, _tab_activacion) = st.tabs([
         "📊 Panorama General",
         "🎯 Segmentación por Acción",
         "🧪 Simulador de Escenarios",
         "🔍 Deep Dive SKU",
+        "🗂️ Deep Dive Jerarquía",
         "📋 Lista de Activación",
     ])
 
@@ -3318,9 +4548,12 @@ def render_business_case(conn):
     with _tab_sku:
         st.markdown("### 🔍 Análisis Detallado por SKU")
 
+        # ── Filtros (Línea / Sublínea / Marca / MIX) ──
+        _sku_pool = _render_dim_filters(_pool, key_prefix="bc_sku")
+
         # ── SKU Selector ──
         _bc_opts = []
-        for _, _r in _pool.sort_values("STOCK_COSTO", ascending=False).iterrows():
+        for _, _r in _sku_pool.sort_values("STOCK_COSTO", ascending=False).iterrows():
             _sku_v = _r["SKU_PRODUCTO"]
             _nom_raw = str(_r.get("SKU_NOM_PRODUCTO", "")).strip()
             # SKU_NOM_PRODUCTO often starts with the SKU code itself, avoid duplicating
@@ -3382,7 +4615,7 @@ def render_business_case(conn):
             )
         _show_cost = _bc_mode == "Costo ($)"
 
-        _canal_map = {"MINOR": "Retail", "ETAIL": "Etail", "MAYOR": "Mayorista"}
+        _canal_map = {"03": "Retail", "06": "Etail", "02": "Mayorista"}
         _canal_opts = list(_canal_map.values())
         _canal_inv = {v: k for k, v in _canal_map.items()}
         with _c2:
@@ -3517,7 +4750,7 @@ def render_business_case(conn):
         _stock_bodega = data.get("stock_bodega", pd.DataFrame())
         _insights = _build_bc_diagnostics(
             _bc_row, _ventas_px, _pool, bc_hist=_bc_hist,
-            stock_bodega=_stock_bodega,
+            stock_bodega=_stock_bodega, bc_proy=_bc_proy,
         )
         if _insights:
             st.markdown("---")
@@ -3525,121 +4758,74 @@ def render_business_case(conn):
             for _ins in _insights:
                 st.markdown(f"- {_ins}")
 
-        # ── PPT Generation ──
-        st.markdown("---")
-        st.markdown("#### Generar Presentación Caso de Negocio")
-
-        # Determine current line for PPT
-        _sel_area = str(_bc_row.get("AREA", "")).strip()
-        _sel_linea = str(_bc_row.get("LINEA", "")).strip()
-        _line_label = f"{_sel_area} > {_sel_linea}" if _sel_area and _sel_linea else "SKU seleccionado"
-
-        st.caption(
-            f"Genera un PowerPoint con gráficas, KPIs y diagnóstico por cada SKU "
-            f"de **{_line_label}**, organizado por criticidad y tipo de mix."
-        )
-
-        # Filter pool to same line for PPT
-        _ppt_pool = _pool.copy()
-        if _sel_area and "AREA" in _ppt_pool.columns:
-            _ppt_pool = _ppt_pool[_ppt_pool["AREA"].astype(str).str.strip().str.upper() == _sel_area.upper()]
-        if _sel_linea and "LINEA" in _ppt_pool.columns:
-            _ppt_pool = _ppt_pool[_ppt_pool["LINEA"].astype(str).str.strip().str.upper() == _sel_linea.upper()]
-
-        if st.button(f"📊 Generar PPT {_line_label}", key="bc_ppt_generate"):
-            from utils.export import generate_otb_ppt
-            from modules.plan_compras import _build_sku_bc_chart, _build_sku_bc_diagnostics
-
-            with st.spinner(f"Generando PPT para {_line_label}..."):
-                _ppt_entries = []
-                _n_skus = len(_ppt_pool)
-                _progress = st.progress(0, text="Preparando datos...")
-
-                for _idx, (_, _row) in enumerate(
-                    _ppt_pool.sort_values(
-                        ["_ACCION_ORDER", "STOCK_COSTO"],
-                        ascending=[True, False],
-                    ).iterrows()
-                ):
-                    _ppt_sku = _row["SKU_PRODUCTO"]
-                    _ppt_nom = str(_row.get("SKU_NOM_PRODUCTO", ""))[:60]
-                    _progress.progress(
-                        (_idx + 1) / _n_skus,
-                        text=f"SKU {_idx+1}/{_n_skus}: {_ppt_sku}",
-                    )
-
-                    _ppt_fig = _build_sku_bc_chart(
-                        _ppt_sku, _ventas_px, conn, show_cost=False,
-                    )
-                    _ppt_diag = _build_sku_bc_diagnostics(
-                        _row, _ventas_px, _ppt_pool,
-                    )
-
-                    _mix_raw = str(_row.get("TIPO", _row.get("MIX_OFICIAL", ""))).strip().upper()
-                    if _mix_raw in ("DESCONTINUAR", "FUERA DE MIX", "FUERA MIX"):
-                        _mix_group = "Fuera de Mix"
-                    elif _mix_raw in ("IN & OUT", "IN &AMP; OUT", "I&O", "IN&OUT"):
-                        _mix_group = "IN & OUT"
-                    elif _mix_raw == "MIX":
-                        _mix_group = "MIX"
-                    else:
-                        _mix_group = "Sin Definir"
-
-                    _ppt_entries.append({
-                        "line": _line_label,
-                        "accion": _row.get("ACCION_RAW", "OK"),
-                        "mix_type": _mix_group,
-                        "sku": _ppt_sku,
-                        "nombre": _ppt_nom,
-                        "fig": _ppt_fig,
-                        "kpis": {
-                            "moi_hist": float(_row.get("MOI_HIST", 0) or 0),
-                            "rot": float(_row.get("ROTACION_UND_MES", 0) or 0),
-                            "moi_fc": float(_row.get("MOI_FC", 0) or 0),
-                            "meses_liq": float(_row.get("MESES_LIQ", 999) or 999),
-                            "dcto": float(_row.get("DCTO_SUGERIDO", 0) or 0),
-                            "ahorro_fc": float(_row.get("FC_COMPRA_CLP", 0) or 0),
-                            "moi_transito": float(_row.get("MOI_FC_LLEGADA", 0) or 0),
-                            "stock_costo": float(_row.get("STOCK_COSTO", 0) or 0),
-                        },
-                        "diagnostics": _ppt_diag,
-                    })
-
-                _progress.empty()
-
-                _line_stock = _ppt_pool["STOCK_COSTO"].sum()
-                _line_st_mm = f"${_line_stock/1_000_000:.1f}M" if _line_stock >= 1_000_000 else f"${_line_stock:,.0f}"
-                _line_stats = {
-                    _line_label: {
-                        "n_skus": len(_ppt_pool),
-                        "stock_mm": _line_st_mm,
-                        "moi": 0,
-                    },
-                }
-
-                _pm_name = st.session_state.get("sidebar_pm_filter", "Dorel Chile")
-                _ppt_buf = generate_otb_ppt(_pm_name, _ppt_entries, _line_stats)
-
-                st.session_state["_bc_ppt_buffer"] = _ppt_buf
-                st.session_state["_bc_ppt_filename"] = (
-                    f"BC_{_sel_area}_{_sel_linea}_{datetime.now().strftime('%Y%m%d')}.pptx"
-                )
-                st.success(f"PPT generado: {len(_ppt_entries)} SKUs.")
-
-        if st.session_state.get("_bc_ppt_buffer") is not None:
-            st.download_button(
-                "⬇️ Descargar PPT",
-                st.session_state["_bc_ppt_buffer"],
-                st.session_state.get("_bc_ppt_filename", "BC_reporte.pptx"),
-                "application/vnd.openxmlformats-officedocument"
-                ".presentationml.presentation",
-                key="bc_ppt_download",
-            )
+        # Generar Presentación Caso de Negocio se movió a Deep Dive Jerarquía.
 
         # Scenario simulator moved to tab 3 (Simulador de Escenarios)
 
     # ══════════════════════════════════════════════════════════════════════
-    # TAB 5: LISTA DE ACTIVACIÓN
+    # TAB 5: DEEP DIVE JERARQUÍA (Área / Línea / Marca)
+    # ══════════════════════════════════════════════════════════════════════
+    with _tab_jerarquia:
+        st.markdown("### 🗂️ Deep Dive por Jerarquía")
+        st.caption(
+            "Mismo tipo de análisis que Deep Dive SKU, pero agregado a nivel "
+            "Área, Línea, Sublínea, Marca o MIX — útil para diagnosticar una "
+            "categoría completa en vez de un solo SKU."
+        )
+
+        # ── Filtros (Línea / Sublínea / Marca / MIX / Pareto) — acotan el
+        # universo antes de elegir el nivel de análisis y el valor ──
+        _jer_pool_pre = _render_dim_filters(
+            _pool, key_prefix="bc_jer", ventas_px=_ventas_px, show_pareto=True,
+        )
+
+        _jer_dim_label = st.radio(
+            "Nivel de análisis", ["Área", "Línea", "Sublínea", "Marca", "MIX"],
+            index=1, horizontal=True, key="bc_jer_nivel",
+        )
+        _jer_col = {
+            "Área": "AREA", "Línea": "LINEA", "Sublínea": "SUBLINEA",
+            "Marca": "MARCA", "MIX": "MIX_OFICIAL",
+        }[_jer_dim_label]
+
+        _jer_pool = pd.DataFrame()
+        if _jer_col in _jer_pool_pre.columns:
+            _jer_pool = _jer_pool_pre.copy()
+            _jer_pool[_jer_col] = _jer_pool[_jer_col].astype(str).str.strip()
+            _jer_pool = _jer_pool[~_jer_pool[_jer_col].str.upper().isin(["", "NAN", "NONE"])]
+
+        if _jer_pool.empty:
+            st.info(f"Sin datos de {_jer_dim_label} con los filtros actuales.")
+        else:
+            _jer_summary = (
+                _jer_pool.groupby(_jer_col)
+                .agg(
+                    N_SKUS=("SKU_PRODUCTO", "nunique"),
+                    STOCK_COSTO=("STOCK_COSTO", "sum"),
+                    STOCK_UNIDADES=("STOCK_UNIDADES", "sum"),
+                )
+                .reset_index()
+                .sort_values("STOCK_COSTO", ascending=False)
+            )
+            _jer_opts = [
+                f"{r[_jer_col]} ({int(r['N_SKUS'])} SKUs · "
+                f"{r['STOCK_UNIDADES']:,.0f} und · {_fmt_mm(r['STOCK_COSTO'])})"
+                for _, r in _jer_summary.iterrows()
+            ]
+            _jer_sel = st.selectbox(
+                f"Seleccionar {_jer_dim_label}", _jer_opts, index=0, key="bc_jer_select",
+            )
+            _jer_val = _jer_summary.iloc[_jer_opts.index(_jer_sel)][_jer_col]
+            _jer_group = _jer_pool[_jer_pool[_jer_col] == _jer_val].copy()
+
+            _render_group_diagnostic_panel(
+                _jer_group, _ventas_px, conn,
+                group_label=f"{_jer_dim_label}: {_jer_val}", key_prefix="bc_jer",
+                stock_bodega=data.get("stock_bodega", pd.DataFrame()),
+            )
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 6: LISTA DE ACTIVACIÓN
     # ══════════════════════════════════════════════════════════════════════
     with _tab_activacion:
         st.markdown("### 📋 Lista de Activación de Precios — Stock Crítico")
@@ -3702,7 +4888,7 @@ def render_business_case(conn):
             )
 
             # ── Canal filter for price/margin ──
-            _canal_map = {"MINOR": "Retail (Tiendas)", "ETAIL": "E-commerce", "MAYOR": "Mayorista"}
+            _canal_map = {"03": "Retail (Tiendas)", "06": "E-commerce", "02": "Mayorista"}
             _canal_opts = list(_canal_map.values())
             if not _ventas_px.empty and "COD_CANAL" in _ventas_px.columns:
                 _canales_con_data = sorted(
