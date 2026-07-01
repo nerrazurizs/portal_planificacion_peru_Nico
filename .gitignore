@@ -24,9 +24,10 @@ frontend/node_modules/
 
 # Allow persisted input files for projection
 !data/inputs/forecast.xlsx
-!data/inputs/compra.csv
 !data/inputs/precios.xlsx
 !data/inputs/metadata.json
+# Nota: compra.csv se dejó FUERA a propósito (lo captura *.csv). Es data de trabajo
+# que cambia seguido; versionarla infla los PRs y genera conflictos (rompió el PR #42).
 
 # Flujo de Costos — archivos default compartidos (visibles para todos los usuarios)
 !data/inputs/budget_default.xlsx
