@@ -380,7 +380,7 @@ from db_supply.fct.ft_cubo_comex c
 left join ingresos i
     on trim(c.po_numpedidocompra) = i.po
     and trim(c.si_codigoproducto) = i.sku_producto
-left join {{_PROD}} p
+left join {_PROD} p
     on trim(c.si_codigoproducto) = p.sku_producto
 where c.estadoimportacion in ('Transito', 'Recibido', 'Cerrado')
 """
