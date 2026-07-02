@@ -256,25 +256,28 @@ def _parse_forecast_excel(file) -> "tuple[pd.DataFrame, str | None]":
 def _build_stats(
     ventas_df: pd.DataFrame,
     semanas_df: "pd.DataFrame | None" = None,
+    stock_df: "pd.DataFrame | None" = None,
 ) -> pd.DataFrame:
     """Estadisticas por SKU x COD_CCOSTO.
 
     ventas_df : meses historicos cerrados + mes actual MTD (GROUP BY mes).
     semanas_df: ventas semanales ultimas 8 semanas (GROUP BY semana).
+    stock_df  : stock por SKU x COD_CCOSTO x mes (ultimo dia del mes).
 
     Columnas resultado:
         SKU_PRODUCTO, COD_CCOSTO, CENTRO_COSTO, CANAL,
-        MEDIA_4M, STD_4M, N_PERIODOS, UMBRAL_ADVERTENCIA, UMBRAL_ALERTA,
-        VENTA_MES_ACTUAL, SEMANA_1..SEMANA_5, VENTA_SEMANAL_PROMEDIO, FORECAST_SUGERIDO
+        MEDIA_4M, MEDIA_4M_AJUSTADO, STD_4M, N_PERIODOS, UMBRAL_ADVERTENCIA, UMBRAL_ALERTA,
+        VENTA_MES_ACTUAL, SEMANA_1..SEMANA_5, VENTA_SEMANAL_PROMEDIO,
+        FORECAST_SUGERIDO, FORECAST_SUGERIDO_CRONOLOGICO
     """
     if ventas_df.empty:
         return pd.DataFrame(columns=[
             "SKU_PRODUCTO", "COD_CCOSTO", "CENTRO_COSTO", "CANAL",
-            "MEDIA_4M", "STD_4M", "N_PERIODOS",
+            "MEDIA_4M", "MEDIA_4M_AJUSTADO", "STD_4M", "N_PERIODOS",
             "UMBRAL_ADVERTENCIA", "UMBRAL_ALERTA",
             "VENTA_MES_ACTUAL",
             "SEMANA_1", "SEMANA_2", "SEMANA_3", "SEMANA_4", "SEMANA_5",
-            "VENTA_SEMANAL_PROMEDIO", "FORECAST_SUGERIDO",
+            "VENTA_SEMANAL_PROMEDIO", "FORECAST_SUGERIDO", "FORECAST_SUGERIDO_CRONOLOGICO",
         ])
 
     vdf = ventas_df.copy()
@@ -311,56 +314,100 @@ def _build_stats(
     stats["UMBRAL_ADVERTENCIA"] = stats["MEDIA_4M"] * _RATIO_ADVERTENCIA
     stats["UMBRAL_ALERTA"]      = stats["MEDIA_4M"] * _RATIO_ALERTA
 
-    # VENTA_SEMANAL_PROMEDIO = promedio de las 5 ultimas semanas con unidades > 0
-    # FORECAST_SUGERIDO = VENTA_SEMANAL_PROMEDIO x 4 (proyeccion mensual)
-    # SEMANA_1..SEMANA_5 = ventas individuales (1=mas reciente, 5=mas antigua)
+    # ── MEDIA_4M_AJUSTADO: promedio solo en meses donde stock > 0 en esa tienda ─
+    if stock_df is not None and not stock_df.empty:
+        st_df = stock_df.copy()
+        st_df.columns = st_df.columns.str.upper()
+        st_df["PERIODO"]      = pd.to_datetime(st_df["PERIODO"]).dt.normalize()
+        st_df["COD_CCOSTO"]   = st_df["COD_CCOSTO"].astype(str).str.strip().str.zfill(4)
+        st_df["SKU_PRODUCTO"] = st_df["SKU_PRODUCTO"].astype(str).str.strip()
+        st_df["STOCK_UNIDADES"] = pd.to_numeric(st_df["STOCK_UNIDADES"], errors="coerce").fillna(0)
+        meses_con_stock = st_df[st_df["STOCK_UNIDADES"] > 0][["SKU_PRODUCTO", "COD_CCOSTO", "PERIODO"]]
+        ventas_con_stock = by_cc_mes.merge(meses_con_stock, on=["SKU_PRODUCTO", "COD_CCOSTO", "PERIODO"], how="inner")
+        if not ventas_con_stock.empty:
+            media_ajustada = (
+                ventas_con_stock.groupby(["SKU_PRODUCTO", "COD_CCOSTO"], as_index=False)
+                .agg(MEDIA_4M_AJUSTADO=("UNIDADES", "mean"))
+            )
+            media_ajustada["MEDIA_4M_AJUSTADO"] = media_ajustada["MEDIA_4M_AJUSTADO"].round(1)
+            stats = stats.merge(media_ajustada, on=["SKU_PRODUCTO", "COD_CCOSTO"], how="left")
+        else:
+            stats["MEDIA_4M_AJUSTADO"] = float("nan")
+
+        # ── TIPO: NUEVO si sin stock en los ultimos 3 meses cerrados, ACTUAL si tuvo stock ──
+        # Usar los 3 meses mas recientes del historial de stock
+        meses_recientes = (
+            st_df.groupby(["SKU_PRODUCTO", "COD_CCOSTO"])["PERIODO"]
+            .nlargest(3)
+            .reset_index(level=2)
+            .reset_index()
+            [["SKU_PRODUCTO", "COD_CCOSTO", "PERIODO"]]
+        )
+        stock_reciente = st_df.merge(meses_recientes, on=["SKU_PRODUCTO", "COD_CCOSTO", "PERIODO"], how="inner")
+        tuvo_stock = (
+            stock_reciente.groupby(["SKU_PRODUCTO", "COD_CCOSTO"], as_index=False)
+            .agg(_max_stock=("STOCK_UNIDADES", "max"))
+        )
+        tuvo_stock["TIPO"] = tuvo_stock["_max_stock"].apply(
+            lambda x: "ACTUAL" if x > 0 else "NUEVO"
+        )
+        stats = stats.merge(
+            tuvo_stock[["SKU_PRODUCTO", "COD_CCOSTO", "TIPO"]],
+            on=["SKU_PRODUCTO", "COD_CCOSTO"], how="left",
+        )
+        stats["TIPO"] = stats["TIPO"].fillna("NUEVO")
+    else:
+        stats["MEDIA_4M_AJUSTADO"] = float("nan")
+        stats["TIPO"] = "NUEVO"
+
+    # ── Semanales: FORECAST_SUGERIDO (5 semanas con venta) y CRONOLOGICO (4 semanas) ─
     if semanas_df is not None and not semanas_df.empty:
         sw = semanas_df.copy()
-        # Normalizar columnas (pueden venir en minusculas de norm_cols)
         sw.columns = sw.columns.str.upper()
-        sw = sw[sw["UNIDADES"] > 0].copy()
-        # Para cada (SKU, CCOSTO), tomar las 5 semanas mas recientes con venta > 0
-        sw_sorted = sw.sort_values("SEMANA", ascending=False)
+        sw["UNIDADES"] = pd.to_numeric(sw["UNIDADES"], errors="coerce").fillna(0)
+
+        # FORECAST_SUGERIDO_CRONOLOGICO: ultimas 4 semanas cronologicas (incluye 0s)
+        sw_crono  = sw.sort_values("SEMANA", ascending=False)
+        top4_crono = sw_crono.groupby(["SKU_PRODUCTO", "COD_CCOSTO"]).head(4)
+        vsp_crono  = top4_crono.groupby(["SKU_PRODUCTO", "COD_CCOSTO"], as_index=False).agg(_avg=("UNIDADES", "mean"))
+        vsp_crono["FORECAST_SUGERIDO_CRONOLOGICO"] = (vsp_crono["_avg"] * 4).round(1)
+        vsp_crono.drop(columns=["_avg"], inplace=True)
+        stats = stats.merge(vsp_crono, on=["SKU_PRODUCTO", "COD_CCOSTO"], how="left")
+
+        # FORECAST_SUGERIDO: ultimas 5 semanas con venta > 0
+        sw_pos    = sw[sw["UNIDADES"] > 0].copy()
+        sw_sorted = sw_pos.sort_values("SEMANA", ascending=False)
         top5 = sw_sorted.groupby(["SKU_PRODUCTO", "COD_CCOSTO"]).head(5)
 
-        # Promedio y forecast sugerido
-        vsp = (
-            top5.groupby(["SKU_PRODUCTO", "COD_CCOSTO"], as_index=False)
-            .agg(VENTA_SEMANAL_PROMEDIO=("UNIDADES", "mean"))
-        )
+        vsp = top5.groupby(["SKU_PRODUCTO", "COD_CCOSTO"], as_index=False).agg(VENTA_SEMANAL_PROMEDIO=("UNIDADES", "mean"))
         vsp["VENTA_SEMANAL_PROMEDIO"] = vsp["VENTA_SEMANAL_PROMEDIO"].round(1)
         vsp["FORECAST_SUGERIDO"]      = (vsp["VENTA_SEMANAL_PROMEDIO"] * 4).round(1)
         stats = stats.merge(vsp, on=["SKU_PRODUCTO", "COD_CCOSTO"], how="left")
 
-        # Ventas individuales por semana: rank 1 = mas reciente
+        # SEMANA_1..5: rank por recencia (solo semanas con venta)
         top5_ranked = top5.copy()
         top5_ranked["RANK"] = (
             top5_ranked.groupby(["SKU_PRODUCTO", "COD_CCOSTO"])["SEMANA"]
-            .rank(method="first", ascending=False)
-            .astype(int)
+            .rank(method="first", ascending=False).astype(int)
         )
         sw_pivot = top5_ranked.pivot_table(
-            index=["SKU_PRODUCTO", "COD_CCOSTO"],
-            columns="RANK",
-            values="UNIDADES",
-            aggfunc="sum",
+            index=["SKU_PRODUCTO", "COD_CCOSTO"], columns="RANK",
+            values="UNIDADES", aggfunc="sum",
         ).reset_index()
         sw_pivot.columns.name = None
         sw_pivot.columns = (
             ["SKU_PRODUCTO", "COD_CCOSTO"]
             + [f"SEMANA_{int(c)}" for c in sw_pivot.columns[2:]]
         )
-        # Garantizar las 5 columnas aunque haya < 5 semanas con datos
         for i in range(1, 6):
             if f"SEMANA_{i}" not in sw_pivot.columns:
                 sw_pivot[f"SEMANA_{i}"] = float("nan")
-        sw_pivot = sw_pivot[
-            ["SKU_PRODUCTO", "COD_CCOSTO"] + [f"SEMANA_{i}" for i in range(1, 6)]
-        ]
+        sw_pivot = sw_pivot[["SKU_PRODUCTO", "COD_CCOSTO"] + [f"SEMANA_{i}" for i in range(1, 6)]]
         stats = stats.merge(sw_pivot, on=["SKU_PRODUCTO", "COD_CCOSTO"], how="left")
     else:
-        stats["VENTA_SEMANAL_PROMEDIO"] = float("nan")
-        stats["FORECAST_SUGERIDO"]      = float("nan")
+        stats["FORECAST_SUGERIDO_CRONOLOGICO"] = float("nan")
+        stats["VENTA_SEMANAL_PROMEDIO"]        = float("nan")
+        stats["FORECAST_SUGERIDO"]             = float("nan")
         for i in range(1, 6):
             stats[f"SEMANA_{i}"] = float("nan")
 
@@ -373,9 +420,13 @@ def _build_stats(
     else:
         stats["VENTA_MES_ACTUAL"] = 0
 
-    stats["VENTA_MES_ACTUAL"]       = stats["VENTA_MES_ACTUAL"].fillna(0).astype(int)
-    stats["VENTA_SEMANAL_PROMEDIO"] = stats.get("VENTA_SEMANAL_PROMEDIO", pd.Series(dtype=float)).fillna(float("nan"))
-    stats["FORECAST_SUGERIDO"]      = stats.get("FORECAST_SUGERIDO",      pd.Series(dtype=float)).fillna(float("nan"))
+    stats["VENTA_MES_ACTUAL"]              = stats["VENTA_MES_ACTUAL"].fillna(0).astype(int)
+    stats["VENTA_SEMANAL_PROMEDIO"]        = stats.get("VENTA_SEMANAL_PROMEDIO",        pd.Series(dtype=float)).fillna(float("nan"))
+    stats["FORECAST_SUGERIDO"]             = stats.get("FORECAST_SUGERIDO",             pd.Series(dtype=float)).fillna(float("nan"))
+    stats["FORECAST_SUGERIDO_CRONOLOGICO"] = stats.get("FORECAST_SUGERIDO_CRONOLOGICO", pd.Series(dtype=float)).fillna(float("nan"))
+    stats["MEDIA_4M_AJUSTADO"]             = stats.get("MEDIA_4M_AJUSTADO",             pd.Series(dtype=float)).fillna(float("nan"))
+    if "TIPO" not in stats.columns:
+        stats["TIPO"] = "NUEVO"
 
     # Nombre de tienda
     stats["CENTRO_COSTO"] = stats["COD_CCOSTO"].map(nombre_map).fillna("Sin nombre")
@@ -1038,9 +1089,11 @@ def render_alerta_forecast(conn):
 
     # ── 2. Cargar datos base de ventas ────────────────────────────────────────
     with lottie_spinner("snowflake"):
-        ventas_raw  = cq.alerta_forecast_ventas(conn)
-        semanas_raw = cq.alerta_vta_semanal(conn)
-        maestra_df  = cq.maestra(conn)
+        ventas_raw   = cq.alerta_forecast_ventas(conn)
+        semanas_raw  = cq.alerta_vta_semanal(conn)
+        maestra_df   = cq.maestra(conn)
+        stock_men_df = cq.alerta_stock_tienda_mensual(conn)
+        perfil_raw   = cq.perfil_sku_ccosto(conn)
 
     maestra_df = apply_pm_filter(maestra_df)
 
@@ -1054,7 +1107,11 @@ def render_alerta_forecast(conn):
     ventas_raw["PERIODO"] = pd.to_datetime(ventas_raw["PERIODO"])
 
     # ── 3. Estadisticas por SKU x CCOSTO ─────────────────────────────────────
-    stats_df = _build_stats(ventas_raw, semanas_df=semanas_raw if not semanas_raw.empty else None)
+    stats_df = _build_stats(
+        ventas_raw,
+        semanas_df=semanas_raw  if not semanas_raw.empty  else None,
+        stock_df  =stock_men_df if not stock_men_df.empty else None,
+    )
 
     periodos_fc = sorted(forecast_df["PERIODO"].unique())
     st.success(
@@ -1088,6 +1145,22 @@ def render_alerta_forecast(conn):
         return
 
     alert_df = apply_pm_filter(alert_df)
+
+    # ── Columna PERFIL: 1 si SKU x COD_CCOSTO tiene perfil en Syncro, 0 si no ─
+    if not perfil_raw.empty:
+        pf = perfil_raw.copy()
+        pf.columns = pf.columns.str.upper()
+        pf["SKU_PRODUTO"] = pf["SKU_PRODUTO"].astype(str).str.strip() if "SKU_PRODUTO" in pf.columns else pf.get("SKU_PRODUCTO", pd.Series()).astype(str).str.strip()
+        pf["COD_CCOSTO"]  = pf["COD_CCOSTO"].astype(str).str.strip().str.zfill(4)
+        pf = pf.rename(columns={"SKU_PRODUTO": "SKU_PRODUCTO"})
+        pf["PERFIL"] = 1
+        alert_df = alert_df.merge(
+            pf[["SKU_PRODUCTO", "COD_CCOSTO", "PERFIL"]].drop_duplicates(),
+            on=["SKU_PRODUCTO", "COD_CCOSTO"], how="left",
+        )
+        alert_df["PERFIL"] = alert_df["PERFIL"].fillna(0).astype(int)
+    else:
+        alert_df["PERFIL"] = 0
 
     # ── Filtros ───────────────────────────────────────────────────────────────
     st.markdown("### 4. Filtros")
@@ -1200,13 +1273,13 @@ def render_alerta_forecast(conn):
     st.markdown("### Detalle por SKU x Centro de Costo")
 
     display_cols = [
-        "SEMAFORO", "ESTADO", "SKU_PRODUCTO",
+        "SEMAFORO", "ESTADO", "PERFIL", "TIPO", "SKU_PRODUCTO",
         "COD_CCOSTO", "CENTRO_COSTO",
         "CANAL", "PERIODO",
         "FC_UND", "VENTA_MES_ACTUAL",
         "SEMANA_1", "SEMANA_2", "SEMANA_3", "SEMANA_4", "SEMANA_5",
-        "VENTA_SEMANAL_PROMEDIO", "FORECAST_SUGERIDO",
-        "MEDIA_4M", "RATIO_FC_MEDIA", "DESV_VS_MEDIA_PCT",
+        "VENTA_SEMANAL_PROMEDIO", "FORECAST_SUGERIDO", "FORECAST_SUGERIDO_CRONOLOGICO",
+        "MEDIA_4M", "MEDIA_4M_AJUSTADO", "RATIO_FC_MEDIA", "DESV_VS_MEDIA_PCT",
         "UMBRAL_ADVERTENCIA", "UMBRAL_ALERTA",
         "DIFF_VS_ADVERTENCIA", "DIFF_VS_ALERTA",
     ]
@@ -1221,13 +1294,13 @@ def render_alerta_forecast(conn):
 
     # Formateo numerico — sin Styler para evitar limite de celdas
     fmt = df_display.copy()
-    for col in ["FC_UND", "VENTA_MES_ACTUAL", "MEDIA_4M", "STD_4M",
+    for col in ["FC_UND", "VENTA_MES_ACTUAL", "MEDIA_4M", "MEDIA_4M_AJUSTADO", "STD_4M",
                 "UMBRAL_ADVERTENCIA", "UMBRAL_ALERTA",
                 "DIFF_VS_ADVERTENCIA", "DIFF_VS_ALERTA"]:
         if col in fmt.columns:
             fmt[col] = fmt[col].apply(lambda x: f"{x:,.0f}" if pd.notna(x) else "-")
     for col in ["SEMANA_1", "SEMANA_2", "SEMANA_3", "SEMANA_4", "SEMANA_5",
-                "VENTA_SEMANAL_PROMEDIO", "FORECAST_SUGERIDO"]:
+                "VENTA_SEMANAL_PROMEDIO", "FORECAST_SUGERIDO", "FORECAST_SUGERIDO_CRONOLOGICO"]:
         if col in fmt.columns:
             fmt[col] = fmt[col].apply(lambda x: f"{x:,.1f}" if pd.notna(x) else "-")
     if "RATIO_FC_MEDIA" in fmt.columns:

@@ -1,4 +1,4 @@
-"""Centralized Snowflake query cache.
+﻿"""Centralized Snowflake query cache.
 
 Provides cached versions of frequently-used queries so that multiple
 modules sharing the same underlying data hit Snowflake only once per
@@ -110,6 +110,8 @@ from db.queries import (
     QUERY_STOCK_HIST_MENSUAL,
     QUERY_AGOTAMIENTO,
     QUERY_DT_PRODUCTO,
+    QUERY_PERFIL_SKU_CCOSTO,
+    QUERY_ALERTA_STOCK_TIENDA_MENSUAL,
 )
 from utils.filters import norm_cols
 
@@ -896,8 +898,7 @@ def vcm_forecast_historico(_conn_id, _conn=None) -> pd.DataFrame:
 
 # Registry of all cached functions for batch clearing
 _ALL_CACHED = [
-    contenedor_stock, contenedor_dims, contenedor_ventas_12m,
-    vcm_forecast_historico,
+    contenedor_stock, contenedor_dims, contenedor_ventas_12m, vcm_forecast_historico,
     maestra, ventas_aa, ventas_mes_anterior, ventas_hist_proyeccion, ventas_semanales,
     ventas_historicas, ventas_ytd, ventas_ytd_aa,
     ventas_mensual_precio, ventas_semanal_tendencia,
@@ -910,13 +911,16 @@ _ALL_CACHED = [
     instock_hist_tienda, instock_hist_cd,
     instock_daily_tienda, instock_daily_cd,
     abc_xyz_fsn,
-    comex_full, dashboard_comex,
+    comex_full, dashboard_comex, cumplimiento_comex,
     leadtimes,
     agotamiento,
     syncro_config, transito_sucursales, ventas_90d_sucursal,
     supply_pedidos_transfer, supply_picking, supply_stock_actual,
     supply_bultos, supply_despachos_fedex,
     unified_transit,
+    perfil_sku_ccosto,
+    alerta_stock_tienda_mensual,
+    dt_producto,
 ]
 
 
@@ -973,6 +977,18 @@ def alerta_forecast_ventas(_conn_id, _conn=None) -> pd.DataFrame:
 def alerta_vta_semanal(_conn_id, _conn=None) -> pd.DataFrame:
     """Ventas semanales ultimas 8 semanas por SKU x COD_CCOSTO (para VENTA_SEMANAL_PROMEDIO)."""
     return norm_cols(_run(QUERY_ALERTA_VTA_SEMANAL, _conn))
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def perfil_sku_ccosto(_conn_id, _conn=None) -> pd.DataFrame:
+    """SKU x COD_CCOSTO pairs that have a perfil in Syncro (min_inv_requerido > 0)."""
+    return norm_cols(_run(QUERY_PERFIL_SKU_CCOSTO, _conn))
+
+
+@st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
+def alerta_stock_tienda_mensual(_conn_id, _conn=None) -> pd.DataFrame:
+    """Stock de tienda al ultimo dia de cada mes (ultimos 4 meses cerrados) por SKU x COD_CCOSTO."""
+    return norm_cols(_run(QUERY_ALERTA_STOCK_TIENDA_MENSUAL, _conn))
 
 
 # ---------------------------------------------------------------------------
@@ -1287,10 +1303,13 @@ class cached_query:
     def contenedor_ventas_12m(conn):
         return contenedor_ventas_12m(cached_query._cid(conn), _conn=conn)
 
-    # -- Analisis Forecast (24h) --
     @staticmethod
     def vcm_forecast_historico(conn):
         return vcm_forecast_historico(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def dt_producto(conn):
+        return dt_producto(cached_query._cid(conn), _conn=conn)
 
     # -- Alerta Forecast (diario) --
     @staticmethod
@@ -1302,5 +1321,10 @@ class cached_query:
         return alerta_vta_semanal(cached_query._cid(conn), _conn=conn)
 
     @staticmethod
-    def dt_producto(conn):
-        return dt_producto(cached_query._cid(conn), _conn=conn)
+    def perfil_sku_ccosto(conn):
+        return perfil_sku_ccosto(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def alerta_stock_tienda_mensual(conn):
+        return alerta_stock_tienda_mensual(cached_query._cid(conn), _conn=conn)
+

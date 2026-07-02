@@ -102,8 +102,8 @@ _COMPRAS = f"""(
             TRY_TO_DATE(CAST(f.fecha_ingreso_cd AS VARCHAR), 'YYYY-MM-DD'),
             TRY_TO_DATE(CAST(f.fecha_ingreso_cd AS VARCHAR), 'YYYYMMDD')
         )                                                            AS fecha_recepcion_en_cd,
-        TRY_CAST(f.tipocambio AS FLOAT)                              AS paridad_moneda,
-        TRY_CAST(f.tipocambio AS FLOAT)                              AS dolar_sistema,
+        CAST(f.tipocambio AS FLOAT)                                  AS paridad_moneda,
+        CAST(f.tipocambio AS FLOAT)                                  AS dolar_sistema,
         CAST(f.moneda AS VARCHAR)                                    AS cod_moneda,
         CAST(f.codigo_proveedor_oc AS VARCHAR)                       AS cod_proveedor,
         f.situacion                                                  AS nom_status,
@@ -727,6 +727,7 @@ inner join monthly_last ml
     and ds.fecha        = ml.ultima_fecha
 """
 
+
 # Ventas Ano Anterior completo
 QUERY_VENTAS_AA = f"""
 select
@@ -1035,14 +1036,14 @@ ult_ing AS (
         MAX(c.fecha_recepcion_en_cd) AS fecha_ult_ing_cd
     FROM {_COMPRAS} c
     WHERE c.fecha_recepcion_en_cd IS NOT NULL
-      AND COALESCE(TRY_CAST(c.cantidad_carpeta_recepcionada AS FLOAT), 0) > 0
+      AND COALESCE(c.cantidad_carpeta_recepcionada, 0) > 0
     GROUP BY c.sku_producto
 ),
 qty_ult_ing AS (
     SELECT
         c.sku_producto,
         u.fecha_ult_ing_cd,
-        SUM(COALESCE(TRY_CAST(c.cantidad_carpeta_recepcionada AS FLOAT), 0)) AS qty_recibida
+        SUM(COALESCE(c.cantidad_carpeta_recepcionada, 0)) AS qty_recibida
     FROM {_COMPRAS} c
     INNER JOIN ult_ing u
         ON  c.sku_producto          = u.sku_producto
@@ -1067,7 +1068,7 @@ vtas_desde_ing AS (
     FROM {_VCM} v
     INNER JOIN qty_ult_ing q ON v.sku_producto = q.sku_producto
     WHERE v.fecha >= q.fecha_ult_ing_cd
-      AND COALESCE(NULLIF(CAST(v.flg_eliminado AS VARCHAR), ''), '0') = '0'
+      AND COALESCE(v.flg_eliminado, 0) = 0
     GROUP BY v.sku_producto
 )
 SELECT
@@ -2714,6 +2715,42 @@ WHERE fecha >= DATEADD('day', -90, CURRENT_DATE())
 GROUP BY 1, 2
 """
 
+# Perfil por SKU x Sucursal — combinaciones con min_inv_requerido > 0 en Syncro.
+QUERY_PERFIL_SKU_CCOSTO = """
+SELECT
+    CAST(c.id_material AS VARCHAR) AS sku_producto,
+    CAST(c.id_sucursal AS VARCHAR) AS cod_ccosto
+FROM db_syncros.public.coo_config_sku_sucursal c
+WHERE c.min_inv_requerido > 0
+"""
+
+# Stock por SKU x bodega (tienda) x mes — ultimos 4 meses cerrados.
+# Toma el stock del ultimo dia disponible de cada mes por bodega.
+QUERY_ALERTA_STOCK_TIENDA_MENSUAL = """
+WITH ultimo_dia_mes AS (
+    SELECT
+        sku_producto,
+        LPAD(CAST(cod_bodega AS VARCHAR), 4, '0') AS cod_ccosto,
+        DATE_TRUNC('month', fecha)                AS periodo,
+        MAX(fecha)                                AS ultima_fecha
+    FROM db_supply.hst.ht_in_stock
+    WHERE fecha >= DATEADD('month', -4, DATE_TRUNC('month', CURRENT_DATE()))
+      AND fecha <  DATE_TRUNC('month', CURRENT_DATE())
+    GROUP BY 1, 2, 3
+)
+SELECT
+    s.sku_producto,
+    u.cod_ccosto,
+    u.periodo,
+    SUM(s.stock_unidades) AS stock_unidades
+FROM db_supply.hst.ht_in_stock s
+INNER JOIN ultimo_dia_mes u
+    ON  s.sku_producto = u.sku_producto
+    AND LPAD(CAST(s.cod_bodega AS VARCHAR), 4, '0') = u.cod_ccosto
+    AND s.fecha        = u.ultima_fecha
+GROUP BY 1, 2, 3
+"""
+
 # Perfil por SKU — último snapshot disponible en ht_in_stock.
 # Devuelve SI si el SKU tiene perfil en alguna tienda, NO en caso contrario.
 QUERY_PERFIL_SKU = """
@@ -2988,9 +3025,6 @@ WHERE v.fecha >= DATEADD('week', -8, DATE_TRUNC('week', CURRENT_DATE()))
 GROUP BY 1, 2, 3
 """
 
-# ============================================================
-# ANALISIS FORECAST — ventas unitarias mensuales (36 meses)
-# ============================================================
 QUERY_FORECAST_VCM_HISTORICO = f"""
 SELECT
     a.sku_producto,
