@@ -896,32 +896,10 @@ def vcm_forecast_historico(_conn_id, _conn=None) -> pd.DataFrame:
 # Cache management
 # ---------------------------------------------------------------------------
 
-# Registry of all cached functions for batch clearing
-_ALL_CACHED = [
-    contenedor_stock, contenedor_dims, contenedor_ventas_12m, vcm_forecast_historico,
-    maestra, ventas_aa, ventas_mes_anterior, ventas_hist_proyeccion, ventas_semanales,
-    ventas_historicas, ventas_ytd, ventas_ytd_aa,
-    ventas_mensual_precio, ventas_semanal_tendencia,
-    ventas_diarias_patron, pesos_diarios, pesos_diarios_canal,
-    event_boosts, event_boosts_sku,
-    stock_onhand, stock_proyeccion, stock_critico_metrics, stock_higiene, instock_store_detail,
-    stock_hist_mensual, familia_modelo,
-    ventas_diarias_90d, tienda_dim,
-    ventas_mtd, ventas_mtd_diaria, dashboard_ventas_mtd, vta_mtd_retail, perfil_sku,
-    instock_hist_tienda, instock_hist_cd,
-    instock_daily_tienda, instock_daily_cd,
-    abc_xyz_fsn,
-    comex_full, dashboard_comex, cumplimiento_comex,
-    leadtimes,
-    agotamiento,
-    syncro_config, transito_sucursales, ventas_90d_sucursal,
-    supply_pedidos_transfer, supply_picking, supply_stock_actual,
-    supply_bultos, supply_despachos_fedex,
-    unified_transit,
-    perfil_sku_ccosto,
-    alerta_stock_tienda_mensual,
-    dt_producto,
-]
+# NOTA: _ALL_CACHED se define mas abajo (despues de TODAS las funciones cacheadas).
+# Algunas funciones (dt_producto, perfil_sku_ccosto, alerta_stock_tienda_mensual) se
+# agregaron despues de esta seccion, y la lista las referencia -> deben existir antes
+# de construirla, o Python lanza NameError al importar y la app no arranca.
 
 
 def clear_all():
@@ -989,6 +967,35 @@ def perfil_sku_ccosto(_conn_id, _conn=None) -> pd.DataFrame:
 def alerta_stock_tienda_mensual(_conn_id, _conn=None) -> pd.DataFrame:
     """Stock de tienda al ultimo dia de cada mes (ultimos 4 meses cerrados) por SKU x COD_CCOSTO."""
     return norm_cols(_run(QUERY_ALERTA_STOCK_TIENDA_MENSUAL, _conn))
+
+
+# Registry of all cached functions for batch clearing.
+# Debe ir DESPUES de todas las funciones que referencia (arriba). Lo usa clear_all().
+_ALL_CACHED = [
+    contenedor_stock, contenedor_dims, contenedor_ventas_12m, vcm_forecast_historico,
+    maestra, ventas_aa, ventas_mes_anterior, ventas_hist_proyeccion, ventas_semanales,
+    ventas_historicas, ventas_ytd, ventas_ytd_aa,
+    ventas_mensual_precio, ventas_semanal_tendencia,
+    ventas_diarias_patron, pesos_diarios, pesos_diarios_canal,
+    event_boosts, event_boosts_sku,
+    stock_onhand, stock_proyeccion, stock_critico_metrics, stock_higiene, instock_store_detail,
+    stock_hist_mensual, familia_modelo,
+    ventas_diarias_90d, tienda_dim,
+    ventas_mtd, ventas_mtd_diaria, dashboard_ventas_mtd, vta_mtd_retail, perfil_sku,
+    instock_hist_tienda, instock_hist_cd,
+    instock_daily_tienda, instock_daily_cd,
+    abc_xyz_fsn,
+    comex_full, dashboard_comex, cumplimiento_comex,
+    leadtimes,
+    agotamiento,
+    syncro_config, transito_sucursales, ventas_90d_sucursal,
+    supply_pedidos_transfer, supply_picking, supply_stock_actual,
+    supply_bultos, supply_despachos_fedex,
+    unified_transit,
+    perfil_sku_ccosto,
+    alerta_stock_tienda_mensual,
+    dt_producto,
+]
 
 
 # ---------------------------------------------------------------------------
