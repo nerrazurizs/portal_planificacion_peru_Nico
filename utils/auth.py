@@ -41,6 +41,7 @@ PLANNER_MODULES = [
     "Maestra Productos",
     "Stock",
     "Comex",
+    "Cumplimiento Comex",
     "Tablas Syncro",
     "Generador Forecast",
     "Proyeccion Stock",
@@ -88,6 +89,8 @@ JEFE_EXTRA_MODULES = [
     "Flujo de Costos",
     "Analisis Contenedor",
     "Analisis Forecast",
+    "Carga Perfil",
+    "Proyecto A",
 ]
 
 ALL_MODULES = PLANNER_MODULES + JEFE_EXTRA_MODULES
