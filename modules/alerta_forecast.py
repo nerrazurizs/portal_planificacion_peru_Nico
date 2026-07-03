@@ -1150,14 +1150,14 @@ def render_alerta_forecast(conn):
     if not perfil_raw.empty:
         pf = perfil_raw.copy()
         pf.columns = pf.columns.str.upper()
-        pf["SKU_PRODUTO"] = pf["SKU_PRODUTO"].astype(str).str.strip() if "SKU_PRODUTO" in pf.columns else pf.get("SKU_PRODUCTO", pd.Series()).astype(str).str.strip()
+        # Renombrar columna SKU independientemente del alias que devuelva Snowflake
+        col_map = {c: "SKU_PRODUCTO" for c in pf.columns if c != "COD_CCOSTO" and ("SKU" in c or "MATERIAL" in c)}
+        pf = pf.rename(columns=col_map)
+        pf["SKU_PRODUCTO"] = pf["SKU_PRODUCTO"].astype(str).str.strip()
         pf["COD_CCOSTO"]  = pf["COD_CCOSTO"].astype(str).str.strip().str.zfill(4)
-        pf = pf.rename(columns={"SKU_PRODUTO": "SKU_PRODUCTO"})
         pf["PERFIL"] = 1
-        alert_df = alert_df.merge(
-            pf[["SKU_PRODUCTO", "COD_CCOSTO", "PERFIL"]].drop_duplicates(),
-            on=["SKU_PRODUCTO", "COD_CCOSTO"], how="left",
-        )
+        pf_merge = pf[["SKU_PRODUCTO", "COD_CCOSTO", "PERFIL"]].drop_duplicates()
+        alert_df = alert_df.merge(pf_merge, on=["SKU_PRODUCTO", "COD_CCOSTO"], how="left")
         alert_df["PERFIL"] = alert_df["PERFIL"].fillna(0).astype(int)
     else:
         alert_df["PERFIL"] = 0
