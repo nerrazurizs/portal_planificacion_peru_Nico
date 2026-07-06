@@ -344,7 +344,11 @@ with ingresos as (
         max(coalesce(
             try_to_date(cast(fecha_ingreso_cd as varchar), 'YYYY-MM-DD'),
             try_to_date(cast(fecha_ingreso_cd as varchar), 'YYYYMMDD')
-        ))                        as fecha_real_ingreso_almacen
+        ))                        as fecha_real_ingreso_almacen,
+        max(coalesce(
+            try_to_date(cast(fecha_cargoready as varchar), 'YYYY-MM-DD'),
+            try_to_date(cast(fecha_cargoready as varchar), 'YYYYMMDD')
+        ))                        as fecha_cargoready
     from db_supply.fct.ft_compras
     group by 1, 2
 )
@@ -374,7 +378,8 @@ select
     try_to_date(cast(c.po_fecha_ingalmacenestimado as varchar), 'YYYYMMDD') as po_fecha_ingreso_almacen_estimado,
     try_to_date(cast(c.dinv_fechaingalmacenestimada as varchar), 'YYYYMMDD') as fecha_ingreso_almacen_estimado_vigente,
     i.fecha_real_ingreso_almacen,
-    p.area, p.linea, p.sublinea, p.marca, p.nom_producto,
+    i.fecha_cargoready,
+    p.area, p.linea, p.sublinea, p.marca, p.mix_oficial, p.nom_producto,
     p.proveedor as nom_proveedor_maestra
 from db_supply.fct.ft_cubo_comex c
 left join ingresos i
@@ -382,7 +387,7 @@ left join ingresos i
     and trim(c.si_codigoproducto) = i.sku_producto
 left join {_PROD} p
     on trim(c.si_codigoproducto) = p.sku_producto
-where c.estadoimportacion in ('Transito', 'Recibido', 'Cerrado')
+where upper(trim(c.estadoimportacion)) in ('TRANSITO', 'RECIBIDO', 'CERRADO', 'SALES ORDER')
 """
 
 QUERY_COMEX_BASE = f"""
