@@ -5,6 +5,7 @@
 # ft_vcm: ID_PERIODO->fecha, COD_PRODUCTO->sku_producto, UNIDADES->cantidad, aporte computed
 # vw_producto: COD_PRODUCTO->sku_producto, DESCRIPCION_PRODUCTO->nom_producto,
 #              GRUPO->area, FAMILIA->sublinea, FEC_ULT_ING_CD->ultimo_ingreso_cd
+# ultimo_costo: viene de dt_producto.costo_calculado (no de vw_producto.costo)
 # ft_compras: NUMERO_OC->po, CODIGO_PRODUCTO_OC->sku_producto, CANTIDAD_OC->cantidad_final_corregida
 #             CANTIDAD_INGRESADA->cantidad_carpeta_recepcionada, MONTO_TOTAL_OC_MN->montomn
 #             FECHA_INGRESO_CD->fecha_recepcion_en_cd, FECHA_EMBARQUE->etd, FECHA_ETA->eta
@@ -38,39 +39,47 @@ _VCM = """(
 
 _PROD = """(
     SELECT
-        cod_producto            AS sku_producto,
-        descripcion_producto    AS nom_producto,
-        descripcion_producto    AS sku_nom_producto,
-        grupo                   AS area,
-        linea,
-        familia                 AS sublinea,
-        marca,
-        modelo,
-        CASE UPPER(TRIM(mix_oficial))
+        p.cod_producto            AS sku_producto,
+        p.descripcion_producto    AS nom_producto,
+        p.descripcion_producto    AS sku_nom_producto,
+        p.grupo                   AS area,
+        p.linea,
+        p.familia                 AS sublinea,
+        p.marca,
+        p.modelo,
+        CASE UPPER(TRIM(p.mix_oficial))
             WHEN 'MIX' THEN 'MIX'
             WHEN 'IO'  THEN 'IN & OUT'
             WHEN 'FM'  THEN 'FUERA MIX'
-            ELSE UPPER(TRIM(mix_oficial))
+            ELSE UPPER(TRIM(p.mix_oficial))
         END                         AS mix_oficial,
-        mix,
-        procedencia,
-        cod_proveedor,
-        proveedor,
-        costo                   AS ultimo_costo,
-        pvp,
-        precio_fob              AS costo_fob_usd,
-        tipo_cambio,
-        factor_importacion,
-        fec_ult_ing_cd          AS ultimo_ingreso_cd,
-        meses_ingreso_cd,
-        rango_meses_aging,
-        costo_proyectado,
-        sku_proveedor,
-        moderno,
-        outlet,
-        tradicional,
-        oferta
-    FROM db_dimensiones.dim.vw_producto
+        p.mix,
+        p.procedencia,
+        p.cod_proveedor,
+        p.proveedor,
+        dp.costo_calculado        AS ultimo_costo,
+        p.pvp,
+        p.precio_fob              AS costo_fob_usd,
+        p.tipo_cambio,
+        p.factor_importacion,
+        p.fec_ult_ing_cd          AS ultimo_ingreso_cd,
+        p.meses_ingreso_cd,
+        p.rango_meses_aging,
+        p.costo_proyectado,
+        p.sku_proveedor,
+        p.moderno,
+        p.outlet,
+        p.tradicional,
+        p.oferta
+    FROM db_dimensiones.dim.vw_producto p
+    LEFT JOIN (
+        SELECT cod_producto, costo_calculado
+        FROM db_dimensiones.dim.dt_producto
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY cod_producto
+            ORDER BY costo_calculado DESC NULLS LAST
+        ) = 1
+    ) dp ON p.cod_producto = dp.cod_producto
 )"""
 
 _COMPRAS = f"""(

@@ -150,6 +150,7 @@ def run_stock_simulation(df):
             "VENTA_FUL_TIENDA_UND": ful_tienda,
             "VENTA_FUL_ETAIL_UND": ful_etail,
             "VENTA_FUL_MAYOR_UND": ful_mayor,
+            "VENTA_FUL_TOTAL_UND": ful_tienda + ful_etail + ful_mayor,
             "LOST_SALES_TIENDA": lost_tienda,
             "LOST_SALES_CD": lost_cd_total,
             "LOST_SALES_ETAIL": lost_etail,
@@ -697,8 +698,14 @@ def _expand_comex_to_daily(comex, maestra):
     c_rec = pd.to_numeric(comex[col_cant_rec], errors="coerce").fillna(0) if col_cant_rec else 0
     comex["PENDIENTE"] = (c_final - c_rec).clip(lower=0)
 
+    # Solo considerar ETAs originales del año en curso y el siguiente. Pendientes
+    # de anos anteriores (aunque sigan sin recepcionar) se excluyen por completo,
+    # incluso si son atrasados (no se arrastran al mes en curso/siguiente).
+    _anio_actual = _eta_today.year
+    _anio_valido = comex["ETA_ORIGINAL"].dt.year.isin([_anio_actual, _anio_actual + 1])
+
     # Filter valid rows
-    comex = comex[comex["ETA_ORIGINAL"].notna() & (comex["PENDIENTE"] > 0)].copy()
+    comex = comex[comex["ETA_ORIGINAL"].notna() & (comex["PENDIENTE"] > 0) & _anio_valido].copy()
 
     if comex.empty:
         return pd.DataFrame(columns=["SKU_PRODUCTO", "FECHA", "ETA"])
@@ -839,6 +846,7 @@ def run_stock_simulation_daily(df):
             "VENTA_FUL_TIENDA_UND": ful_tienda,
             "VENTA_FUL_ETAIL_UND": ful_etail,
             "VENTA_FUL_MAYOR_UND": ful_mayor,
+            "VENTA_FUL_TOTAL_UND": ful_tienda + ful_etail + ful_mayor,
             "LOST_SALES_TIENDA": lost_tienda,
             "LOST_SALES_CD": lost_cd_total,
             "LOST_SALES_ETAIL": lost_etail,
@@ -1156,8 +1164,16 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
     # =========================
     # 6. Process MTD Sales
     # =========================
-    mtd_map = {"MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL"}
-    ventas_mtd["CANAL_STD"] = ventas_mtd["COD_CANAL"].map(mtd_map).fillna("TIENDA")
+    # Solo Retail (03), Mayorista (02) y Etail (06). Canales no mapeados
+    # (ej. Comercial) se excluyen en vez de caer en TIENDA.
+    mtd_map = {
+        "03": "TIENDA", "02": "MAYORISTA", "06": "ETAIL",
+        "3":  "TIENDA", "2":  "MAYORISTA", "6":  "ETAIL",
+        "MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL",
+        "TIENDA": "TIENDA", "MAYORISTA": "MAYORISTA",
+    }
+    ventas_mtd["CANAL_STD"] = ventas_mtd["COD_CANAL"].astype(str).str.strip().map(mtd_map)
+    ventas_mtd = ventas_mtd[ventas_mtd["CANAL_STD"].notna()].copy()
 
     v_mtd_piv = (
         ventas_mtd.pivot_table(index="SKU_PRODUCTO", columns="CANAL_STD", values="CANTIDAD_MTD", aggfunc="sum")
@@ -1240,8 +1256,13 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
 
         comex["PENDIENTE"] = (c_final - c_rec).clip(lower=0)
 
+        # Solo considerar ETAs originales del año en curso y el siguiente. Pendientes
+        # de anos anteriores (aunque sigan sin recepcionar) se excluyen por completo.
+        _anio_actual = pd.Timestamp.today().year
+        _anio_valido = comex["ETA_ORIGINAL"].dt.year.isin([_anio_actual, _anio_actual + 1])
+
         # Filter: only rows with valid ETA and positive pending quantity
-        comex = comex[comex["ETA_ORIGINAL"].notna() & (comex["PENDIENTE"] > 0)].copy()
+        comex = comex[comex["ETA_ORIGINAL"].notna() & (comex["PENDIENTE"] > 0) & _anio_valido].copy()
 
         eta_agg = (
             comex.groupby(["SKU_PRODUCTO", "PERIODO"], as_index=False)["PENDIENTE"]
@@ -1489,6 +1510,8 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
     # 10f. Previous month prices (additional fallback from ventas_hist)
     if not ventas_hist.empty:
         try:
+            # Solo Retail (03), Mayorista (02) y Etail (06). Canales no mapeados
+            # (ej. Comercial) se excluyen en vez de caer en TIENDA.
             hist_price_map = {
                 "03": "TIENDA", "02": "MAYORISTA", "06": "ETAIL",
                 "3":  "TIENDA", "2":  "MAYORISTA", "6":  "ETAIL",
@@ -1497,8 +1520,9 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
             }
             vh_price = ventas_hist.copy()
             vh_price["CANAL_STD"] = (
-                vh_price["COD_CANAL"].astype(str).str.strip().map(hist_price_map).fillna("TIENDA")
+                vh_price["COD_CANAL"].astype(str).str.strip().map(hist_price_map)
             )
+            vh_price = vh_price[vh_price["CANAL_STD"].notna()].copy()
             vh_price["PRECIO_PROMEDIO"] = np.where(
                 vh_price["CANTIDAD_MES"] > 0,
                 vh_price["NETO_MES"] / vh_price["CANTIDAD_MES"],
@@ -1728,6 +1752,7 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
         "STOCK_INICIAL_TOTAL", "STOCK_FINAL_TOTAL", "STOCK_DISPONIBLE",
         "FORECAST_COMPRA", "ETA",
         "DEMANDA_SIM_TIENDA", "DEMANDA_SIM_ETAIL", "DEMANDA_SIM_MAYOR", "DEMANDA_TOTAL",
+        "VENTA_FUL_TIENDA_UND", "VENTA_FUL_ETAIL_UND", "VENTA_FUL_MAYOR_UND", "VENTA_FUL_TOTAL_UND",
         "PERFIL_TIENDAS",
         "PRECIO_USADO_TIENDA",
         "LOST_SALES_TIENDA", "LOST_SALES_CD", "LOST_SALES_ETAIL", "LOST_SALES_MAYOR",
@@ -1763,7 +1788,8 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
     # ============================================================
     if not ventas_aa.empty and "SKU_PRODUCTO" in ventas_aa.columns:
         try:
-            # Map channels
+            # Map channels — solo Retail (03), Mayorista (02) y Etail (06).
+            # Canales no mapeados (ej. Comercial) se excluyen en vez de caer en TIENDA.
             aa_chan_map = {
                 "03": "TIENDA", "02": "MAYORISTA", "06": "ETAIL",
                 "3":  "TIENDA", "2":  "MAYORISTA", "6":  "ETAIL",
@@ -1771,8 +1797,9 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
                 "TIENDA": "TIENDA", "MAYORISTA": "MAYORISTA",
             }
             ventas_aa["CANAL_STD"] = (
-                ventas_aa["COD_CANAL"].astype(str).str.strip().map(aa_chan_map).fillna("TIENDA")
+                ventas_aa["COD_CANAL"].astype(str).str.strip().map(aa_chan_map)
             )
+            ventas_aa = ventas_aa[ventas_aa["CANAL_STD"].notna()].copy()
             ventas_aa["PERIODO"] = pd.to_datetime(ventas_aa["PERIODO"])
             ventas_aa["MES"] = ventas_aa["PERIODO"].dt.month
 
@@ -1885,6 +1912,8 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
     if not ventas_hist.empty and "SKU_PRODUCTO" in ventas_hist.columns and "PERIODO" in ventas_hist.columns:
         try:
             ventas_hist["PERIODO"] = pd.to_datetime(ventas_hist["PERIODO"])
+            # Solo Retail (03), Mayorista (02) y Etail (06). Canales no mapeados
+            # (ej. Comercial) se excluyen en vez de caer en TIENDA.
             hist_mtd_map = {
                 "03": "TIENDA", "02": "MAYORISTA", "06": "ETAIL",
                 "3":  "TIENDA", "2":  "MAYORISTA", "6":  "ETAIL",
@@ -1892,8 +1921,9 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
                 "TIENDA": "TIENDA", "MAYORISTA": "MAYORISTA",
             }
             ventas_hist["CANAL_STD"] = (
-                ventas_hist["COD_CANAL"].astype(str).str.strip().map(hist_mtd_map).fillna("TIENDA")
+                ventas_hist["COD_CANAL"].astype(str).str.strip().map(hist_mtd_map)
             )
+            ventas_hist = ventas_hist[ventas_hist["CANAL_STD"].notna()].copy()
 
             all_hist_frames = []
             for periodo_h, vh_period in ventas_hist.groupby("PERIODO"):
@@ -1955,6 +1985,9 @@ def process_projection(file_forecast, file_compra, file_precios, conn,
                             columns=[c for c in hist_rows.columns if "_TEMP" in c], errors="ignore"
                         )
 
+                hist_rows["VENTA_FUL_TOTAL_UND"] = (
+                    hist_rows["VENTA_FUL_TIENDA_UND"] + hist_rows["VENTA_FUL_ETAIL_UND"] + hist_rows["VENTA_FUL_MAYOR_UND"]
+                )
                 hist_rows["COGS_RES_TOTAL"] = hist_agg["CANTIDAD_MES"] * hist_rows["COSTO_UNITARIO"]
                 hist_rows["APORTE_RES_TOTAL"] = hist_rows["VN_RES_TOTAL"] - hist_rows["COGS_RES_TOTAL"]
                 hist_rows["MARGEN_RES_TOTAL"] = np.where(
@@ -2224,16 +2257,19 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
         return None
 
     # ── 6. Process MTD Sales ────────────────────────────────────────────
+    # Solo Retail (03), Mayorista (02) y Etail (06). Canales no mapeados
+    # (ej. Comercial) se excluyen en vez de caer en TIENDA.
     mtd_map = {
         "03": "TIENDA", "02": "MAYORISTA", "06": "ETAIL",
         "3":  "TIENDA", "2":  "MAYORISTA", "6":  "ETAIL",
         "MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL",
         "TIENDA": "TIENDA", "MAYORISTA": "MAYORISTA",
     }
-    ventas_mtd["CANAL_STD"] = (
-        ventas_mtd["COD_CANAL"].astype(str).str.strip().map(mtd_map).fillna("TIENDA")
-        if "COD_CANAL" in ventas_mtd.columns else "TIENDA"
-    )
+    if "COD_CANAL" in ventas_mtd.columns:
+        ventas_mtd["CANAL_STD"] = ventas_mtd["COD_CANAL"].astype(str).str.strip().map(mtd_map)
+        ventas_mtd = ventas_mtd[ventas_mtd["CANAL_STD"].notna()].copy()
+    else:
+        ventas_mtd["CANAL_STD"] = "TIENDA"
     ventas_mtd["SKU_PRODUCTO"] = ventas_mtd["SKU_PRODUCTO"].astype(str).str.strip().str.upper() if "SKU_PRODUCTO" in ventas_mtd.columns else ""
 
     # ── 7. Process COMEX → daily arrivals (ETA + 10 days) ───────────────
@@ -2369,10 +2405,17 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
             vd["FECHA"] = pd.to_datetime(vd["FECHA"]).dt.normalize()
             vd["SKU_PRODUCTO"] = vd["SKU_PRODUCTO"].astype(str).str.strip().str.upper()
 
-            # Map channels
-            _ch_map = {"MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL"}
+            # Map channels — solo Retail (03), Mayorista (02) y Etail (06).
+            # Canales no mapeados (ej. Comercial) se excluyen en vez de caer en TIENDA.
+            _ch_map = {
+                "03": "TIENDA", "02": "MAYORISTA", "06": "ETAIL",
+                "3":  "TIENDA", "2":  "MAYORISTA", "6":  "ETAIL",
+                "MINOR": "TIENDA", "MAYOR": "MAYORISTA", "ETAIL": "ETAIL",
+                "TIENDA": "TIENDA", "MAYORISTA": "MAYORISTA",
+            }
             if "COD_CANAL" in vd.columns:
-                vd["CANAL_STD"] = vd["COD_CANAL"].map(_ch_map).fillna("TIENDA")
+                vd["CANAL_STD"] = vd["COD_CANAL"].astype(str).str.strip().map(_ch_map)
+                vd = vd[vd["CANAL_STD"].notna()].copy()
             else:
                 vd["CANAL_STD"] = "TIENDA"
 
@@ -2397,6 +2440,9 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
             for _c in ["VENTA_FUL_TIENDA_UND", "VENTA_FUL_ETAIL_UND", "VENTA_FUL_MAYOR_UND"]:
                 if _c not in df_h.columns:
                     df_h[_c] = 0.0
+            df_h["VENTA_FUL_TOTAL_UND"] = (
+                df_h["VENTA_FUL_TIENDA_UND"] + df_h["VENTA_FUL_ETAIL_UND"] + df_h["VENTA_FUL_MAYOR_UND"]
+            )
 
             # Add neto by channel
             neto_piv = neto_piv.rename(columns={
@@ -2590,6 +2636,8 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
 
     if not ventas_hist.empty:
         try:
+            # Solo Retail (03), Mayorista (02) y Etail (06). Canales no mapeados
+            # (ej. Comercial) se excluyen en vez de caer en TIENDA.
             hist_price_map = {
                 "03": "TIENDA", "02": "MAYORISTA", "06": "ETAIL",
                 "3":  "TIENDA", "2":  "MAYORISTA", "6":  "ETAIL",
@@ -2598,8 +2646,9 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
             }
             vh_price = ventas_hist.copy()
             vh_price["CANAL_STD"] = (
-                vh_price["COD_CANAL"].astype(str).str.strip().map(hist_price_map).fillna("TIENDA")
+                vh_price["COD_CANAL"].astype(str).str.strip().map(hist_price_map)
             )
+            vh_price = vh_price[vh_price["CANAL_STD"].notna()].copy()
             vh_price["PRECIO_PROMEDIO"] = np.where(
                 vh_price["CANTIDAD_MES"] > 0, vh_price["NETO_MES"] / vh_price["CANTIDAD_MES"], 0)
             hist_prices = (
@@ -2787,6 +2836,12 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
                     # Drop _HIST temp columns
                     combined = combined.drop(columns=[f"{c}_HIST" for c in _sum_cols], errors="ignore")
 
+                    combined["VENTA_FUL_TOTAL_UND"] = (
+                        combined["VENTA_FUL_TIENDA_UND"]
+                        + combined["VENTA_FUL_ETAIL_UND"]
+                        + combined["VENTA_FUL_MAYOR_UND"]
+                    )
+
                     # Recalculate COGS, APORTE, MARGEN por canal y total
                     for canal in ["TIENDA", "ETAIL", "MAYOR"]:
                         combined[f"COGS_RES_{canal}"] = (
@@ -2846,6 +2901,7 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
 
             # Peru cod_canal codes: '03'=TIENDA/MINOR, '02'=MAYORISTA, '06'=ETAIL
             # Also support text names as fallback (Chile-style)
+            # Canales no mapeados (ej. Comercial) se excluyen en vez de caer en TIENDA.
             _hmap = {
                 "03": "TIENDA", "02": "MAYORISTA", "06": "ETAIL",
                 "3":  "TIENDA", "2":  "MAYORISTA", "6":  "ETAIL",
@@ -2853,15 +2909,19 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
                 "TIENDA": "TIENDA", "MAYORISTA": "MAYORISTA",
             }
             vh = ventas_hist.copy()
-            vh["CANAL_STD"] = (
-                vh["COD_CANAL"].astype(str).str.strip().map(_hmap).fillna("TIENDA")
-                if "COD_CANAL" in vh.columns else "TIENDA"
-            )
+            if "COD_CANAL" in vh.columns:
+                vh["CANAL_STD"] = vh["COD_CANAL"].astype(str).str.strip().map(_hmap)
+                _n_excluidos = int(vh["CANAL_STD"].isna().sum())
+                vh = vh[vh["CANAL_STD"].notna()].copy()
+            else:
+                vh["CANAL_STD"] = "TIENDA"
+                _n_excluidos = 0
             # Diagnóstico: muestra cómo quedó el mapeo de canales
             _canal_dist = vh["CANAL_STD"].value_counts()
             st.info(
                 f"🔀 Mapeo CANAL_STD resultante: "
                 + ", ".join(f"{k}={v}" for k, v in _canal_dist.items())
+                + (f" | excluidos otros canales (ej. Comercial)={_n_excluidos}" if _n_excluidos else "")
             )
             vh["PERIODO"] = pd.to_datetime(vh["PERIODO"])
             vh["CANTIDAD_MES"] = pd.to_numeric(vh.get("CANTIDAD_MES", 0), errors="coerce").fillna(0)
@@ -2884,6 +2944,9 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
             for _c in ["VENTA_FUL_TIENDA_UND", "VENTA_FUL_ETAIL_UND", "VENTA_FUL_MAYOR_UND"]:
                 if _c not in h_rows.columns:
                     h_rows[_c] = 0.0
+            h_rows["VENTA_FUL_TOTAL_UND"] = (
+                h_rows["VENTA_FUL_TIENDA_UND"] + h_rows["VENTA_FUL_ETAIL_UND"] + h_rows["VENTA_FUL_MAYOR_UND"]
+            )
 
             neto_piv = neto_piv.rename(columns={
                 "TIENDA": "VN_RES_TIENDA",
@@ -3059,7 +3122,8 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
     # ============================================================
     if not ventas_aa.empty and "SKU_PRODUCTO" in ventas_aa.columns:
         try:
-            # Map channels
+            # Map channels — solo Retail (03), Mayorista (02) y Etail (06).
+            # Canales no mapeados (ej. Comercial) se excluyen en vez de caer en TIENDA.
             aa_chan_map = {
                 "03": "TIENDA", "02": "MAYORISTA", "06": "ETAIL",
                 "3":  "TIENDA", "2":  "MAYORISTA", "6":  "ETAIL",
@@ -3067,8 +3131,9 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
                 "TIENDA": "TIENDA", "MAYORISTA": "MAYORISTA",
             }
             ventas_aa["CANAL_STD"] = (
-                ventas_aa["COD_CANAL"].astype(str).str.strip().map(aa_chan_map).fillna("TIENDA")
+                ventas_aa["COD_CANAL"].astype(str).str.strip().map(aa_chan_map)
             )
+            ventas_aa = ventas_aa[ventas_aa["CANAL_STD"].notna()].copy()
             ventas_aa["PERIODO"] = pd.to_datetime(ventas_aa["PERIODO"])
             ventas_aa["MES"] = ventas_aa["PERIODO"].dt.month
 
@@ -3232,6 +3297,7 @@ def process_projection_daily(file_forecast, file_compra, file_precios, conn,
         "STOCK_INICIAL_TOTAL", "STOCK_FINAL_TOTAL", "STOCK_DISPONIBLE",
         "FORECAST_COMPRA", "ETA",
         "DEMANDA_SIM_TIENDA", "DEMANDA_SIM_ETAIL", "DEMANDA_SIM_MAYOR", "DEMANDA_TOTAL",
+        "VENTA_FUL_TIENDA_UND", "VENTA_FUL_ETAIL_UND", "VENTA_FUL_MAYOR_UND", "VENTA_FUL_TOTAL_UND",
         # ── MTD Actual (venta real acumulada del mes en curso) ──
         "VTA_ACTUAL_TIENDA", "VTA_ACTUAL_ETAIL", "VTA_ACTUAL_MAYOR",
         "DEMANDA_ACTUAL_TIENDA", "DEMANDA_ACTUAL_ETAIL", "DEMANDA_ACTUAL_MAYOR",
@@ -3348,6 +3414,7 @@ README_DATA = [
     ["Venta Restricta", "VENTA_FUL_TIENDA_UND", "Unidades vendidas en Tienda = min(demanda_dia, stock_tienda_apertura + carga_dia). La venta se limita al stock fisicamente disponible en tienda cada dia"],
     ["Venta Restricta", "VENTA_FUL_ETAIL_UND", "Unidades vendidas E-commerce = min(demanda_dia, proporcion de stock CD post-transfer). El stock CD se pro-ratea entre Etail y Mayorista segun proporcion de demanda"],
     ["Venta Restricta", "VENTA_FUL_MAYOR_UND", "Unidades vendidas Mayorista = min(demanda_dia, proporcion de stock CD post-transfer). Pro-rateo con Etail"],
+    ["Venta Restricta", "VENTA_FUL_TOTAL_UND", "VENTA_FUL_TIENDA_UND + VENTA_FUL_ETAIL_UND + VENTA_FUL_MAYOR_UND. Solo considera canales Retail, Etail y Mayorista (excluye Comercial y otros canales)"],
     ["Venta Restricta", "", "NOTA: En meses HISTORICO y REAL+FC (parte real), la venta restricta = venta real (no hay restriccion de stock porque ya ocurrio)"],
     ["Venta Restricta", "", ""],
     # ── VENTA PERDIDA (LOST SALES) ──
@@ -3373,7 +3440,7 @@ README_DATA = [
     ["Costos", "ORIGEN_COSTO", "Fuente del costo: ULTIMO_COSTO (del sistema), LANDED_CALC (FOB x Factor x TC), LANDED_FACTOR_IMPUTADO (con factor estimado), SIN_COSTO"],
     ["Costos", "FACTOR_IMPORTACION", "Multiplicador que convierte FOB USD a costo CLP puesto en bodega. Incluye flete, seguro, arancel, gastos portuarios. Rango tipico: 1.3 a 2.5"],
     ["Costos", "COSTO_FOB_USD", "Costo FOB (Free on Board) en dolares segun maestra de productos"],
-    ["Costos", "ULTIMO_COSTO", "Ultimo costo registrado en el sistema ERP (en CLP). Primera prioridad en el fallback"],
+    ["Costos", "ULTIMO_COSTO", "Costo calculado del producto (COSTO_CALCULADO de DB_DIMENSIONES.DIM.DT_PRODUCTO, en PEN). Primera prioridad en el fallback"],
     ["Costos", "FLAG_SIN_COSTO", "Flag booleano: True si el SKU no tiene costo valido (ORIGEN_COSTO=SIN_COSTO o COSTO_UNITARIO<=0). Util para filtrar y limpiar calculos de margen"],
     ["Costos", "", "JERARQUIA DE FALLBACK para COSTO_UNITARIO:"],
     ["Costos", "", "  1) ULTIMO_COSTO (del sistema ERP, si existe y > 0)"],
