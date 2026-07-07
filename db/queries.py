@@ -399,6 +399,28 @@ left join {_PROD} p
 where upper(trim(c.estadoimportacion)) in ('TRANSITO', 'RECIBIDO', 'CERRADO', 'SALES ORDER')
 """
 
+# Estado de importacion por PO/SKU, SIN el filtro de estados de
+# QUERY_CUMPLIMIENTO_COMEX (que solo mira Transito/Recibido/Cerrado para medir
+# cumplimiento de embarque). Alertas Quiebre necesita el estado real de TODAS
+# las OC pendientes (incluye 'Sales Order', 'Solicitud PI' y otros previos a
+# booking), o un PO ya cerrado tapaba silenciosamente el estado real de un PO
+# pendiente del mismo SKU al agregar por SKU.
+#
+# Universo real de c.estadoimportacion (verificado en ft_cubo_comex):
+# Cerrado, Recibido (terminales) / Sales Order, Transito, Solicitud PI (en curso).
+# NO se usa ft_compras.fecha_ingreso_cd para decidir "pendiente": esa fecha
+# puede venir vacia en ft_compras aun cuando ft_cubo_comex ya marco el PO como
+# 'Cerrado' (cierre administrativo vs. recepcion fisica registrada por separado
+# y con demora) -> el estado real siempre es c.estadoimportacion tal cual viene.
+QUERY_ESTADO_IMPORTACION_SKU = """
+select
+    trim(c.po_numpedidocompra)  as po,
+    trim(c.si_codigoproducto)   as sku_producto,
+    c.estadoimportacion         as estado_importacion,
+    try_to_date(cast(c.po_fechadelivery as varchar), 'YYYYMMDD') as po_fecha_delivery
+from db_supply.fct.ft_cubo_comex c
+"""
+
 QUERY_COMEX_BASE = f"""
 SELECT *
 FROM {_COMPRAS} c

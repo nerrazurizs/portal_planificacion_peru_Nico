@@ -1,10 +1,14 @@
 """Alertas de Quiebre de Stock - Prediccion de desabastecimiento por SKU."""
 
+import io
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+from openpyxl.styles import Font
+from openpyxl.utils import get_column_letter
 
 from db.cache import cached_query as cq
 from utils.filters import norm_cols, human_format
@@ -78,7 +82,11 @@ def _load_data(conn):
         tienda_dim = cq.tienda_dim(conn)
         leadtimes = cq.leadtimes(conn)
         stock_cd_hist = cq.stock_cd_diario_6m(conn)
-    return stock, ventas, maestra, comex, stock_higiene, tienda_dim, leadtimes, stock_cd_hist
+        estado_imp = cq.estado_importacion_sku(conn)
+    return (
+        stock, ventas, maestra, comex, stock_higiene, tienda_dim, leadtimes,
+        stock_cd_hist, estado_imp,
+    )
 
 
 def _process_stock(stock):
@@ -181,6 +189,52 @@ def _process_comex(comex):
         PROXIMA_ETA=("ETA_FINAL", "min"),
         QTY_EN_TRANSITO=("QTY_PENDIENTE", "sum"),
     )
+    return agg
+
+
+# Estados terminales de una OC en ft_cubo_comex.estadoimportacion (universo
+# verificado: Cerrado, Recibido, Sales Order, Transito, Solicitud PI). Todo lo
+# que no sea terminal se considera "pendiente" (en curso).
+_ESTADOS_IMPORTACION_TERMINALES = {"CERRADO", "RECIBIDO"}
+
+
+def _process_estado_importacion(estado_imp):
+    """Estado de importacion real por SKU (ft_cubo_comex, SIN el filtro de
+    Transito/Recibido/Cerrado que usa Cumplimiento COMEX). Un SKU puede tener
+    varios PO: se prioriza el PO pendiente (estado no terminal) con la fecha
+    de delivery mas proxima, igual criterio que PROXIMA_ETA en _process_comex.
+
+    Importante:
+    - Se usa la fuente SIN filtro de estado (QUERY_ESTADO_IMPORTACION_SKU)
+      para no perder OC en estados previos a booking (ej. 'Sales Order'); si
+      se filtrara antes en SQL, un PO ya 'Cerrado' del mismo SKU podia tapar
+      silenciosamente el estado real de la OC pendiente.
+    - "Pendiente" se decide por c.estadoimportacion (no terminal), NO por la
+      fecha de ingreso a almacen de ft_compras: esa fecha puede venir vacia
+      aun cuando el PO ya esta 'Cerrado' en ft_cubo_comex (cierre
+      administrativo vs. recepcion fisica registrada por separado), lo que
+      hacia que un PO 'Cerrado' se marcara como pendiente por error y tapara
+      la OC realmente en curso (ej. 'Sales Order') del mismo SKU.
+    """
+    empty = pd.DataFrame(columns=["SKU_PRODUCTO", "ESTADO_IMPORTACION"])
+    if estado_imp is None or estado_imp.empty:
+        return empty
+    if "SKU_PRODUCTO" not in estado_imp.columns or "ESTADO_IMPORTACION" not in estado_imp.columns:
+        return empty
+
+    df = estado_imp.copy()
+    df["SKU_PRODUCTO"] = df["SKU_PRODUCTO"].astype(str).str.strip().str.upper()
+    df["ESTADO_IMPORTACION"] = df["ESTADO_IMPORTACION"].astype(str).str.strip()
+    df["_PENDIENTE"] = ~df["ESTADO_IMPORTACION"].str.upper().isin(_ESTADOS_IMPORTACION_TERMINALES)
+
+    sort_cols = ["SKU_PRODUCTO", "_PENDIENTE"]
+    ascending = [True, False]
+    if "PO_FECHA_DELIVERY" in df.columns:
+        sort_cols.append("PO_FECHA_DELIVERY")
+        ascending.append(True)
+
+    df = df.sort_values(sort_cols, ascending=ascending)
+    agg = df.groupby("SKU_PRODUCTO", as_index=False).first()[["SKU_PRODUCTO", "ESTADO_IMPORTACION"]]
     return agg
 
 
@@ -300,17 +354,25 @@ def _exclude_skus(df):
     return df[mask].copy()
 
 
-def _add_pareto_rank(df, value_col="VN_TOTAL_90D", threshold=_PARETO_THRESHOLD):
+def _add_pareto_rank(df, value_col="VN_TOTAL_90D", threshold=_PARETO_THRESHOLD, mix_col="MIX"):
     """Agrega columna PARETO: ranking 1..N (1 = mayor venta) para los SKUs que
     explican el `threshold` (80% default) acumulado de la venta (VN). Los SKUs
     fuera del 80% quedan con PARETO vacio (NaN) -> ordenar/filtrar por esta
     columna reemplaza el checkbox de Pareto directamente en la tabla.
+
+    El calculo solo considera SKUs con MIX en {"MIX", "IN & OUT"} (a pedido
+    del negocio); "FUERA MIX" (y cualquier otro valor) queda excluido del
+    ranking y su PARETO siempre vacio.
     """
     df = df.copy()
     df["PARETO"] = np.nan
     if df.empty or value_col not in df.columns:
         return df
-    vals = pd.to_numeric(df[value_col], errors="coerce").fillna(0)
+    if mix_col in df.columns:
+        elegibles = df[mix_col].astype(str).str.strip().str.upper().isin(["MIX", "IN & OUT"])
+    else:
+        elegibles = pd.Series(True, index=df.index)
+    vals = pd.to_numeric(df.loc[elegibles, value_col], errors="coerce").fillna(0)
     total = vals.sum()
     if total <= 0:
         return df
@@ -330,7 +392,7 @@ def _add_pareto_rank(df, value_col="VN_TOTAL_90D", threshold=_PARETO_THRESHOLD):
 # ============================================================================
 
 def _build_alert_table(stock, ventas, maestra, comex, stock_higiene=None, tienda_dim=None,
-                        leadtimes=None, stock_cd_hist=None):
+                        leadtimes=None, stock_cd_hist=None, estado_imp=None):
     """Build the complete alert DataFrame."""
     stk = _process_stock(stock)
     stk = _exclude_skus(stk)  # fuera del reporte: sufijo -PV y lista explicita del negocio
@@ -409,6 +471,17 @@ def _build_alert_table(stock, ventas, maestra, comex, stock_higiene=None, tienda
         (df["PROXIMA_ETA"] - df["FECHA_QUIEBRE_EST"]).dt.days,
         np.nan,
     )
+
+    # Estado de importacion (ft_cubo_comex, sin filtro de estado): solo aplica
+    # a SKUs con PROXIMA_ETA vigente (compra en camino); el resto queda vacio.
+    est_imp = _process_estado_importacion(estado_imp)
+    if not est_imp.empty:
+        df["_SKU_KEY"] = df["SKU_PRODUCTO"].astype(str).str.strip().str.upper()
+        df = df.merge(est_imp.rename(columns={"SKU_PRODUCTO": "_SKU_KEY"}), on="_SKU_KEY", how="left")
+        df = df.drop(columns="_SKU_KEY")
+    else:
+        df["ESTADO_IMPORTACION"] = np.nan
+    df.loc[df["PROXIMA_ETA"].isna(), "ESTADO_IMPORTACION"] = np.nan
 
     # Leadtime de compra por SKU (Tablas Syncro > Leadtimes Proveedor SKU)
     lt = _process_leadtimes(leadtimes)
@@ -744,6 +817,94 @@ def _render_heatmap(df):
     st.plotly_chart(fig, use_container_width=True)
 
 
+# Descripcion de cada columna del Detalle por SKU, para la hoja "Manual" del
+# Excel descargable. Solo se listan las que esten realmente presentes en el
+# export (columnas ausentes en df_export se omiten automaticamente).
+_COLUMN_DESCRIPTIONS = {
+    "SKU_PRODUCTO": "Codigo unico del producto (SKU).",
+    "AREA": "Area de negocio a la que pertenece el SKU.",
+    "MIX": "Clasificacion oficial del SKU: MIX, IN & OUT o FUERA MIX.",
+    "PROCEDENCIA": "Origen del producto (nacional o importado).",
+    "LINEA": "Linea de producto.",
+    "SUBLINEA": "Sublinea de producto.",
+    "MARCA": "Marca del producto.",
+    "SKU_NOM_PRODUCTO": "Nombre/descripcion comercial del producto.",
+    "SEMAFORO": "Clasificacion de riesgo de quiebre: CRITICO, ALERTA, OK o SIN VENTA, segun dias de cobertura y si hay reposicion en camino.",
+    "ALERTA_OC": "'PONER ORDEN URGENTE' si no hay compra en camino y la cobertura es menor o igual al lead time; 'Compra en Transito' si ya hay una compra en camino que cumple esa condicion.",
+    "DIAS_COBERTURA": "Dias estimados de stock disponible al ritmo de venta actual (stock total / venta diaria promedio).",
+    "LT": "Lead time de compra (dias) del proveedor para el SKU.",
+    "STOCK_TOTAL": "Stock total disponible (CD + tiendas), en unidades.",
+    "VENTA_DIARIA_PROM": "Venta promedio diaria (unidades) de los ultimos 90 dias.",
+    "VENTA_TOTAL_90D": "Venta total (unidades) de los ultimos 90 dias.",
+    "VENTA_PERDIDA_CD": "Venta neta estimada (S/.) perdida por el quiebre vigente en el CD, desde que comenzo el quiebre hasta hoy.",
+    "FECHA_QUIEBRE_CD": "Fecha en que comenzo el quiebre vigente en el Centro de Distribucion (stock CD por debajo de la venta diaria promedio).",
+    "FECHA_QUIEBRE_EST": "Fecha estimada en la que el SKU se quedaria sin stock, segun el ritmo de venta actual.",
+    "DIAS_GAP_QUIEBRE_CD": "Diferencia en dias entre la proxima llegada de mercaderia (PROXIMA_ETA) y la fecha de quiebre en CD.",
+    "TIENE_REPO": "Indica si el SKU tiene una reposicion (compra) en camino con cantidad pendiente mayor a cero.",
+    "PROXIMA_ETA": "Fecha estimada de la proxima llegada de mercaderia en transito (COMEX).",
+    "ESTADO_IMPORTACION": "Estado actual de la orden de compra en curso mas proxima a llegar (ej. Sales Order, Solicitud PI, Transito, Recibido, Cerrado). Vacio si el SKU no tiene PROXIMA_ETA.",
+    "QTY_EN_TRANSITO": "Cantidad de unidades ya ordenadas y pendientes de llegar (aun no recepcionadas).",
+    "DIAS_GAP": "Diferencia en dias entre la fecha estimada de quiebre de stock y la proxima llegada de mercaderia.",
+    "PARETO": "Ranking de importancia por venta (1 = mayor venta) entre los SKUs que explican el 80% de la venta acumulada, considerando solo SKUs con MIX = 'MIX' o 'IN & OUT'. Vacio si el SKU esta Fuera de Mix o fuera de ese 80%.",
+    "SUPERVISORES": "Supervisores de tienda responsables de las tiendas donde el SKU tiene stock positivo.",
+}
+
+
+def _build_export_excel(df, sheet_name="Detalle SKU"):
+    """Excel de Detalle por SKU: hoja "Manual" con la descripcion de cada
+    columna (primera hoja), seguida de los datos con fuente tamano 8, columnas
+    ajustadas al ancho del texto que contiene cada una, y Venta Perdida CD en
+    formato moneda "S/." (a pedido del negocio).
+    """
+    df_x = df.copy()
+    for col in df_x.columns:
+        if pd.api.types.is_bool_dtype(df_x[col]):
+            df_x[col] = df_x[col].astype(int)
+        elif not pd.api.types.is_numeric_dtype(df_x[col]):
+            df_x[col] = df_x[col].fillna("").astype(str)
+
+    font_8 = Font(size=8)
+
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        # ── Hoja 1: Manual (nombre de columna + descripcion) ────────────────
+        manual_df = pd.DataFrame(
+            [(col, _COLUMN_DESCRIPTIONS.get(col, "")) for col in df_x.columns],
+            columns=["Columna", "Descripcion"],
+        )
+        manual_df.to_excel(writer, index=False, sheet_name="Manual")
+        ws_manual = writer.sheets["Manual"]
+        for col_idx, col_name in enumerate(manual_df.columns, start=1):
+            letter = get_column_letter(col_idx)
+            header_w = len(str(col_name))
+            data_w = int(manual_df[col_name].astype(str).str.len().max()) if len(manual_df) > 0 else 0
+            ws_manual.column_dimensions[letter].width = max(header_w, data_w) + 2
+            for row_idx in range(1, len(manual_df) + 2):
+                ws_manual.cell(row=row_idx, column=col_idx).font = font_8
+
+        # ── Hoja 2: datos ────────────────────────────────────────────────
+        df_x.to_excel(writer, index=False, sheet_name=sheet_name)
+        ws = writer.sheets[sheet_name]
+        n_rows = len(df_x)
+        money_fmt = '"S/. "#,##0.00'
+        money_col = df_x.columns.get_loc("VENTA_PERDIDA_CD") + 1 if "VENTA_PERDIDA_CD" in df_x.columns else None
+
+        for col_idx, col_name in enumerate(df_x.columns, start=1):
+            letter = get_column_letter(col_idx)
+            header_w = len(str(col_name))
+            data_w = int(df_x[col_name].astype(str).str.len().max()) if n_rows > 0 else 0
+            ws.column_dimensions[letter].width = max(header_w, data_w) + 2
+
+            for row_idx in range(1, n_rows + 2):  # fila 1 = cabecera
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.font = font_8
+                if col_idx == money_col and row_idx > 1:
+                    cell.number_format = money_fmt
+
+    buf.seek(0)
+    return buf
+
+
 # ============================================================================
 # MAIN RENDER
 # ============================================================================
@@ -758,10 +919,13 @@ def render_alertas_quiebre(conn):
         st.session_state.pop("alertas_data", None)
 
     if "alertas_data" not in st.session_state:
-        stock, ventas, maestra, comex, stock_higiene, tienda_dim, leadtimes, stock_cd_hist = _load_data(conn)
+        (
+            stock, ventas, maestra, comex, stock_higiene, tienda_dim, leadtimes,
+            stock_cd_hist, estado_imp,
+        ) = _load_data(conn)
         df = _build_alert_table(
             stock, ventas, maestra, comex, stock_higiene, tienda_dim,
-            leadtimes, stock_cd_hist,
+            leadtimes, stock_cd_hist, estado_imp,
         )
         st.session_state["alertas_data"] = df
 
@@ -868,7 +1032,7 @@ def render_alertas_quiebre(conn):
         "SEMAFORO", "ALERTA_OC", "DIAS_COBERTURA", "LT", "STOCK_TOTAL",
         "VENTA_DIARIA_PROM", "VENTA_TOTAL_90D", "VENTA_PERDIDA_CD",
         "FECHA_QUIEBRE_CD", "FECHA_QUIEBRE_EST", "DIAS_GAP_QUIEBRE_CD",
-        "TIENE_REPO", "PROXIMA_ETA", "QTY_EN_TRANSITO", "DIAS_GAP", "PARETO",
+        "TIENE_REPO", "PROXIMA_ETA", "ESTADO_IMPORTACION", "QTY_EN_TRANSITO", "DIAS_GAP", "PARETO",
     ]
     display_cols = ["SKU_PRODUCTO"] + maestra_order + metric_cols
     if "SUPERVISORES" in df_filt.columns:
@@ -902,6 +1066,8 @@ def render_alertas_quiebre(conn):
             fmt_df[col] = fmt_df[col].apply(
                 lambda x: x.strftime("%d/%m/%Y") if pd.notna(x) else "N/A"
             )
+    if "ESTADO_IMPORTACION" in fmt_df.columns:
+        fmt_df["ESTADO_IMPORTACION"] = fmt_df["ESTADO_IMPORTACION"].fillna("N/A")
 
     num_fmt_cols = [
         c for c in ["DIAS_COBERTURA", "LT", "VENTA_DIARIA_PROM",
@@ -911,10 +1077,19 @@ def render_alertas_quiebre(conn):
     column_config = {c: st.column_config.NumberColumn(format="%.0f") for c in num_fmt_cols}
     if "VENTA_PERDIDA_CD" in fmt_df.columns:
         column_config["VENTA_PERDIDA_CD"] = st.column_config.NumberColumn(format="S/ %.2f")
+    if "ESTADO_IMPORTACION" in fmt_df.columns:
+        column_config["ESTADO_IMPORTACION"] = st.column_config.TextColumn("Estado Importacion", width="small")
 
     st.dataframe(fmt_df, use_container_width=True, height=500, column_config=column_config)
 
     # ── Export ────────────────────────────────────────────────────────
     # Se exporta fmt_df (formateada) para que el CSV/Excel coincida con lo
     # que se ve en pantalla, no los valores crudos sin formato de df_display.
-    download_buttons(fmt_df, "alertas_quiebre")
+    # A pedido del negocio, la descarga se ordena por PARETO ascendente
+    # (1 = mayor venta primero); los SKU sin ranking (fuera de MIX/IN & OUT
+    # o fuera del 80%) quedan al final.
+    if "PARETO" in fmt_df.columns:
+        df_export = fmt_df.sort_values("PARETO", ascending=True, na_position="last").reset_index(drop=True)
+    else:
+        df_export = fmt_df
+    download_buttons(df_export, "alertas_quiebre", excel_buffer=_build_export_excel(df_export))

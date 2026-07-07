@@ -43,6 +43,7 @@ from db.queries import (
     QUERY_COMEX_FULL,
     QUERY_DASHBOARD_COMEX,
     QUERY_CUMPLIMIENTO_COMEX,
+    QUERY_ESTADO_IMPORTACION_SKU,
     QUERY_DASHBOARD_VENTAS_MTD,
     QUERY_DT_TIENDA,
     QUERY_INSTOCK_DAILY_CD,
@@ -634,6 +635,16 @@ def cumplimiento_comex(_conn_id, _conn=None) -> pd.DataFrame:
     return _run(QUERY_CUMPLIMIENTO_COMEX, _conn)
 
 
+@st.cache_data(ttl=TTL_COMEX, show_spinner=False)
+def estado_importacion_sku(_conn_id, _conn=None) -> pd.DataFrame:
+    """Estado de importacion real por PO/SKU (ft_cubo_comex), sin filtrar por
+    estado -> incluye OC previas a booking (ej. 'Sales Order'). Usado en
+    Alertas Quiebre para no perder el estado real de una OC pendiente detras
+    de otra OC ya cerrada del mismo SKU.
+    """
+    return _run(QUERY_ESTADO_IMPORTACION_SKU, _conn)
+
+
 @st.cache_data(ttl=TTL_DIARIO, show_spinner=False)
 def leadtimes(_conn_id, _conn=None) -> pd.DataFrame:
     """Lead times per SKU from coo_rel_proveedor_sku + maestra dims. Cached 24h."""
@@ -985,7 +996,7 @@ _ALL_CACHED = [
     instock_hist_tienda, instock_hist_cd,
     instock_daily_tienda, instock_daily_cd,
     abc_xyz_fsn,
-    comex_full, dashboard_comex, cumplimiento_comex,
+    comex_full, dashboard_comex, cumplimiento_comex, estado_importacion_sku,
     leadtimes,
     agotamiento,
     syncro_config, transito_sucursales, ventas_90d_sucursal,
@@ -1199,6 +1210,10 @@ class cached_query:
     @staticmethod
     def cumplimiento_comex(conn):
         return cumplimiento_comex(cached_query._cid(conn), _conn=conn)
+
+    @staticmethod
+    def estado_importacion_sku(conn):
+        return estado_importacion_sku(cached_query._cid(conn), _conn=conn)
 
     @staticmethod
     def leadtimes(conn):
