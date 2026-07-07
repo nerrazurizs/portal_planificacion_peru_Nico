@@ -1388,6 +1388,7 @@ def _build_ppt_history_chart(bc_hist, stock_hist, bc_proy=None, show_cost=False)
     _price_color = "#f59e0b"
     _moi_color = "#dc2626"
     _proy_color = COLORS.get("tertiary_blue", "#60a5fa")
+    _grid_color = "#e2e8f0"
     # Chart shows only the current calendar year (hist. through "today",
     # proyectado for the rest) — not the full multi-year history/horizon
     # that bc_hist/bc_proy carry, which would dilute the year-over-year
@@ -1396,31 +1397,63 @@ def _build_ppt_history_chart(bc_hist, stock_hist, bc_proy=None, show_cost=False)
     _chart_start = pd.Timestamp(year=_chart_year, month=1, day=1)
     _chart_end = pd.Timestamp(year=_chart_year, month=12, day=31)
 
+    # Stock viene en snapshots diarios (cq.stock_critico_metrics) — a ese
+    # detalle, barras angostas superpuestas se ven como un área rellena en
+    # vez de barras distinguibles. Se agrega a fin de mes (último valor del
+    # mes, no promedio/suma: STOCK/MOI son fotos de un momento) para que
+    # tenga la misma cadencia mensual — y el mismo ancho de barra — que la
+    # venta, y así se vean como barras reales.
+    if _has_stock:
+        stock_hist = (
+            stock_hist.set_index("FECHA")
+            .resample("MS").last()
+            .dropna(how="all")
+            .reset_index()
+        )
+        _has_stock = not stock_hist.empty
+
     def _monthly_axis(ax):
         """All months labeled (not matplotlib's auto-thinned default)."""
         ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%b-%y"))
-        ax.tick_params(axis="x", labelsize=6, labelrotation=90)
+        ax.tick_params(axis="x", labelsize=7.5, labelrotation=90)
 
-    # Wide aspect (vs the old 9.6x5.6) so the chart can be embedded near
-    # full slide width without becoming too tall — fixed margins instead of
-    # fig.tight_layout(): tight_layout (and savefig's bbox_inches="tight")
-    # each force a full extra render pass to measure label/title extents,
-    # which doubles total render time on a 300+ SKU line. dpi=100 keeps
-    # render time and embedded PNG size down.
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13.0, 3.4), dpi=100)
-    fig.subplots_adjust(left=0.06, right=0.94, top=0.85, bottom=0.36, hspace=3.6)
+    def _style_axes(ax):
+        """Fondo blanco corporativo: grilla horizontal sutil detrás de las
+        barras (zorder) y sin marco superior/derecho — look de dashboard
+        BI en vez de los ejes por defecto de matplotlib."""
+        ax.set_axisbelow(True)
+        ax.grid(axis="y", color=_grid_color, linewidth=0.8, zorder=0)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_color("#cbd5e1")
+        ax.spines["bottom"].set_color("#cbd5e1")
+
+    # Side-by-side (1x2) instead of stacked (2x1): two time-series charts
+    # stacked in a slide-width strip each end up ~1.5" tall and read as flat
+    # bands; side by side each gets the full strip height (~3.2") and looks
+    # like a proper dashboard panel (like the quadrants in a BI report).
+    # Fixed margins instead of fig.tight_layout(): tight_layout (and
+    # savefig's bbox_inches="tight") each force a full extra render pass to
+    # measure label/title extents, which doubles total render time on a
+    # 300+ SKU line. dpi=150 keeps the bars crisp on a projector.
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13.0, 3.4), dpi=150)
+    fig.patch.set_facecolor("white")
+    fig.subplots_adjust(left=0.045, right=0.955, top=0.86, bottom=0.30, wspace=0.32)
 
     if _has_hist or _has_proy:
         if _has_hist:
             ax1.bar(bc_hist["PERIODO"], bc_hist["CANTIDAD"], color=_primary,
-                    alpha=0.75, width=20, label="Venta real")
+                    alpha=0.95, width=20, edgecolor="white", linewidth=0.6,
+                    zorder=3, label="Venta real")
         _proy_und_col = "CANTIDAD_PROY"
         if _has_proy and _proy_und_col in bc_proy.columns:
             ax1.bar(bc_proy["PERIODO"], bc_proy[_proy_und_col], color=_proy_color,
-                    alpha=0.55, width=20, hatch="//", label="Venta proyectada")
-        ax1.set_ylabel("Unidades vendidas", fontsize=9)
-        ax1.tick_params(axis="y", labelsize=8)
+                    alpha=0.7, width=20, hatch="//", edgecolor=_proy_color,
+                    linewidth=0.5, zorder=2, label="Venta proyectada")
+        ax1.set_ylabel("Unidades vendidas", fontsize=10)
+        ax1.tick_params(axis="y", labelsize=9)
+        _style_axes(ax1)
         # Sin precio futuro confiable: la línea de precio usa solo bc_hist
         # (histórico real), por lo que se corta naturalmente en el mes actual.
         ax1b = None
@@ -1429,9 +1462,11 @@ def _build_ppt_history_chart(bc_hist, stock_hist, bc_proy=None, show_cost=False)
             if not _px.empty:
                 ax1b = ax1.twinx()
                 ax1b.plot(_px["PERIODO"], _px["PRECIO_PROM"], color=_price_color,
-                          marker="o", markersize=3, linewidth=1.5, label="Precio promedio")
-                ax1b.set_ylabel("Precio Neto ($)", fontsize=9)
-                ax1b.tick_params(axis="y", labelsize=8)
+                          marker="o", markersize=3.5, linewidth=1.8, zorder=4,
+                          label="Precio promedio")
+                ax1b.set_ylabel("Precio Neto ($)", fontsize=10)
+                ax1b.tick_params(axis="y", labelsize=9)
+                ax1b.spines["top"].set_visible(False)
         ax1.set_xlim(_chart_start, _chart_end)
         _monthly_axis(ax1)
         # Real legend (not hand-drawn caption text) — its swatches/lines are
@@ -1442,29 +1477,33 @@ def _build_ppt_history_chart(bc_hist, stock_hist, bc_proy=None, show_cost=False)
             _h1b, _l1b = ax1b.get_legend_handles_labels()
             _h1, _l1 = _h1 + _h1b, _l1 + _l1b
         if _h1:
-            ax1.legend(_h1, _l1, loc="upper center", bbox_to_anchor=(0.5, -1.3),
-                       ncol=len(_h1), fontsize=6.5, frameon=False,
-                       handlelength=1.4, columnspacing=1.1, handletextpad=0.4)
+            ax1.legend(_h1, _l1, loc="upper center", ncol=len(_h1), fontsize=7.5,
+                       framealpha=0.9, edgecolor="none", handlelength=1.3,
+                       columnspacing=1.0, handletextpad=0.4)
     else:
         ax1.text(0.5, 0.5, "Sin historial de ventas", ha="center", va="center",
                   fontsize=10, color=COLORS.get("status_at_risk", "#f59e0b"),
                   transform=ax1.transAxes)
-    ax1.set_title("Venta Histórica vs Precio Promedio", fontsize=11, color=_primary)
+    ax1.set_title("Venta Histórica vs Precio Promedio", fontsize=13, color=_primary,
+                  fontweight="bold")
 
     if _has_stock or _has_proy:
         _col = "STOCK_COSTO" if show_cost else "STOCK_UNIDADES"
         _label = "Stock ($)" if show_cost else "Stock (und)"
         if _has_stock and _col in stock_hist.columns:
             ax2.bar(stock_hist["FECHA"], stock_hist[_col], color=_primary,
-                    alpha=0.6, width=5, label=f"{_label} hist.")
+                    alpha=0.95, width=20, edgecolor="white", linewidth=0.6,
+                    zorder=3, label=f"{_label} hist.")
 
         _proy_col = "STOCK_FINAL_CLP" if show_cost else "STOCK_FINAL_TOTAL"
         if _has_proy and _proy_col in bc_proy.columns:
             ax2.bar(bc_proy["PERIODO"], bc_proy[_proy_col], color=_proy_color,
-                    alpha=0.55, width=20, hatch="//", label=f"{_label} proy.")
+                    alpha=0.7, width=20, hatch="//", edgecolor=_proy_color,
+                    linewidth=0.5, zorder=2, label=f"{_label} proy.")
 
-        ax2.set_ylabel(_label, fontsize=9)
-        ax2.tick_params(axis="y", labelsize=8)
+        ax2.set_ylabel(_label, fontsize=10)
+        ax2.tick_params(axis="y", labelsize=9)
+        _style_axes(ax2)
 
         ax2b = None
         if _has_stock and "MOI" in stock_hist.columns:
@@ -1472,7 +1511,8 @@ def _build_ppt_history_chart(bc_hist, stock_hist, bc_proy=None, show_cost=False)
             if not _moi_v.empty:
                 ax2b = ax2.twinx()
                 ax2b.plot(_moi_v["FECHA"], _moi_v["MOI"], color=_moi_color,
-                          marker="o", markersize=3, linewidth=1.5, label="MOI histórico")
+                          marker="o", markersize=3.5, linewidth=1.8, zorder=4,
+                          label="MOI histórico")
         if _has_proy and "MOI_PROY" in bc_proy.columns:
             _moi_proy_v = bc_proy[bc_proy["MOI_PROY"] > 0]
             if not _moi_proy_v.empty:
@@ -1482,13 +1522,14 @@ def _build_ppt_history_chart(bc_hist, stock_hist, bc_proy=None, show_cost=False)
                 # histórico vs proyectado is readable on its own, without
                 # depending on a legend/caption to tell them apart.
                 ax2b.plot(_moi_proy_v["PERIODO"], _moi_proy_v["MOI_PROY"], color=_proy_color,
-                          marker="o", markersize=3, linewidth=1.5, linestyle="--",
-                          label="MOI proyectado")
+                          marker="o", markersize=3.5, linewidth=1.8, linestyle="--",
+                          zorder=4, label="MOI proyectado")
         if ax2b is not None:
             ax2b.axhline(4, color="#16a34a", linestyle="--", linewidth=1, label="Ref. 4m")
             ax2b.axhline(12, color=_moi_color, linestyle="--", linewidth=1, label="Ref. 12m")
-            ax2b.set_ylabel("MOI (meses)", fontsize=9)
-            ax2b.tick_params(axis="y", labelsize=8)
+            ax2b.set_ylabel("MOI (meses)", fontsize=10)
+            ax2b.tick_params(axis="y", labelsize=9)
+            ax2b.spines["top"].set_visible(False)
 
         ax2.set_xlim(_chart_start, _chart_end)
         _monthly_axis(ax2)
@@ -1497,17 +1538,18 @@ def _build_ppt_history_chart(bc_hist, stock_hist, bc_proy=None, show_cost=False)
             _h2b, _l2b = ax2b.get_legend_handles_labels()
             _h2, _l2 = _h2 + _h2b, _l2 + _l2b
         if _h2:
-            ax2.legend(_h2, _l2, loc="upper center", bbox_to_anchor=(0.5, -1.3),
-                       ncol=min(len(_h2), 5), fontsize=6.5, frameon=False,
-                       handlelength=1.4, columnspacing=1.1, handletextpad=0.4)
+            ax2.legend(_h2, _l2, loc="upper center", ncol=min(len(_h2), 3), fontsize=7,
+                       framealpha=0.9, edgecolor="none", handlelength=1.3,
+                       columnspacing=1.0, handletextpad=0.4)
     else:
         ax2.text(0.5, 0.5, "Sin historial de inventario", ha="center", va="center",
                   fontsize=10, color=COLORS.get("status_at_risk", "#f59e0b"),
                   transform=ax2.transAxes)
-    ax2.set_title("Inventario Histórico y Proyectado vs MOI", fontsize=11, color=_primary)
+    ax2.set_title("Inventario Histórico y Proyectado vs MOI", fontsize=13, color=_primary,
+                  fontweight="bold")
 
     _buf = io.BytesIO()
-    fig.savefig(_buf, format="png", dpi=100)
+    fig.savefig(_buf, format="png", dpi=150, facecolor="white")
     plt.close(fig)
     _buf.seek(0)
     return _buf
@@ -2935,11 +2977,15 @@ _DIM_FILTER_COLS = {"Línea": "LINEA", "Sublínea": "SUBLINEA", "Marca": "MARCA"
 
 
 def _compute_sku_sales(skus, ventas_px, months=6):
-    """Total unidades vendidas por SKU en los últimos `months` meses.
+    """Venta neta (VN, en $) por SKU en los últimos `months` meses.
 
     Shared base for the Pareto cut (_compute_pareto_skus) and for sorting
     the per-SKU diagnostic list by venta (mayor a menor), since both need
-    the exact same ranking.
+    the exact same ranking. Se rankea por VN (NETO), no por unidades: un SKU
+    de bajo volumen pero alto precio pesa más en el negocio que uno de mucho
+    volumen barato, así que el 80/20 debe medirse sobre valor, no sobre und.
+    Fallback a CANTIDAD si no hay columna NETO (o suma cero) para no dejar el
+    ranking vacío.
     """
     _sales = pd.Series(0.0, index=skus)
     if ventas_px.empty or "SKU_PRODUCTO" not in ventas_px.columns:
@@ -2948,21 +2994,24 @@ def _compute_sku_sales(skus, ventas_px, months=6):
     if _v.empty or "PERIODO" not in _v.columns:
         return _sales
     _v["PERIODO"] = pd.to_datetime(_v["PERIODO"], errors="coerce")
+    _v["NETO"] = pd.to_numeric(_v.get("NETO", 0), errors="coerce").fillna(0)
     _v["CANTIDAD"] = pd.to_numeric(_v.get("CANTIDAD", 0), errors="coerce").fillna(0)
     _cutoff = pd.Timestamp.now().to_period("M").to_timestamp() - pd.DateOffset(months=months)
     _v = _v[_v["PERIODO"] >= _cutoff]
-    return _v.groupby("SKU_PRODUCTO")["CANTIDAD"].sum().reindex(skus, fill_value=0)
+    _vn = _v.groupby("SKU_PRODUCTO")["NETO"].sum().reindex(skus, fill_value=0)
+    if _vn.sum() <= 0:
+        return _v.groupby("SKU_PRODUCTO")["CANTIDAD"].sum().reindex(skus, fill_value=0)
+    return _vn
 
 
 def _compute_pareto_skus(pool, ventas_px, months=6, threshold=0.80):
-    """Return the subset of pool whose cumulative venta (unidades, últimos
+    """Return the subset of pool whose cumulative venta neta (VN en $, últimos
     `months` meses) cubre `threshold` (80% default) del total del grupo —
     el Pareto 80/20: los pocos SKUs que explican la mayoría de la venta.
 
-    Mirrors the FSN classification's methodology ("Pareto sobre unidades
-    vendidas") but scoped to the SKUs in `pool` instead of the whole catálogo,
-    so it reflects the 80% within whatever Línea/Sublínea/Marca/MIX is
-    currently selected.
+    Se mide sobre VN (valor), no sobre unidades, scoped a los SKUs en `pool`
+    en vez de todo el catálogo, así refleja el 80% dentro de la
+    Línea/Sublínea/Marca/MIX seleccionada.
     """
     if pool.empty or ventas_px.empty or "SKU_PRODUCTO" not in ventas_px.columns:
         return pool.iloc[0:0]
@@ -3009,7 +3058,7 @@ def _render_dim_filters(pool, key_prefix, ventas_px=None, show_pareto=False):
 
     if show_pareto and ventas_px is not None:
         _pareto_on = st.checkbox(
-            "📊 Pareto — ver solo los SKUs que hacen el 80% de la venta (6m)",
+            "📊 Pareto — ver solo los SKUs que hacen el 80% de la venta VN (6m)",
             value=False, key=f"{key_prefix}_pareto",
         )
         if _pareto_on:
@@ -3020,7 +3069,7 @@ def _render_dim_filters(pool, key_prefix, ventas_px=None, show_pareto=False):
                 st.caption(
                     f"Pareto: **{_pareto_pool['SKU_PRODUCTO'].nunique()}** de "
                     f"**{_filtered['SKU_PRODUCTO'].nunique()}** SKUs explican el 80% "
-                    f"de la venta (unidades, últimos 6 meses)."
+                    f"de la venta VN ($, últimos 6 meses)."
                 )
                 _filtered = _pareto_pool
 
@@ -3061,7 +3110,7 @@ def _render_group_diagnostic_panel(group_pool, ventas_px, conn, group_label, key
 
     st.markdown("##### Indicadores Agregados")
     _g = group_pool.copy()
-    for _c in ["STOCK_COSTO", "STOCK_UNIDADES", "MOI_HIST", "MOI_FC", "FC_COMPRA_CLP"]:
+    for _c in ["STOCK_COSTO", "STOCK_UNIDADES", "STOCK_CD_UND", "MOI_HIST", "MOI_FC", "FC_COMPRA_CLP"]:
         if _c not in _g.columns:
             _g[_c] = 0
         _g[_c] = pd.to_numeric(_g[_c], errors="coerce").fillna(0)
@@ -3084,7 +3133,7 @@ def _render_group_diagnostic_panel(group_pool, ventas_px, conn, group_label, key
 
     st.markdown("---")
     st.markdown(f"**Diagnóstico por SKU — {group_label}**")
-    # Orden Pareto: mayor a menor venta (unidades, 6m) — mismo ranking que
+    # Orden Pareto: mayor a menor venta VN ($, 6m) — mismo ranking que
     # decide el corte del 80% en el filtro Pareto. Se muestran TODOS los SKUs
     # del grupo (sin cap), solo se mantiene el orden.
     _g["_VENTA_6M"] = _g["SKU_PRODUCTO"].map(
@@ -3092,7 +3141,7 @@ def _render_group_diagnostic_panel(group_pool, ventas_px, conn, group_label, key
     )
     _g_capped = _g.sort_values("_VENTA_6M", ascending=False)
     _n_total = _g_capped["SKU_PRODUCTO"].nunique()
-    st.caption(f"{_n_total} SKUs de este grupo, ordenados de mayor a menor venta (Pareto).")
+    st.caption(f"{_n_total} SKUs de este grupo, ordenados de mayor a menor venta VN (Pareto).")
 
     # Batch-compute bc_hist/bc_proy for just the capped SKUs (one pass, not
     # per SKU) so each expander gets the same price-trend + FCST-projection
@@ -3125,7 +3174,8 @@ def _render_group_diagnostic_panel(group_pool, ventas_px, conn, group_label, key
     st.markdown("#### Generar Presentación Caso de Negocio")
     st.caption(
         f"Genera un PowerPoint con gráficas, KPIs y diagnóstico por cada SKU "
-        f"de **{group_label}**, organizado por criticidad y tipo de mix."
+        f"de **{group_label}**, en el mismo orden Pareto (mayor a menor venta) "
+        f"que el listado de arriba."
     )
 
     if st.button(f"📊 Generar PPT {group_label}", key=f"{key_prefix}_ppt_generate"):
@@ -3151,10 +3201,7 @@ def _render_group_diagnostic_panel(group_pool, ventas_px, conn, group_label, key
             )
 
             for _idx, (_, _row) in enumerate(
-                _g.sort_values(
-                    ["_ACCION_ORDER", "STOCK_COSTO"],
-                    ascending=[True, False],
-                ).iterrows()
+                _g.sort_values("_VENTA_6M", ascending=False).iterrows()
             ):
                 _ppt_sku = _row["SKU_PRODUCTO"]
                 _ppt_nom = str(_row.get("SKU_NOM_PRODUCTO", ""))[:60]
@@ -3192,6 +3239,9 @@ def _render_group_diagnostic_panel(group_pool, ventas_px, conn, group_label, key
                     "nombre": _ppt_nom,
                     "fig": _ppt_fig,
                     "diagnostics": _ppt_diag,
+                    "moi_actual": float(_row.get("MOI_HIST", 0) or 0),
+                    "stock_cd_und": float(_row.get("STOCK_CD_UND", 0) or 0),
+                    "stock_total_und": float(_row.get("STOCK_UNIDADES", 0) or 0),
                 })
 
             _progress.empty()
