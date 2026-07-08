@@ -5,6 +5,7 @@
 # ft_vcm: ID_PERIODO->fecha, COD_PRODUCTO->sku_producto, UNIDADES->cantidad, aporte computed
 # vw_producto: COD_PRODUCTO->sku_producto, DESCRIPCION_PRODUCTO->nom_producto,
 #              GRUPO->area, FAMILIA->sublinea, FEC_ULT_ING_CD->ultimo_ingreso_cd
+# ultimo_costo: viene de dt_producto.costo_calculado (no de vw_producto.costo)
 # ft_compras: NUMERO_OC->po, CODIGO_PRODUCTO_OC->sku_producto, CANTIDAD_OC->cantidad_final_corregida
 #             CANTIDAD_INGRESADA->cantidad_carpeta_recepcionada, MONTO_TOTAL_OC_MN->montomn
 #             FECHA_INGRESO_CD->fecha_recepcion_en_cd, FECHA_EMBARQUE->etd, FECHA_ETA->eta
@@ -38,39 +39,47 @@ _VCM = """(
 
 _PROD = """(
     SELECT
-        cod_producto            AS sku_producto,
-        descripcion_producto    AS nom_producto,
-        descripcion_producto    AS sku_nom_producto,
-        grupo                   AS area,
-        linea,
-        familia                 AS sublinea,
-        marca,
-        modelo,
-        CASE UPPER(TRIM(mix_oficial))
+        p.cod_producto            AS sku_producto,
+        p.descripcion_producto    AS nom_producto,
+        p.descripcion_producto    AS sku_nom_producto,
+        p.grupo                   AS area,
+        p.linea,
+        p.familia                 AS sublinea,
+        p.marca,
+        p.modelo,
+        CASE UPPER(TRIM(p.mix_oficial))
             WHEN 'MIX' THEN 'MIX'
             WHEN 'IO'  THEN 'IN & OUT'
             WHEN 'FM'  THEN 'FUERA MIX'
-            ELSE UPPER(TRIM(mix_oficial))
+            ELSE UPPER(TRIM(p.mix_oficial))
         END                         AS mix_oficial,
-        mix,
-        procedencia,
-        cod_proveedor,
-        proveedor,
-        costo                   AS ultimo_costo,
-        pvp,
-        precio_fob              AS costo_fob_usd,
-        tipo_cambio,
-        factor_importacion,
-        fec_ult_ing_cd          AS ultimo_ingreso_cd,
-        meses_ingreso_cd,
-        rango_meses_aging,
-        costo_proyectado,
-        sku_proveedor,
-        moderno,
-        outlet,
-        tradicional,
-        oferta
-    FROM db_dimensiones.dim.vw_producto
+        p.mix,
+        p.procedencia,
+        p.cod_proveedor,
+        p.proveedor,
+        dp.costo_calculado        AS ultimo_costo,
+        p.pvp,
+        p.precio_fob              AS costo_fob_usd,
+        p.tipo_cambio,
+        p.factor_importacion,
+        p.fec_ult_ing_cd          AS ultimo_ingreso_cd,
+        p.meses_ingreso_cd,
+        p.rango_meses_aging,
+        p.costo_proyectado,
+        p.sku_proveedor,
+        p.moderno,
+        p.outlet,
+        p.tradicional,
+        p.oferta
+    FROM db_dimensiones.dim.vw_producto p
+    LEFT JOIN (
+        SELECT cod_producto, costo_calculado
+        FROM db_dimensiones.dim.dt_producto
+        QUALIFY ROW_NUMBER() OVER (
+            PARTITION BY cod_producto
+            ORDER BY costo_calculado DESC NULLS LAST
+        ) = 1
+    ) dp ON p.cod_producto = dp.cod_producto
 )"""
 
 _COMPRAS = f"""(
@@ -102,8 +111,8 @@ _COMPRAS = f"""(
             TRY_TO_DATE(CAST(f.fecha_ingreso_cd AS VARCHAR), 'YYYY-MM-DD'),
             TRY_TO_DATE(CAST(f.fecha_ingreso_cd AS VARCHAR), 'YYYYMMDD')
         )                                                            AS fecha_recepcion_en_cd,
-        TRY_CAST(f.tipocambio AS FLOAT)                              AS paridad_moneda,
-        TRY_CAST(f.tipocambio AS FLOAT)                              AS dolar_sistema,
+        CAST(f.tipocambio AS FLOAT)                                  AS paridad_moneda,
+        CAST(f.tipocambio AS FLOAT)                                  AS dolar_sistema,
         CAST(f.moneda AS VARCHAR)                                    AS cod_moneda,
         CAST(f.codigo_proveedor_oc AS VARCHAR)                       AS cod_proveedor,
         f.situacion                                                  AS nom_status,
@@ -334,6 +343,82 @@ select
 from {_COMPRAS} c
 where c.fecha_recepcion_en_cd is null
   and c.cantidad_final_corregida > 0
+"""
+
+QUERY_CUMPLIMIENTO_COMEX = f"""
+with ingresos as (
+    select
+        trim(numero_oc)          as po,
+        trim(codigo_producto_oc) as sku_producto,
+        max(coalesce(
+            try_to_date(cast(fecha_ingreso_cd as varchar), 'YYYY-MM-DD'),
+            try_to_date(cast(fecha_ingreso_cd as varchar), 'YYYYMMDD')
+        ))                        as fecha_real_ingreso_almacen,
+        max(coalesce(
+            try_to_date(cast(fecha_cargoready as varchar), 'YYYY-MM-DD'),
+            try_to_date(cast(fecha_cargoready as varchar), 'YYYYMMDD')
+        ))                        as fecha_cargoready
+    from db_supply.fct.ft_compras
+    group by 1, 2
+)
+select
+    trim(c.po_numpedidocompra)  as po,
+    trim(c.si_codigoproducto)   as sku_producto,
+    c.si_descripcionproducto    as sku_nom_producto_comex,
+    c.estadoimportacion         as estado_importacion,
+    c.po_nombrepo                as nom_proveedor_comex,
+    c.po_codigoproveedor          as cod_proveedor,
+    c.po_cantidadpedida           as cantidad_pedida,
+    c.po_cantidadentregada        as cantidad_entregada,
+    c.po_valortotal               as valor_total_po,
+    c.valorizado_mn               as valorizado_mn,
+    c.ditms_almacen               as cod_almacen,
+    try_to_date(cast(c.po_fechadelivery as varchar), 'YYYYMMDD')             as po_fecha_delivery,
+    try_to_date(cast(c.po_fechaembarque as varchar), 'YYYYMMDD')            as po_fecha_embarque,
+    coalesce(
+        try_to_date(cast(c.di_etd as varchar), 'YYYYMMDD'),
+        try_to_date(cast(c.di_fechaembarque as varchar), 'YYYYMMDD')
+    )                                                                       as fecha_etd_real,
+    coalesce(
+        try_to_date(cast(c.di_fechaembarqueestimada as varchar), 'YYYYMMDD'),
+        try_to_date(cast(c.po_fechaembarque as varchar), 'YYYYMMDD')
+    )                                                                       as fecha_etd_estimado_vigente,
+    try_to_date(cast(c.di_fechaetacallao as varchar), 'YYYYMMDD')           as fecha_eta_puerto,
+    try_to_date(cast(c.po_fecha_ingalmacenestimado as varchar), 'YYYYMMDD') as po_fecha_ingreso_almacen_estimado,
+    try_to_date(cast(c.dinv_fechaingalmacenestimada as varchar), 'YYYYMMDD') as fecha_ingreso_almacen_estimado_vigente,
+    i.fecha_real_ingreso_almacen,
+    i.fecha_cargoready,
+    p.area, p.linea, p.sublinea, p.marca, p.mix_oficial, p.nom_producto,
+    p.proveedor as nom_proveedor_maestra
+from db_supply.fct.ft_cubo_comex c
+left join ingresos i
+    on trim(c.po_numpedidocompra) = i.po
+    and trim(c.si_codigoproducto) = i.sku_producto
+left join {_PROD} p
+    on trim(c.si_codigoproducto) = p.sku_producto
+where upper(trim(c.estadoimportacion)) in ('TRANSITO', 'RECIBIDO', 'CERRADO', 'SALES ORDER')
+"""
+
+# Estado de importacion por PO/SKU, SIN el filtro de estados de
+# QUERY_CUMPLIMIENTO_COMEX (que solo mira Transito/Recibido/Cerrado para medir
+# cumplimiento de embarque). Alertas Quiebre necesita el estado real de TODAS
+# las OC pendientes (incluye 'Sales Order', 'Solicitud PI' y otros previos a
+# booking), o un PO ya cerrado tapaba silenciosamente el estado real de un PO
+# pendiente del mismo SKU al agregar por SKU.
+#
+# Universo real de c.estadoimportacion (verificado en ft_cubo_comex):
+# Cerrado, Recibido (terminales) / Sales Order, Transito, Solicitud PI (en curso).
+# NO se usa ft_compras.fecha_ingreso_cd para decidir "pendiente": esa fecha
+# puede venir vacia en ft_compras aun cuando ft_cubo_comex ya marco el PO como
+# 'Cerrado' (cierre administrativo vs. recepcion fisica registrada por separado
+# y con demora) -> el estado real siempre es c.estadoimportacion tal cual viene.
+QUERY_ESTADO_IMPORTACION_SKU = """
+select
+    trim(c.po_numpedidocompra)  as po,
+    trim(c.si_codigoproducto)   as sku_producto,
+    c.estadoimportacion         as estado_importacion,
+    try_to_date(cast(c.po_fechadelivery as varchar), 'YYYYMMDD') as po_fecha_delivery
+from db_supply.fct.ft_cubo_comex c
 """
 
 QUERY_COMEX_BASE = f"""
@@ -678,6 +763,7 @@ inner join monthly_last ml
     and ds.fecha        = ml.ultima_fecha
 """
 
+
 # Ventas Ano Anterior completo
 QUERY_VENTAS_AA = f"""
 select
@@ -986,14 +1072,14 @@ ult_ing AS (
         MAX(c.fecha_recepcion_en_cd) AS fecha_ult_ing_cd
     FROM {_COMPRAS} c
     WHERE c.fecha_recepcion_en_cd IS NOT NULL
-      AND COALESCE(TRY_CAST(c.cantidad_carpeta_recepcionada AS FLOAT), 0) > 0
+      AND COALESCE(c.cantidad_carpeta_recepcionada, 0) > 0
     GROUP BY c.sku_producto
 ),
 qty_ult_ing AS (
     SELECT
         c.sku_producto,
         u.fecha_ult_ing_cd,
-        SUM(COALESCE(TRY_CAST(c.cantidad_carpeta_recepcionada AS FLOAT), 0)) AS qty_recibida
+        SUM(COALESCE(c.cantidad_carpeta_recepcionada, 0)) AS qty_recibida
     FROM {_COMPRAS} c
     INNER JOIN ult_ing u
         ON  c.sku_producto          = u.sku_producto
@@ -1018,7 +1104,7 @@ vtas_desde_ing AS (
     FROM {_VCM} v
     INNER JOIN qty_ult_ing q ON v.sku_producto = q.sku_producto
     WHERE v.fecha >= q.fecha_ult_ing_cd
-      AND COALESCE(NULLIF(CAST(v.flg_eliminado AS VARCHAR), ''), '0') = '0'
+      AND COALESCE(v.flg_eliminado, 0) = 0
     GROUP BY v.sku_producto
 )
 SELECT
@@ -2665,6 +2751,42 @@ WHERE fecha >= DATEADD('day', -90, CURRENT_DATE())
 GROUP BY 1, 2
 """
 
+# Perfil por SKU x Sucursal — combinaciones con min_inv_requerido > 0 en Syncro.
+QUERY_PERFIL_SKU_CCOSTO = """
+SELECT
+    CAST(c.id_material AS VARCHAR) AS sku_producto,
+    CAST(c.id_sucursal AS VARCHAR) AS cod_ccosto
+FROM db_syncros.public.coo_config_sku_sucursal c
+WHERE c.min_inv_requerido > 0
+"""
+
+# Stock por SKU x bodega (tienda) x mes — ultimos 4 meses cerrados.
+# Toma el stock del ultimo dia disponible de cada mes por bodega.
+QUERY_ALERTA_STOCK_TIENDA_MENSUAL = """
+WITH ultimo_dia_mes AS (
+    SELECT
+        sku_producto,
+        LPAD(CAST(cod_bodega AS VARCHAR), 4, '0') AS cod_ccosto,
+        DATE_TRUNC('month', fecha)                AS periodo,
+        MAX(fecha)                                AS ultima_fecha
+    FROM db_supply.hst.ht_in_stock
+    WHERE fecha >= DATEADD('month', -4, DATE_TRUNC('month', CURRENT_DATE()))
+      AND fecha <  DATE_TRUNC('month', CURRENT_DATE())
+    GROUP BY 1, 2, 3
+)
+SELECT
+    s.sku_producto,
+    u.cod_ccosto,
+    u.periodo,
+    SUM(s.stock_unidades) AS stock_unidades
+FROM db_supply.hst.ht_in_stock s
+INNER JOIN ultimo_dia_mes u
+    ON  s.sku_producto = u.sku_producto
+    AND LPAD(CAST(s.cod_bodega AS VARCHAR), 4, '0') = u.cod_ccosto
+    AND s.fecha        = u.ultima_fecha
+GROUP BY 1, 2, 3
+"""
+
 # Perfil por SKU — último snapshot disponible en ht_in_stock.
 # Devuelve SI si el SKU tiene perfil en alguna tienda, NO en caso contrario.
 QUERY_PERFIL_SKU = """
@@ -2939,9 +3061,6 @@ WHERE v.fecha >= DATEADD('week', -8, DATE_TRUNC('week', CURRENT_DATE()))
 GROUP BY 1, 2, 3
 """
 
-# ============================================================
-# ANALISIS FORECAST — ventas unitarias mensuales (36 meses)
-# ============================================================
 QUERY_FORECAST_VCM_HISTORICO = f"""
 SELECT
     a.sku_producto,

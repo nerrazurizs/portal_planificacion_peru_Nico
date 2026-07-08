@@ -68,6 +68,22 @@ echo ========================================
 echo   INSTALANDO DEPENDENCIAS
 echo ========================================
 echo.
+:: Crear el entorno virtual si no existe todavia.
+if not exist "venv\Scripts\python.exe" (
+    if not exist ".venv\Scripts\python.exe" (
+        echo Creando entorno virtual venv\ ...
+        python -m venv venv
+        if %ERRORLEVEL% NEQ 0 (
+            echo.
+            echo [ERROR] No se pudo crear el entorno virtual.
+            echo         Asegurate de tener Python 3.9+ instalado y en el PATH.
+            echo.
+            goto fin
+        )
+        echo Entorno virtual creado.
+        echo.
+    )
+)
 :: pip install -r requirements.txt — usa el venv local si existe.
 :: Si requirements.txt no cambio, pip es rapido (todas dependencies satisfechas).
 :: Si hay paquetes nuevos (ej: streamlit-pivot), los instala automaticamente.

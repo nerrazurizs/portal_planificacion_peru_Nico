@@ -15,9 +15,12 @@ ALL_MODULES = [
     "Maestra Productos",
     "Stock",
     "Comex",
+    "Cumplimiento Comex",
     "Tablas Syncro",
     "Generador Forecast",
     "Proyeccion Stock",
+    "Diagnostico Fcst Manual",
+    "Correccion Fcst Compra",
     "Frinc Detalle",
     "Plan de Compras & OTB",
     "In-Out bound",
@@ -57,6 +60,8 @@ ALL_MODULES = [
     "Flujo de Costos",
     "Analisis Contenedor",
     "Analisis Forecast",
+    "Carga Perfil",
+    "Proyecto A",
 ]
 
 
